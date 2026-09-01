@@ -1,0 +1,2635 @@
+;;; chirp-backend.el --- Backend adapters for Chirp -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026
+;; SPDX-License-Identifier: MIT
+
+;;; Commentary:
+
+;; Adapt X web responses into Chirp's normalized model, share short-lived read
+;; results, and orchestrate authenticated write workflows.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'subr-x)
+(require 'ucs-normalize)
+(require 'chirp-core)
+(require 'chirp-x)
+(require 'chirp-xchat)
+(require 'chirp-url)
+(declare-function chirp-xchat-native-prepare-text
+                  "chirp-xchat-native" (conversation-id text &optional attachments))
+(declare-function chirp-xchat-native-prepare-reply
+                  "chirp-xchat-native"
+                  (conversation-id text target-event key-events
+                                   &optional attachments))
+(declare-function chirp-xchat-native-prepare-reaction
+                  "chirp-xchat-native"
+                  (conversation-id target-event emoji remove-p))
+(declare-function chirp-xchat-native-prepare-media-file
+                  "chirp-xchat-native" (conversation-id file))
+(declare-function chirp-xchat-native-release-media-stage
+                  "chirp-xchat-native" (stage-id))
+
+;;; Options
+
+(defcustom chirp-backend-read-cache-ttl 15
+  "Seconds to keep successful thread/profile/article reads in memory.
+
+When zero or negative, the in-memory read cache is disabled."
+  :type 'number
+  :group 'chirp)
+
+;;; Constants
+
+(defconst chirp-backend--lists-cache-key '(:lists)
+  "Cache key for the authenticated account's list catalog.")
+
+(defconst chirp-backend-standard-tweet-weight-limit 280
+  "Maximum weighted length routed through CreateTweet.")
+
+(defconst chirp-backend--transformed-url-length 23
+  "Weighted length assigned to each URL by X.")
+
+(defconst chirp-backend--weight-one-ranges
+  '((#x0000 . #x10ff)
+    (#x2000 . #x200d)
+    (#x2010 . #x201f)
+    (#x2032 . #x2037))
+  "Unicode ranges whose ordinary X text weight is one.")
+
+(defconst chirp-backend--emoji-base-ranges
+  '((#x2190 . #x21ff)
+    (#x2300 . #x23ff)
+    (#x2600 . #x27bf)
+    (#x1f000 . #x1faff)
+    (#x1fc00 . #x1ffff))
+  "Unicode ranges recognized as emoji sequence bases.")
+
+(defconst chirp-backend--emoji-bases
+  '(#x00a9 #x00ae #x203c #x2049 #x2122 #x2139
+    #x3030 #x303d #x3297 #x3299)
+  "Individual Unicode code points recognized as emoji sequence bases.")
+
+(defconst chirp-backend--tweet-url-regexp
+  (concat
+   "\\(?:https?://[^[:space:]<>{}\\\"']+"
+   "\\|[[:alnum:]][[:alnum:]-]*"
+   "\\(?:\\.[[:alnum:]-]+\\)+"
+   "\\(?::[0-9]+\\)?"
+   "\\(?:[/#?][^[:space:]<>{}\\\"']*\\)?\\)")
+  "Compact URL regexp used only for tweet operation routing.")
+
+(defconst chirp-backend--tweet-features
+  '(("rweb_cashtags_enabled" . t)
+    ("profile_label_improvements_pcf_label_in_post_enabled" . t)
+    ("responsive_web_profile_redirect_enabled" . t)
+    ("creator_subscriptions_tweet_preview_api_enabled" . t)
+    ("responsive_web_graphql_timeline_navigation_enabled" . t)
+    ("communities_web_enable_tweet_community_results_fetch" . t)
+    ("c9s_tweet_anatomy_moderator_badge_enabled" . t)
+    ("rweb_cashtags_composer_attachment_enabled" . t)
+    ("responsive_web_jetfuel_frame" . t)
+    ("responsive_web_grok_share_attachment_enabled" . t)
+    ("responsive_web_grok_annotations_enabled" . t)
+    ("articles_preview_enabled" . t)
+    ("responsive_web_edit_tweet_api_enabled" . t)
+    ("graphql_is_translatable_rweb_tweet_is_translatable_enabled" . t)
+    ("view_counts_everywhere_api_enabled" . t)
+    ("longform_notetweets_consumption_enabled" . t)
+    ("responsive_web_twitter_article_tweet_consumption_enabled" . t)
+    ("content_disclosure_indicator_enabled" . t)
+    ("content_disclosure_ai_generated_indicator_enabled" . t)
+    ("responsive_web_grok_show_grok_translated_post" . t)
+    ("responsive_web_grok_analysis_button_from_backend" . t)
+    ("freedom_of_speech_not_reach_fetch_enabled" . t)
+    ("standardized_nudges_misinfo" . t)
+    ("tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled" . t)
+    ("longform_notetweets_rich_text_read_enabled" . t)
+    ("responsive_web_grok_image_annotation_enabled" . t)
+    ("responsive_web_grok_imagine_annotation_enabled" . t)
+    ("responsive_web_grok_community_note_auto_translation_is_enabled" . t))
+  "Feature switches documented for current tweet GraphQL operations.")
+
+(defconst chirp-backend--tweet-field-toggles
+  '(("withPayments" . t)
+    ("withAuxiliaryUserLabels" . t)
+    ("withArticleRichContentState" . t)
+    ("withArticlePlainText" . t)
+    ("withArticleSummaryText" . t)
+    ("withArticleVoiceOver" . t)
+    ("withGrokAnalyze" . t)
+    ("withDisallowedReplyControls" . t))
+  "Field toggles requested by tweet-bearing read operations.")
+
+(defconst chirp-backend--edit-history-features
+  (append
+   chirp-backend--tweet-features
+   '(("responsive_web_grok_analyze_post_followups_enabled" . t)
+     ("longform_notetweets_inline_media_enabled" . :json-false)
+     ("post_ctas_fetch_enabled" . :json-false)
+     ("premium_content_api_read_enabled" . :json-false)
+     ("responsive_web_enhance_cards_enabled" . :json-false)
+     ("responsive_web_grok_analyze_button_fetch_trends_enabled" . :json-false)
+     ("rweb_conversational_replies_downvote_enabled" . :json-false)
+     ("rweb_tipjar_consumption_enabled" . :json-false)
+     ("rweb_video_screen_enabled" . :json-false)
+     ("verified_phone_label_enabled" . :json-false)))
+  "Feature switches used by X's TweetEditHistory operation.")
+
+(defconst chirp-backend--note-tweet-features
+  (append
+   '(("longform_notetweets_creation_enabled" . t)
+     ("longform_notetweets_richtext_consumption_enabled" . t)
+     ("articles_preview_enabled" . t)
+     ("tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled"
+      . t))
+   chirp-backend--tweet-features)
+  "Feature switches required by CreateNoteTweet.")
+
+(defconst chirp-backend--user-features
+  '(("hidden_profile_subscriptions_enabled" . t)
+    ("rweb_tipjar_consumption_enabled" . t)
+    ("responsive_web_graphql_exclude_directive_enabled" . t)
+    ("subscriptions_verification_info_is_identity_verified_enabled" . t)
+    ("subscriptions_verification_info_verified_since_enabled" . t)
+    ("highlights_tweets_tab_ui_enabled" . t)
+    ("responsive_web_twitter_article_notes_tab_enabled" . t)
+    ("subscriptions_feature_can_gift_premium" . t)
+    ("creator_subscriptions_tweet_preview_api_enabled" . t)
+    ("responsive_web_graphql_timeline_navigation_enabled" . t))
+  "Feature switches used to resolve an X profile.")
+
+;;; Operations
+
+(defconst chirp-backend--operations
+  `((home
+     :query-id "wp06oo3fRGU4P1sK8rECqQ" :name "HomeTimeline"
+     :features ,chirp-backend--tweet-features
+     :field-toggles ,chirp-backend--tweet-field-toggles)
+    (following
+     :query-id "BLQWpfVqtgBqAqwRRJcJjA" :name "HomeLatestTimeline"
+     :features ,chirp-backend--tweet-features
+     :field-toggles ,chirp-backend--tweet-field-toggles)
+    (user
+     :query-id "1VOOyvKkiI3FMmkeDNxM9A" :name "UserByScreenName"
+     :features ,chirp-backend--user-features)
+    (viewer
+     :query-id "5XShkXk2oO2J7SYmTu6pvw" :name "Viewer"
+     :features (("profile_label_improvements_pcf_label_in_post_enabled" . t)
+                ("responsive_web_profile_redirect_enabled" . t)
+                ("creator_subscriptions_tweet_preview_api_enabled" . t)
+                ("responsive_web_graphql_timeline_navigation_enabled" . t)))
+    (user-tweets
+     :query-id "q6xj5bs0hapm9309hexA_g" :name "UserTweets"
+     :field-toggles ,chirp-backend--tweet-field-toggles
+     :features ,chirp-backend--tweet-features)
+    (user-highlights
+     :query-id "70Yf8aSyhGOXaKRLJdVA2A" :name "UserHighlightsTweets"
+     :field-toggles ,chirp-backend--tweet-field-toggles
+     :features ,chirp-backend--tweet-features)
+    (user-media
+     :query-id "1H9ibIdchWO0_vz3wJLDTA" :name "UserMedia"
+     :field-toggles ,chirp-backend--tweet-field-toggles
+     :features ,chirp-backend--tweet-features)
+    (likes
+     :query-id "lIDpu_NWL7_VhimGGt0o6A" :name "Likes"
+     :field-toggles ,chirp-backend--tweet-field-toggles
+     :features ,chirp-backend--tweet-features)
+    (search
+     :query-id "VhUd6vHVmLBcw0uX-6jMLA" :name "SearchTimeline" :method post
+     :field-toggles ,chirp-backend--tweet-field-toggles
+     :features ,chirp-backend--tweet-features)
+    (bookmarks
+     :query-id "2neUNDqrrFzbLui8yallcQ" :name "Bookmarks"
+     :field-toggles ,chirp-backend--tweet-field-toggles
+     :features ,chirp-backend--tweet-features)
+    (notifications
+     :query-id "-S_pMlnJKTY3uUdlVKpK9w" :name "NotificationsTimeline"
+     :field-toggles ,chirp-backend--tweet-field-toggles
+     :features ,chirp-backend--tweet-features)
+    (dm-inbox-initial
+     :query-id "8ryvCvaARbYYM1zXie8Q9g" :name "GetInitialXChatPageQuery")
+    (dm-inbox-page
+     :query-id "y0suNygAgPHjFLjckw8g0A" :name "GetInboxPageRequestQuery")
+    (dm-conversation-data
+     :query-id "oTnhJ-aaKi0FN4dcWg3iBg"
+     :name "GetInboxPageConversationDataQuery")
+    (dm-conversation-page
+     :query-id "GX9ZijkxG8AqRMQVD7hMnQ" :name "GetConversationPageQuery")
+    (dm-public-keys
+     :query-id "nyLCqvDlxI4YoEBf-2ARmQ" :name "GetPublicKeysQuery")
+    (dm-send
+     :query-id "TWRPP7gnKwV_R8-tE-Dd3Q"
+     :name "SendMessageCreateMutation" :method post)
+    (dm-live-token
+     :query-id "Qh3fZRjPPtPoHYR_2sCZsA"
+     :name "GenerateXChatTokenMutation" :method post)
+    (list
+     :query-id "RlZzktZY_9wJynoepm8ZsA" :name "ListLatestTweetsTimeline"
+     :field-toggles ,chirp-backend--tweet-field-toggles
+     :features ,chirp-backend--tweet-features)
+    (thread
+     :query-id "XMOz5h24KAZ86qKffKTLdQ" :name "TweetDetail"
+     :features ,chirp-backend--tweet-features
+     :field-toggles ,chirp-backend--tweet-field-toggles)
+    (article
+     :query-id "GZsN2Pc4knAoit6pXa4HSA" :name "TweetResultByRestId"
+     :features ,(cons '("articles_preview_enabled" . t)
+                      chirp-backend--tweet-features)
+     :field-toggles ,chirp-backend--tweet-field-toggles)
+    (edit-history
+     :query-id "1izbuOcH_QpuMcyCxOXkAg" :name "TweetEditHistory"
+     :features ,chirp-backend--edit-history-features)
+    (create-tweet
+     :query-id "IID9x6WsdMnTlXnzXGq8ng" :name "CreateTweet" :method post
+     :features ,chirp-backend--tweet-features)
+    (create-note-tweet
+     :query-id "dAlh5Gh9rR5pKk4HU4vW8g" :name "CreateNoteTweet" :method post
+     :features ,chirp-backend--note-tweet-features)
+    (delete-tweet
+     :query-id "VaenaVgh5q5ih7kvyVjgtg" :name "DeleteTweet" :method post)
+    (favorite
+     :query-id "lI07N6Otwv1PhnEgXILM7A" :name "FavoriteTweet" :method post)
+    (unfavorite
+     :query-id "ZYKSe-w7KEslx3JhSIk5LA" :name "UnfavoriteTweet" :method post)
+    (retweet
+     :query-id "ojPdsZsimiJrUGLR1sjUtA" :name "CreateRetweet" :method post)
+    (unretweet
+     :query-id "iQtK4dl5hBmXewYZuEOKVw" :name "DeleteRetweet" :method post)
+    (bookmark
+     :query-id "aoDbu3RHznuiSkQ9aNM67Q" :name "CreateBookmark" :method post)
+    (unbookmark
+     :query-id "Wlmlj2-xzyS1GN3a6cj-mQ" :name "DeleteBookmark" :method post)
+    (create-draft-tweet
+     :query-id "cH9HZWz_EW9gnswvA4ZRiQ" :name "CreateDraftTweet" :method post)
+    (edit-draft-tweet
+     :query-id "JIeXE-I6BZXHfxsgOkyHYQ" :name "EditDraftTweet" :method post)
+    (create-scheduled-tweet
+     :query-id "LCVzRQGxOaGnOnYH01NQXg" :name "CreateScheduledTweet"
+     :method post)
+    (edit-scheduled-tweet
+     :query-id "_mHkQ5LHpRRjSXKOcG6eZw" :name "EditScheduledTweet"
+     :method post)
+    (fetch-draft-tweets
+     :query-id "L9RqKWmAWxK6vGtR3Qdsxw" :name "FetchDraftTweets")
+    (fetch-scheduled-tweets
+     :query-id "H2elmT2R9DLhWoo0DZFNkA" :name "FetchScheduledTweets")
+    (delete-draft-tweet
+     :query-id "bkh9G3FGgTldS9iTKWWYYw" :name "DeleteDraftTweet" :method post)
+    (delete-scheduled-tweet
+     :query-id "CTOVqej0JBXAZSwkp1US0g" :name "DeleteScheduledTweet"
+     :method post))
+  "Persisted X web operations used by Chirp's direct backend.")
+
+(defconst chirp-backend--user-timeline-paths
+  '(("data" "user" "result" "timeline" "timeline")
+    ("data" "user" "result" "timeline_v2" "timeline"))
+  "Alternative paths to an X user timeline object.")
+
+(defun chirp-backend--operation (key)
+  "Return the persisted X operation identified by KEY."
+  (or (cdr (assq key chirp-backend--operations))
+      (error "Unknown X operation: %S" key)))
+
+;;; Read Cache
+
+(defun chirp-backend-clear-cache ()
+  "Clear the current session's completed in-memory read cache."
+  (interactive)
+  (clrhash (chirp--session-backend-read-cache (chirp--session))))
+
+(defun chirp-backend--clone-data (value)
+  "Return VALUE copied deeply enough for safe cache reuse."
+  (if (consp value)
+      (copy-tree value)
+    value))
+
+(defun chirp-backend--normalize-handle (handle)
+  "Return HANDLE normalized for cache lookup."
+  (downcase (string-remove-prefix "@" (format "%s" handle))))
+
+(defun chirp-backend-invalidate-thread (tweet-id)
+  "Drop cached thread and article data for TWEET-ID."
+  (remhash (list :thread tweet-id)
+           (chirp--session-backend-read-cache (chirp--session)))
+  (chirp-backend-invalidate-article tweet-id))
+
+(defun chirp-backend-invalidate-article (tweet-id)
+  "Drop cached article data for TWEET-ID."
+  (remhash (list :article tweet-id)
+           (chirp--session-backend-read-cache (chirp--session))))
+
+(defun chirp-backend-invalidate-edit-history (tweet-id)
+  "Drop cached edit history for TWEET-ID."
+  (remhash (list :edit-history tweet-id)
+           (chirp--session-backend-read-cache (chirp--session))))
+
+(defun chirp-backend-invalidate-user (handle)
+  "Drop cached profile metadata and posts for HANDLE."
+  (let ((cache (chirp--session-backend-read-cache (chirp--session)))
+        (handle (chirp-backend--normalize-handle handle)))
+    (dolist (key (list (list :user handle)
+                       (list :user-posts handle)
+                       (list :profile-timeline handle 'replies)
+                       (list :profile-timeline handle 'highlights)
+                       (list :profile-timeline handle 'media)
+                       (list :followers handle)
+                       (list :following-users handle)))
+      (remhash key cache))))
+
+(defun chirp-backend--cache-entry-live-p (entry now)
+  "Return non-nil when cached ENTRY is still fresh at NOW."
+  (and entry
+       (> chirp-backend-read-cache-ttl 0)
+       (numberp (plist-get entry :expires-at))
+       (> (plist-get entry :expires-at) now)))
+
+(defun chirp-backend--cached-result (key cache)
+  "Return KEY's cached result from CACHE, or nil when absent or expired."
+  (let* ((now (float-time))
+         (entry (gethash key cache)))
+    (cond
+     ((chirp-backend--cache-entry-live-p entry now)
+      entry)
+     (entry
+      (remhash key cache)
+      nil)
+     (t nil))))
+
+(defun chirp-backend--report-requester-error (err)
+  "Report one cached-read requester ERR without starving its peers."
+  (display-warning
+   'chirp-backend
+   (format "Chirp cached-read callback failed: %s"
+           (error-message-string err))
+   :warning))
+
+(defun chirp-backend--dispatch-read-success (requesters value envelope)
+  "Invoke all REQUESTERS with VALUE and ENVELOPE."
+  (dolist (requester requesters)
+    (condition-case err
+        (funcall (car requester)
+                 (chirp-backend--clone-data value)
+                 (chirp-backend--clone-data envelope))
+      (error (chirp-backend--report-requester-error err)))))
+
+(defun chirp-backend--dispatch-read-error (requesters message)
+  "Invoke all REQUESTERS' error callbacks with MESSAGE."
+  (dolist (requester requesters)
+    (condition-case err
+        (funcall (or (cdr requester)
+                     (lambda (text)
+                       (message "%s" text)))
+                 message)
+      (error (chirp-backend--report-requester-error err)))))
+
+(defun chirp-backend--cached-read (key fetcher callback &optional errback)
+  "Fetch KEY via FETCHER and serve CALLBACK from the short-lived read cache.
+
+ERRBACK handles failures.  FETCHER is called with success and error callbacks."
+  (let* ((session (chirp--session))
+         (cache (chirp--session-backend-read-cache session))
+         (pending-table (chirp--session-backend-pending-reads session)))
+    (if-let* ((entry (chirp-backend--cached-result key cache)))
+        (funcall callback
+                 (chirp-backend--clone-data (plist-get entry :value))
+                 (chirp-backend--clone-data (plist-get entry :envelope)))
+      (let ((pending (gethash key pending-table)))
+        (if pending
+            (puthash key
+                     (append pending (list (cons callback errback)))
+                     pending-table)
+          (puthash key (list (cons callback errback)) pending-table)
+          (condition-case err
+              (funcall
+               fetcher
+               (lambda (value envelope)
+                 (let ((requesters
+                        (prog1 (gethash key pending-table)
+                          (remhash key pending-table))))
+                   (when (> chirp-backend-read-cache-ttl 0)
+                     (puthash
+                      key
+                      (list :value (chirp-backend--clone-data value)
+                            :envelope (chirp-backend--clone-data envelope)
+                            :expires-at (+ (float-time)
+                                           chirp-backend-read-cache-ttl))
+                      cache))
+                   (chirp-backend--dispatch-read-success
+                    requesters value envelope)))
+               (lambda (message)
+                 (let ((requesters
+                        (prog1 (gethash key pending-table)
+                          (remhash key pending-table))))
+                   (chirp-backend--dispatch-read-error requesters message))))
+            (error
+             (let ((requesters
+                    (prog1 (gethash key pending-table)
+                      (remhash key pending-table))))
+               (chirp-backend--dispatch-read-error
+                requesters
+                (error-message-string err))))))))))
+
+;;; Tweet Length
+
+(defun chirp-backend--codepoint-in-ranges-p (codepoint ranges)
+  "Return non-nil when CODEPOINT belongs to one of RANGES."
+  (cl-some (lambda (range)
+             (<= (car range) codepoint (cdr range)))
+           ranges))
+
+(defun chirp-backend--emoji-base-p (codepoint)
+  "Return non-nil when CODEPOINT can start an emoji sequence."
+  (or (memq codepoint chirp-backend--emoji-bases)
+      (chirp-backend--codepoint-in-ranges-p
+       codepoint chirp-backend--emoji-base-ranges)))
+
+(defun chirp-backend--consume-emoji-suffix (text index limit)
+  "Return the end of emoji suffix characters in TEXT from INDEX to LIMIT."
+  (while (and (< index limit)
+              (let ((codepoint (aref text index)))
+                (or (memq codepoint '(#xfe0e #xfe0f))
+                    (<= #x1f3fb codepoint #x1f3ff)
+                    (<= #xe0020 codepoint #xe007f))))
+    (setq index (1+ index)))
+  index)
+
+(defun chirp-backend--registered-emoji-sequence-end (text index)
+  "Return the registered Unicode emoji sequence end in TEXT at INDEX."
+  (let ((rules (char-table-range composition-function-table
+                                 (aref text index)))
+        end)
+    (dolist (rule rules end)
+      (when (and (vectorp rule)
+                 (> (length rule) 2)
+                 (stringp (aref rule 0))
+                 (memq (aref rule 2)
+                       '(compose-gstring-for-graphic
+                         compose-gstring-and-emoji)))
+        (save-match-data
+          (when (and (string-match (aref rule 0) text index)
+                     (= (match-beginning 0) index))
+            (setq end (max (or end 0) (match-end 0)))))))))
+
+(defun chirp-backend--emoji-sequence-end (text index limit)
+  "Return the emoji sequence end in TEXT at INDEX before LIMIT, or nil."
+  (let ((codepoint (aref text index)))
+    (cond
+     ((memq codepoint '(35 42 48 49 50 51 52 53 54 55 56 57))
+      (let ((cursor (1+ index)))
+        (when (and (< cursor limit) (= (aref text cursor) #xfe0f))
+          (setq cursor (1+ cursor)))
+        (and (< cursor limit)
+             (= (aref text cursor) #x20e3)
+             (1+ cursor))))
+     ((<= #x1f1e6 codepoint #x1f1ff)
+      (if (and (< (1+ index) limit)
+               (<= #x1f1e6 (aref text (1+ index)) #x1f1ff))
+          (+ index 2)
+        (1+ index)))
+     ((chirp-backend--emoji-base-p codepoint)
+      (or (let ((registered-end
+                 (chirp-backend--registered-emoji-sequence-end text index)))
+            (and registered-end
+                 (<= registered-end limit)
+                 registered-end))
+          (chirp-backend--consume-emoji-suffix
+           text (1+ index) limit))))))
+
+(defun chirp-backend--tweet-character-weight (codepoint)
+  "Return X's ordinary text weight for CODEPOINT."
+  (if (chirp-backend--codepoint-in-ranges-p
+       codepoint chirp-backend--weight-one-ranges)
+      1
+    2))
+
+(defun chirp-backend--weighted-text-segment (text start end)
+  "Return X's weighted length for TEXT between START and END."
+  (let ((index start)
+        (weight 0))
+    (while (< index end)
+      (if-let* ((emoji-end
+                 (chirp-backend--emoji-sequence-end text index end)))
+          (setq weight (+ weight 2)
+                index emoji-end)
+        (setq weight
+              (+ weight
+                 (chirp-backend--tweet-character-weight (aref text index)))
+              index (1+ index))))
+    weight))
+
+(defun chirp-backend--trim-tweet-url-end (text start end)
+  "Return URL END in TEXT after trimming prose punctuation from START."
+  (while (and (> end start)
+              (memq (aref text (1- end))
+                    '(46 44 33 63 58 59 39 34)))
+    (setq end (1- end)))
+  (dolist (pair '((40 . 41) (91 . 93) (123 . 125)))
+    (while (and (> end start)
+                (= (aref text (1- end)) (cdr pair))
+                (> (cl-count (cdr pair) text :start start :end end)
+                   (cl-count (car pair) text :start start :end end)))
+      (setq end (1- end))))
+  end)
+
+(defun chirp-backend--tweet-url-spans (text)
+  "Return likely URL (START . END) spans in TEXT."
+  (let ((case-fold-search t)
+        (cursor 0)
+        spans)
+    (while (and (< cursor (length text))
+                (string-match chirp-backend--tweet-url-regexp text cursor))
+      (let ((start (match-beginning 0))
+            (end (match-end 0)))
+        (if (and (> start 0)
+                 (let ((previous (aref text (1- start))))
+                   (or (= previous ?@)
+                       (= (char-syntax previous) ?w)
+                       (= (char-syntax previous) ?_))))
+            (setq cursor (1+ start))
+          (setq end (chirp-backend--trim-tweet-url-end text start end)
+                cursor (max (1+ start) end))
+          (when (> end start)
+            (push (cons start end) spans)))))
+    (nreverse spans)))
+
+(defun chirp-backend-tweet-weighted-length (text)
+  "Return the X weighted length used to select a create operation for TEXT."
+  (let* ((normalized (ucs-normalize-NFC-string text))
+         (cursor 0)
+         (weight 0))
+    (dolist (span (chirp-backend--tweet-url-spans normalized))
+      (setq weight
+            (+ weight
+               (chirp-backend--weighted-text-segment
+                normalized cursor (car span))
+               chirp-backend--transformed-url-length)
+            cursor (cdr span)))
+    (+ weight
+       (chirp-backend--weighted-text-segment
+        normalized cursor (length normalized)))))
+
+;;; Compose
+
+(defun chirp-backend--created-tweet-id (payload)
+  "Return a created tweet identifier from GraphQL PAYLOAD, or nil."
+  (cl-loop for path in '(("data" "create_tweet" "tweet_results" "result"
+                          "rest_id")
+                         ("data" "notetweet_create" "tweet_results" "result"
+                          "rest_id")
+                         ("data" "create_note_tweet" "tweet_results" "result"
+                          "rest_id"))
+           for identifier = (chirp-get-in payload path)
+           when (and identifier
+                     (not (string-empty-p (format "%s" identifier))))
+           return (format "%s" identifier)))
+
+(defun chirp-backend--compose-variables
+    (kind text target-id media-ids note-tweet-p &optional reply-audience)
+  "Build X create variables for KIND, TEXT, TARGET-ID, and MEDIA-IDS.
+
+When NOTE-TWEET-P is non-nil, include the long-form-only variables.
+REPLY-AUDIENCE is a post or quote conversation-control symbol, or nil."
+  (let ((variables
+         `(("tweet_text" . ,text)
+           ("media" .
+            (("media_entities" .
+              ,(vconcat
+                (mapcar
+                 (lambda (media-id)
+                   `(("media_id" . ,media-id) ("tagged_users" . [])))
+                 media-ids)))
+             ("possibly_sensitive" . :json-false)))
+           ("semantic_annotation_ids" . [])
+           ("dark_request" . :json-false)
+           ("includePromotedContent" . :json-false))))
+    (pcase kind
+      ('reply
+       (push `("reply" .
+               (("in_reply_to_tweet_id" . ,target-id)
+                ("exclude_reply_user_ids" . [])))
+             variables))
+      ('quote
+       (push `("attachment_url" . ,(format "https://x.com/i/status/%s"
+                                           target-id))
+             variables)))
+    (when note-tweet-p
+      (push '("disallowed_reply_options" . nil) variables))
+    (unless (or (null reply-audience)
+                (eq reply-audience 'everyone)
+                (eq kind 'reply))
+      (push `("conversation_control" .
+              (("mode" . ,(pcase reply-audience
+                            ('community "Community")
+                            ('verified "Verified")
+                            ('byinvitation "ByInvitation")
+                            (_ (error "Reply audience is invalid: %S"
+                                      reply-audience))))))
+            variables))
+    variables))
+
+(defun chirp-backend--media-id (value)
+  "Return VALUE as a numeric media ID string, or nil."
+  (let ((id (and value (format "%s" value))))
+    (and (stringp id)
+         (string-match-p "\\`[0-9]+\\'" id)
+         id)))
+
+(defun chirp-backend--attachment-spec (attachment)
+  "Return ATTACHMENT as a plist with `:path' or `:media-id'.
+
+Optional `:description' carries alt text.  A `:media-id' identifies media
+already stored on X and does not require a local file."
+  (let ((spec (cond
+               ((stringp attachment) (list :path attachment))
+               ((listp attachment) attachment)
+               (t nil))))
+    (cond
+     ((chirp-backend--media-id (plist-get spec :media-id))
+      (plist-put (copy-sequence spec) :media-id
+                 (chirp-backend--media-id (plist-get spec :media-id))))
+     ((and (stringp (plist-get spec :path))
+           (file-regular-p (plist-get spec :path))
+           (file-readable-p (plist-get spec :path)))
+      spec)
+     (t
+      (error "Image file is not readable: %s"
+             (or (plist-get spec :path) attachment))))))
+
+(defun chirp-backend--apply-media-description
+    (media-id description callback errback &optional owner)
+  "Attach DESCRIPTION to MEDIA-ID when it is non-empty, then call CALLBACK."
+  (let ((text (and (stringp description) (string-trim description))))
+    (if (or (null text) (string-empty-p text))
+        (funcall callback)
+      (chirp-x-upload-media-alt-text media-id text
+                                     (lambda (_payload)
+                                       (funcall callback))
+                                     :errback errback
+                                     :owner owner))))
+
+(cl-defun chirp-backend--upload-compose-media
+    (attachments callback errback &key media-ids progress owner)
+  "Upload ATTACHMENTS sequentially and call CALLBACK with their media IDs.
+
+Each attachment is a file path or a plist with `:path' or `:media-id' and
+optional `:description'.  Existing `:media-id' values are reused without
+uploading.  ERRBACK receives the first failure.  MEDIA-IDS carries recursive
+state.  PROGRESS and OWNER are forwarded to the upload transport."
+  (if (null attachments)
+      (funcall callback (nreverse media-ids))
+    (let* ((spec (chirp-backend--attachment-spec (car attachments)))
+           (existing (plist-get spec :media-id))
+           (continue
+            (lambda (media-id)
+              (chirp-backend--apply-media-description
+               media-id (plist-get spec :description)
+               (lambda ()
+                 (chirp-backend--upload-compose-media
+                  (cdr attachments) callback errback
+                  :media-ids (cons media-id media-ids)
+                  :progress progress
+                  :owner owner))
+               errback owner))))
+      (if existing
+          (funcall continue existing)
+        (chirp-x-upload-media
+         (plist-get spec :path) continue
+         :errback errback
+         :progress progress
+         :owner owner)))))
+
+(cl-defun chirp-backend-compose
+    (&key kind text target-id attachments reply-audience callback errback
+          progress owner)
+  "Publish a KIND draft containing TEXT and ATTACHMENTS through X.
+
+KIND is `post', `reply', or `quote'.  TARGET-ID is required for replies and
+quotes.  ATTACHMENTS are file paths or plists with `:path' or `:media-id'
+and optional `:description' alt text.  REPLY-AUDIENCE is a post or quote
+conversation-control symbol; `everyone' and nil omit the rule, and replies
+ignore it.  CALLBACK receives the created tweet ID and the raw GraphQL
+envelope.  ERRBACK receives upload or create failures.  PROGRESS and OWNER
+are forwarded to media upload and the create request.  Create and upload
+mutations are never retried automatically."
+  (unless (functionp callback)
+    (error "Compose callback is not callable"))
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (unless (functionp error-fn)
+      (error "Compose error callback is not callable"))
+    (condition-case err
+        (progn
+          (unless (memq kind '(post reply quote))
+            (error "Compose kind is invalid: %S" kind))
+          (unless (and (stringp text) (not (string-blank-p text)))
+            (error "Compose text cannot be empty"))
+          (chirp-backend--validate-attachments attachments)
+          (chirp-backend--upload-compose-media
+           attachments
+           (lambda (media-ids)
+             (when (functionp progress)
+               (funcall progress (list :phase 'publish)))
+             (let* ((note-tweet-p
+                     (> (chirp-backend-tweet-weighted-length text)
+                        chirp-backend-standard-tweet-weight-limit))
+                    (operation-key
+                     (if note-tweet-p 'create-note-tweet 'create-tweet))
+                    (variables
+                     (chirp-backend--compose-variables
+                      kind text target-id
+                      media-ids note-tweet-p reply-audience)))
+               (chirp-x-graphql-request
+                (chirp-backend--operation operation-key)
+                variables
+                (lambda (payload)
+                  (if-let* ((tweet-id
+                             (chirp-backend--created-tweet-id payload)))
+                      (funcall callback tweet-id payload)
+                    (funcall error-fn
+                             (format "X did not return a created tweet ID (%s)"
+                                     (plist-get
+                                      (chirp-backend--operation operation-key)
+                                      :name)))))
+                :errback error-fn
+                :owner owner)))
+           error-fn
+           :progress progress
+           :owner owner))
+      (error
+       (funcall error-fn (error-message-string err))
+       nil))))
+
+(defun chirp-backend--video-attachment-p (attachment)
+  "Return non-nil when ATTACHMENT is an MP4 or restored video."
+  (or (equal (and (listp attachment) (plist-get attachment :type)) "video")
+      (let ((path (if (stringp attachment)
+                      attachment
+                    (plist-get attachment :path))))
+        (and (stringp path)
+             (equal (downcase (or (file-name-extension path) "")) "mp4")))))
+
+(defun chirp-backend--validate-attachments (attachments)
+  "Signal an error when ATTACHMENTS cannot be sent together."
+  (unless (and (listp attachments) (<= (length attachments) 4))
+    (error "Compose attachments must contain at most four files"))
+  (when (and (cl-some #'chirp-backend--video-attachment-p attachments)
+             (> (length attachments) 1))
+    (error "A video cannot be mixed with other attachments"))
+  (dolist (attachment attachments)
+    (let* ((spec (chirp-backend--attachment-spec attachment))
+           (description (plist-get spec :description)))
+      (when (and (stringp description)
+                 (> (length (string-trim description))
+                    chirp-x-media-alt-text-limit))
+        (error "Alt text cannot exceed %d characters"
+               chirp-x-media-alt-text-limit)))))
+
+(defun chirp-backend--validate-compose-item (item)
+  "Signal an error when ITEM is not a sendable compose item."
+  (let ((text (plist-get item :text))
+        (attachments (plist-get item :attachments)))
+    (unless (and (stringp text) (not (string-blank-p text)))
+      (error "Compose text cannot be empty"))
+    (chirp-backend--validate-attachments attachments)))
+
+;;; Unsent Posts
+
+(defun chirp-backend--validate-unsent (kind items)
+  "Validate compose KIND and ITEMS."
+  (unless (memq kind '(post reply quote))
+    (error "Compose kind is invalid: %S" kind))
+  (unless (and (listp items) items (cl-every #'listp items))
+    (error "Unsent items cannot be empty"))
+  (dolist (item items)
+    (chirp-backend--validate-compose-item item)))
+
+(defun chirp-backend--unsent-media-ids (item)
+  "Return ITEM's uploaded media IDs as a JSON array."
+  (vconcat (or (plist-get item :media-ids) '())))
+
+(defun chirp-backend--unsent-thread-tweet (item)
+  "Return one thread_tweets entry for uploaded ITEM."
+  `(("status" . ,(plist-get item :text))
+    ("media_ids" . ,(chirp-backend--unsent-media-ids item))))
+
+(defun chirp-backend--post-tweet-request (kind target-id items)
+  "Build a draft or scheduled post_tweet_request for KIND.
+
+TARGET-ID is the reply or quote tweet.  ITEMS are uploaded compose items."
+  (let* ((root (car items))
+         (target target-id)
+         (request
+           `(("status" . ,(plist-get root :text))
+             ("media_ids" . ,(chirp-backend--unsent-media-ids root))
+             ("exclude_reply_user_ids" . [])
+             ("auto_populate_reply_metadata"
+              . ,(if (eq kind 'reply) t :json-false))
+             ("thread_tweets"
+              . ,(vconcat (mapcar #'chirp-backend--unsent-thread-tweet
+                                  (cdr items)))))))
+    (pcase kind
+      ('reply
+       (push `("in_reply_to_status_id" . ,target) request))
+      ('quote
+       (push `("attachment_url"
+               . ,(format "https://x.com/i/status/%s" target))
+             request)))
+    request))
+
+(cl-defun chirp-backend--upload-unsent-items
+    (items callback errback &key done progress owner)
+  "Upload ITEMS sequentially and call CALLBACK with media IDs filled in.
+
+ERRBACK receives the first failure.  DONE carries recursive state.
+PROGRESS and OWNER are forwarded to each item upload."
+  (if (null items)
+      (funcall callback (nreverse done))
+    (let ((item (car items)))
+      (chirp-backend--upload-compose-media
+       (or (plist-get item :attachments) '())
+       (lambda (media-ids)
+         (chirp-backend--upload-unsent-items
+          (cdr items) callback errback
+          :done (cons (list :text (plist-get item :text)
+                            :media-ids media-ids)
+                      done)
+          :progress progress
+          :owner owner))
+       errback
+       :progress progress
+       :owner owner))))
+
+(defun chirp-backend--unsent-id (payload)
+  "Return a draft or scheduled identifier from PAYLOAD, or nil."
+  (cl-loop for path in '(("data" "tweet" "rest_id")
+                         ("data" "create_draft_tweet" "tweet" "rest_id")
+                         ("data" "create_scheduled_tweet" "tweet" "rest_id")
+                         ("data" "edit_draft_tweet" "tweet" "rest_id")
+                         ("data" "edit_scheduled_tweet" "tweet" "rest_id"))
+           for identifier = (chirp-get-in payload path)
+           when (and identifier
+                     (not (string-empty-p (format "%s" identifier))))
+           return (format "%s" identifier)))
+
+(cl-defun chirp-backend--submit-unsent
+    (kind target-id items existing-id execute-at callback errback
+          &key progress owner)
+  "Upload ITEMS and create or edit one X unsent post.
+
+KIND and TARGET-ID describe the root item.  EXISTING-ID selects edit
+operations.  EXECUTE-AT is a Unix timestamp in seconds, or nil for a
+draft.  PROGRESS and OWNER are forwarded to upload and the GraphQL write."
+  (chirp-backend--validate-unsent kind items)
+  (when execute-at
+    (unless (and (integerp execute-at) (> execute-at 0))
+      (error "Schedule time is invalid")))
+  (let ((existing existing-id))
+    (chirp-backend--upload-unsent-items
+     items
+     (lambda (uploaded)
+       (when (functionp progress)
+         (funcall progress (list :phase 'publish)))
+       (let* ((scheduled-p (not (null execute-at)))
+              (operation-key
+               (cond
+                ((and scheduled-p existing) 'edit-scheduled-tweet)
+                (scheduled-p 'create-scheduled-tweet)
+                (existing 'edit-draft-tweet)
+                (t 'create-draft-tweet)))
+              (variables
+               (append
+                `(("post_tweet_request"
+                   . ,(chirp-backend--post-tweet-request
+                       kind target-id
+                       uploaded)))
+                (when existing
+                  (if scheduled-p
+                      `(("scheduled_tweet_id" . ,existing))
+                    `(("draft_tweet_id" . ,existing))))
+                (when scheduled-p
+                  `(("execute_at" . ,execute-at))))))
+         (chirp-x-graphql-request
+          (chirp-backend--operation operation-key)
+          variables
+          (lambda (payload)
+            (if-let* ((identifier
+                       (or (chirp-backend--unsent-id payload) existing)))
+                (funcall callback identifier payload)
+              (funcall
+               errback
+               (format "X did not return a %s ID (%s)"
+                       (if scheduled-p "scheduled tweet" "draft")
+                       (plist-get (chirp-backend--operation operation-key)
+                                  :name)))))
+          :errback errback
+          :owner owner)))
+     errback
+     :progress progress
+     :owner owner)))
+
+(cl-defun chirp-backend-save-draft
+    (&key kind target-id items draft-id callback errback progress owner)
+  "Save ITEMS as an X server draft.
+
+KIND is `post', `reply', or `quote'.  TARGET-ID is required for replies and
+quotes.  ITEMS are plists with `:text' and optional `:attachments'.
+DRAFT-ID selects EditDraftTweet when non-nil.  CALLBACK receives the saved
+draft ID and the raw GraphQL envelope.  ERRBACK receives upload or save
+failures.  PROGRESS and OWNER are forwarded to upload and the save request.
+Save mutations are never retried automatically."
+  (unless (functionp callback)
+    (error "Draft callback is not callable"))
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (unless (functionp error-fn)
+      (error "Draft error callback is not callable"))
+    (condition-case err
+        (chirp-backend--submit-unsent
+         kind target-id items draft-id nil callback error-fn
+         :progress progress :owner owner)
+      (error
+       (funcall error-fn (error-message-string err))
+       nil))))
+
+(cl-defun chirp-backend-schedule
+    (&key kind target-id items scheduled-id execute-at callback errback
+          progress owner)
+  "Schedule ITEMS for publication at EXECUTE-AT.
+
+EXECUTE-AT is a Unix timestamp in seconds.  SCHEDULED-ID selects
+EditScheduledTweet when non-nil.  KIND, TARGET-ID, ITEMS, CALLBACK, and
+ERRBACK match `chirp-backend-save-draft'."
+  (unless (functionp callback)
+    (error "Schedule callback is not callable"))
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (unless (functionp error-fn)
+      (error "Schedule error callback is not callable"))
+    (condition-case err
+        (progn
+          (unless execute-at
+            (error "Schedule time is invalid"))
+          (chirp-backend--submit-unsent
+           kind target-id items scheduled-id execute-at callback error-fn
+           :progress progress :owner owner))
+      (error
+       (funcall error-fn (error-message-string err))
+       nil))))
+
+;;; Unsent Reads and Deletion
+
+(defun chirp-backend--json-list (value)
+  "Return VALUE as a list when it is a JSON array."
+  (cond
+   ((vectorp value) (append value nil))
+   ((listp value) value)
+   (t nil)))
+
+(defun chirp-backend--unix-seconds (value)
+  "Return VALUE as a Unix timestamp in seconds, or nil.
+
+X stores some scheduled times in milliseconds.  Values larger than a
+Unix second in year 5138 are treated as milliseconds."
+  (let ((number
+         (cond
+          ((integerp value) value)
+          ((floatp value) (truncate value))
+          ((and (stringp value) (string-match-p "\\`[0-9]+\\'" value))
+           (string-to-number value)))))
+    (cond
+     ((null number) nil)
+     ((> number 100000000000) (/ number 1000))
+     (t number))))
+
+(defun chirp-backend--media-id-list (value)
+  "Return VALUE as a list of numeric media ID strings."
+  (delq nil
+        (mapcar #'chirp-backend--media-id
+                (if (and (stringp value)
+                         (string-match-p "\\`[0-9]+\\'" value))
+                    (list value)
+                  (chirp-backend--json-list value)))))
+
+(defun chirp-backend--unsent-media-count (request)
+  "Return the number of media IDs stored on REQUEST."
+  (let ((count (length (chirp-backend--media-id-list
+                        (chirp-get request "media_ids")))))
+    (dolist (item (chirp-backend--json-list
+                   (chirp-get request "thread_tweets"))
+                  count)
+      (setq count
+            (+ count (length (chirp-backend--media-id-list
+                              (chirp-get item "media_ids"))))))))
+
+(defun chirp-backend--unsent-media-entity (entity)
+  "Normalize one FetchDraftTweets media ENTITY, or return nil."
+  (let* ((info (or (chirp-get entity "media_info") entity))
+         (media-id
+          (or (chirp-backend--media-id
+               (chirp-get entity "media_id" "id" "id_str"))
+              (let ((key (chirp-get entity "media_key")))
+                (and (stringp key)
+                     (string-match "\\([0-9]+\\)\\'" key)
+                     (chirp-backend--media-id (match-string 1 key))))))
+         (url (chirp-first-nonblank
+               (chirp-get info "original_img_url")
+               (chirp-get-in info '("preview_image" "original_img_url")))))
+    (when media-id
+      (list :media-id media-id
+            :type (pcase (chirp-get info "__typename")
+                    ("ApiVideo" "video")
+                    ("ApiGif" "animated_gif")
+                    (_ "photo"))
+            :preview-url url
+            :width (chirp-get info "original_img_width")
+            :height (chirp-get info "original_img_height")))))
+
+(defun chirp-backend--unsent-media-lookup (entry)
+  "Return a media-id table built from ENTRY's media_entities."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (entity (chirp-backend--json-list
+                     (chirp-get entry "media_entities")))
+      (when-let* ((media (chirp-backend--unsent-media-entity entity)))
+        (puthash (plist-get media :media-id) media table)))
+    table))
+
+(defun chirp-backend--unsent-attachments (media-ids lookup)
+  "Return compose attachments for MEDIA-IDS using LOOKUP."
+  (mapcar
+   (lambda (media-id)
+     (let ((media (gethash media-id lookup)))
+       (append (list :media-id media-id)
+               (when (plist-get media :type)
+                 (list :type (plist-get media :type)))
+               (when (plist-get media :preview-url)
+                 (list :preview-url (plist-get media :preview-url)))
+               (when (plist-get media :width)
+                 (list :width (plist-get media :width)))
+               (when (plist-get media :height)
+                 (list :height (plist-get media :height))))))
+   (chirp-backend--media-id-list media-ids)))
+
+(defun chirp-backend--unsent-items (request entry)
+  "Return compose items for REQUEST using media on ENTRY."
+  (let ((lookup (chirp-backend--unsent-media-lookup entry)))
+    (cons (list :text (or (chirp-get request "status") "")
+                :attachments
+                (chirp-backend--unsent-attachments
+                 (chirp-get request "media_ids") lookup))
+          (mapcar
+           (lambda (item)
+             (list :text (or (chirp-get item "status") "")
+                   :attachments
+                   (chirp-backend--unsent-attachments
+                    (chirp-get item "media_ids") lookup)))
+           (chirp-backend--json-list
+            (chirp-get request "thread_tweets"))))))
+
+(defun chirp-backend--unsent-request (entry)
+  "Return the stored create request on unsent ENTRY."
+  (or (chirp-get entry "tweet_create_request")
+      (chirp-get entry "post_tweet_request")
+      entry))
+
+(defun chirp-backend--normalize-unsent-entry (kind entry)
+  "Normalize unsent ENTRY of KIND into a plist, or return nil."
+  (when-let* ((request (chirp-backend--unsent-request entry))
+              (id (chirp-first-nonblank
+                   (format "%s" (or (chirp-get entry "rest_id")
+                                    (chirp-get entry "id")
+                                    "")))))
+    (when (string-match-p "\\`[0-9]+\\'" id)
+      (let* ((reply-id (chirp-first-nonblank
+                        (chirp-get request "in_reply_to_status_id")))
+             (quote-url (chirp-first-nonblank
+                         (chirp-get request "attachment_url")))
+             (quote-id (chirp-url-tweet-id quote-url))
+             (execute-at
+              (chirp-backend--unix-seconds
+               (or (chirp-get entry "execute_at" "scheduled_at")
+                   (chirp-get (chirp-get entry "scheduling_info")
+                              "execute_at" "scheduled_at"))))
+             (items (chirp-backend--unsent-items request entry)))
+        (list :id id
+              :kind kind
+              :compose-kind (cond
+                             (reply-id 'reply)
+                             (quote-id 'quote)
+                             (t 'post))
+              :target-id (or reply-id quote-id)
+              :target-url quote-url
+              :items items
+              :texts (mapcar (lambda (item)
+                               (plist-get item :text))
+                             items)
+              :media-count (chirp-backend--unsent-media-count request)
+              :execute-at execute-at)))))
+
+(defun chirp-backend--unsent-raw-entries (kind payload)
+  "Return raw unsent objects of KIND from PAYLOAD."
+  (pcase kind
+    ('scheduled
+     (let ((list (chirp-get-in
+                  payload '("data" "viewer" "scheduled_tweet_list"))))
+       (or (chirp-backend--json-list list)
+           (chirp-backend--json-list (chirp-get list "response_data"))
+           (chirp-backend--json-list (chirp-get list "items")))))
+    ('draft
+     (chirp-backend--json-list
+      (chirp-get-in
+       payload '("data" "viewer" "draft_list" "response_data"))))
+    (_ (error "Unsent kind is invalid: %S" kind))))
+
+(defun chirp-backend-fetch-unsent (kind callback &optional errback)
+  "Fetch unsent posts of KIND and call CALLBACK with normalized entries.
+
+KIND is `draft' or `scheduled'.  CALLBACK receives the entry list and the
+raw GraphQL envelope.  ERRBACK receives request failures."
+  (unless (functionp callback)
+    (error "Unsent fetch callback is not callable"))
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (unless (functionp error-fn)
+      (error "Unsent fetch error callback is not callable"))
+    (condition-case err
+        (let ((operation
+               (pcase kind
+                 ('draft 'fetch-draft-tweets)
+                 ('scheduled 'fetch-scheduled-tweets)
+                 (_ (error "Unsent kind is invalid: %S" kind))))
+              (variables
+               (pcase kind
+                 ('scheduled '(("ascending" . t)))
+                 (_ '(("ascending" . :json-false))))))
+          (chirp-x-graphql-request
+           (chirp-backend--operation operation)
+           variables
+           (lambda (payload)
+             (funcall
+              callback
+              (delq nil
+                    (mapcar (lambda (entry)
+                              (chirp-backend--normalize-unsent-entry
+                               kind entry))
+                            (chirp-backend--unsent-raw-entries kind payload)))
+              payload))
+           :errback error-fn))
+      (error
+       (funcall error-fn (error-message-string err))
+       nil))))
+
+(defun chirp-backend-delete-unsent (kind id callback &optional errback)
+  "Delete unsent post ID of KIND and call CALLBACK.
+
+KIND is `draft' or `scheduled'.  CALLBACK receives the raw GraphQL
+envelope.  ERRBACK receives request failures.  Deletes are never retried
+automatically."
+  (unless (functionp callback)
+    (error "Unsent delete callback is not callable"))
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (unless (functionp error-fn)
+      (error "Unsent delete error callback is not callable"))
+    (condition-case err
+        (let ((operation
+               (pcase kind
+                 ('draft 'delete-draft-tweet)
+                 ('scheduled 'delete-scheduled-tweet)
+                 (_ (error "Unsent kind is invalid: %S" kind))))
+              (key (if (eq kind 'scheduled)
+                       "scheduled_tweet_id"
+                     "draft_tweet_id")))
+          (chirp-x-graphql-request
+           (chirp-backend--operation operation)
+           `((,key . ,id))
+           (lambda (payload)
+             (funcall callback payload nil))
+           :errback error-fn))
+      (error
+       (funcall error-fn (error-message-string err))
+       nil))))
+
+;;; Actions
+
+(defun chirp-backend--mutation-request (args)
+  "Return a direct X mutation request for legacy action ARGS, or nil."
+  (pcase (car args)
+    ("like"
+     (list :operation 'favorite
+           :variables `(("tweet_id" . ,(cadr args)))))
+    ("unlike"
+     (list :operation 'unfavorite
+           :variables `(("tweet_id" . ,(cadr args))
+                        ("dark_request" . :json-false))))
+    ("retweet"
+     (list :operation 'retweet
+           :variables `(("tweet_id" . ,(cadr args))
+                        ("dark_request" . :json-false))))
+    ("unretweet"
+     (list :operation 'unretweet
+           :variables `(("source_tweet_id" . ,(cadr args))
+                        ("dark_request" . :json-false))))
+    ("bookmark"
+     (list :operation 'bookmark
+           :variables `(("tweet_id" . ,(cadr args)))))
+    ("unbookmark"
+     (list :operation 'unbookmark
+           :variables `(("tweet_id" . ,(cadr args)))))
+    ("delete"
+     (list :operation 'delete-tweet
+           :variables `(("tweet_id" . ,(car (last args)))
+                        ("dark_request" . :json-false))))))
+
+(defun chirp-backend--relationship-request
+    (command handle callback &optional errback)
+  "Run follow relationship COMMAND for HANDLE and call CALLBACK.
+ERRBACK receives request failures."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (if (not (and (stringp handle) (not (string-empty-p handle))))
+        (funcall error-fn "Follow action requires a user handle")
+      (chirp-backend-user
+       handle
+       (lambda (user _envelope)
+         (if-let* ((user-id (plist-get user :id))
+                   ((string-match-p "\\`[0-9]+\\'" user-id)))
+             (chirp-x-api-request
+              'web
+              (format "1.1/friendships/%s.json"
+                      (if (equal command "follow") "create" "destroy"))
+              (lambda (payload)
+                (funcall callback payload nil))
+              :method 'post
+              :form `(("user_id" . ,user-id)
+                      ("include_profile_interstitial_type" . "1"))
+              :errback error-fn)
+           (funcall error-fn "X profile did not include a numeric user ID")))
+       error-fn))))
+
+(defun chirp-backend-request (args callback &optional errback)
+  "Run direct backend action ARGS and call CALLBACK.
+
+ERRBACK receives a single human-readable string."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (pcase (car args)
+      ((or "follow" "unfollow")
+       (chirp-backend--relationship-request
+        (car args) (cadr args) callback error-fn))
+      (_
+       (if-let* ((request (chirp-backend--mutation-request args)))
+           (chirp-x-graphql-request
+            (chirp-backend--operation (plist-get request :operation))
+            (plist-get request :variables)
+            (lambda (payload)
+              (funcall callback payload nil))
+            :errback error-fn)
+         (funcall error-fn
+                  (format "Unknown Chirp backend action: %s" (car args))))))))
+
+;;; Direct Messages
+
+(defun chirp-backend-envelope-next-cursor (envelope)
+  "Return the next pagination cursor from ENVELOPE, or nil."
+  (or (chirp-get-in envelope '("pagination" "nextCursor"))
+      (chirp-get envelope "nextCursor")))
+
+(cl-defun chirp-backend-dm-recovery-input
+    (user-id callback &key errback owner)
+  "Fetch USER-ID's current XChat recovery configuration and call CALLBACK.
+
+ERRBACK handles transport or strict normalization failures, and OWNER owns the
+transport lifecycle.  The result contains short-lived Juicebox realm tokens
+and must not be cached or logged."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (if (not (and (stringp user-id)
+                  (string-match-p "\\`[0-9]+\\'" user-id)))
+        (funcall error-fn "XChat recovery user ID is invalid")
+      (chirp-x-graphql-request
+       (chirp-backend--operation 'dm-public-keys)
+       `(("ids" . [,user-id])
+         ("include_juicebox_tokens" . t))
+       (lambda (payload)
+         (let (input normalization-error)
+           (condition-case err
+               (setq input (chirp-xchat-recovery-input payload user-id))
+             (error
+              (setq normalization-error (error-message-string err))))
+           (if normalization-error
+               (funcall error-fn normalization-error)
+             (funcall callback input nil))))
+       :errback error-fn
+       :owner owner))))
+
+(cl-defun chirp-backend-dm-signing-keys
+    (user-ids callback &key errback owner)
+  "Fetch USER-IDS' XChat signing keys and call CALLBACK.
+
+ERRBACK handles failures, and OWNER owns the transport lifecycle."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (if (not (and (listp user-ids) user-ids
+                  (<= (length user-ids) 100)
+                  (= (length user-ids)
+                     (length (delete-dups (copy-sequence user-ids))))
+                  (cl-every (lambda (id)
+                              (and (stringp id)
+                                   (string-match-p "\\`[0-9]+\\'" id)))
+                            user-ids)))
+        (funcall error-fn "XChat signing-key user IDs are invalid")
+      (chirp-x-graphql-request
+       (chirp-backend--operation 'dm-public-keys)
+       `(("ids" . ,(vconcat user-ids))
+         ("include_juicebox_tokens" . :json-false))
+       (lambda (payload)
+         (let (keys normalization-error)
+           (condition-case normalization
+               (setq keys (chirp-xchat-signing-keys payload user-ids))
+             (error
+              (setq normalization-error
+                    (error-message-string normalization))))
+           (if normalization-error
+               (funcall error-fn normalization-error)
+             (funcall callback keys nil))))
+       :errback error-fn
+       :owner owner))))
+
+
+(cl-defun chirp-backend-dm-live-token
+    (callback &key errback owner)
+  "Fetch one short-lived XChat websocket token and call CALLBACK.
+
+ERRBACK handles transport or strict normalization failures, and OWNER owns the
+GraphQL request lifecycle.  The token must not be persisted or logged."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (chirp-x-graphql-request
+     (chirp-backend--operation 'dm-live-token) nil
+     (lambda (payload)
+       (let (token normalization-error)
+         (condition-case err
+             (setq token (chirp-xchat-live-token payload))
+           (error
+            (setq normalization-error (error-message-string err))))
+         (if normalization-error
+             (funcall error-fn normalization-error)
+           (funcall callback token nil))))
+     :errback error-fn
+     :owner owner)))
+
+(defun chirp-backend-dm-live-frame (opcode payload)
+  "Adapt one XChat websocket frame OPCODE and binary PAYLOAD."
+  (unless (eq opcode 'binary)
+    (error "XChat live websocket returned a non-binary frame"))
+  (chirp-xchat-decode-live-frame payload))
+
+(cl-defun chirp-backend-dm-media
+    (conversation-id media-hash callback &key errback owner)
+  "Download encrypted XChat MEDIA-HASH for CONVERSATION-ID.
+
+CALLBACK receives bounded ciphertext bytes.  ERRBACK handles transport
+failures, and OWNER owns the request lifecycle."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (cond
+     ((not (and (stringp conversation-id)
+                (<= (length conversation-id) 256)
+                (string-match-p
+                 "\\`[[:alnum:]_:-]+\\'" conversation-id)))
+      (funcall error-fn "XChat media conversation ID is invalid"))
+     ((not (and (stringp media-hash)
+                (<= 1 (length media-hash) 2048)
+                (string-match-p "\\`[[:alnum:]_-]+\\'" media-hash)))
+      (funcall error-fn "XChat media hash is invalid"))
+     (t
+      (chirp-x-chat-media-request
+       conversation-id media-hash callback
+       :errback error-fn :owner owner)))))
+
+(cl-defun chirp-backend--dm-send-prepared
+    (conversation-id prepare callback &key errback owner)
+  "Send CONVERSATION-ID's native PREPARE payload and call CALLBACK.
+
+ERRBACK handles preflight, transport, or acknowledgement failures.  OWNER owns
+the single non-retrying write.  CALLBACK receives the acknowledged normalized
+event and a nil envelope."
+  (let* ((error-fn (or errback (lambda (message) (message "%s" message))))
+         (sender-id
+          (chirp--session-xchat-user-id (chirp--session))))
+    (cond
+     ((not (and (stringp conversation-id)
+                (not (string-empty-p conversation-id))))
+      (funcall error-fn "XChat conversation ID is invalid"))
+     ((not (and (stringp sender-id)
+                (string-match-p "\\`[0-9]+\\'" sender-id)))
+      (funcall error-fn "XChat sender identity is unavailable"))
+     (t
+      (require 'chirp-xchat-native)
+      (let (prepared variables preflight-error)
+        (condition-case err
+            (setq prepared (funcall prepare)
+                  variables
+                  (chirp-xchat-send-variables conversation-id prepared))
+          (error
+           (setq preflight-error (error-message-string err))))
+        (if preflight-error
+            (progn
+              (funcall error-fn preflight-error)
+              nil)
+          (chirp-x-graphql-request
+           (chirp-backend--operation 'dm-send) variables
+           (lambda (payload)
+             (let (event acknowledgement-error)
+               (condition-case _err
+                   (setq event
+                         (chirp-xchat-send-result
+                          payload conversation-id sender-id
+                          (plist-get prepared :message-id)))
+                 (error
+                  (setq acknowledgement-error
+                        "X returned an invalid XChat send acknowledgement")))
+               (if acknowledgement-error
+                   (funcall error-fn
+                            (chirp-x-unknown-write-outcome
+                             acknowledgement-error))
+                 (funcall callback event nil))))
+           :errback error-fn
+           :owner owner)))))))
+
+(defun chirp-backend--dm-valid-text-p (text)
+  "Return non-nil when TEXT fits one XChat message."
+  (and (stringp text)
+       (not (string-empty-p (string-trim text)))
+       (<= (string-bytes text) (* 16 1024))))
+
+(cl-defun chirp-backend-dm-send-text
+    (conversation-id text callback &key errback owner)
+  "Encrypt and send TEXT to XChat CONVERSATION-ID, then call CALLBACK."
+  (if (not (chirp-backend--dm-valid-text-p text))
+      (funcall (or errback (lambda (message) (message "%s" message)))
+               "XChat message must contain between 1 and 16384 UTF-8 bytes")
+    (chirp-backend--dm-send-prepared
+     conversation-id
+     (lambda ()
+       (chirp-xchat-native-prepare-text conversation-id text))
+     callback :errback errback :owner owner)))
+
+(cl-defun chirp-backend-dm-send-reply
+    (conversation-id text target-event key-events callback &key errback owner)
+  "Encrypt and send TEXT replying to TARGET-EVENT in CONVERSATION-ID.
+
+KEY-EVENTS carries bounded raw conversation-key events required to validate an
+older target.  CALLBACK, ERRBACK, and OWNER follow
+`chirp-backend-dm-send-text'."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (cond
+     ((not (chirp-backend--dm-valid-text-p text))
+      (funcall error-fn
+               "XChat reply must contain between 1 and 16384 UTF-8 bytes"))
+     ((not (and (stringp target-event)
+                (not (string-empty-p target-event))))
+      (funcall error-fn "XChat reply target event is unavailable"))
+     ((not (and (listp key-events)
+                (<= (length key-events) 64)
+                (cl-every #'stringp key-events)))
+      (funcall error-fn "XChat reply key history is invalid"))
+     (t
+      (chirp-backend--dm-send-prepared
+       conversation-id
+       (lambda ()
+         (chirp-xchat-native-prepare-reply
+          conversation-id text target-event key-events))
+       callback :errback errback :owner owner)))))
+
+(cl-defun chirp-backend-dm-send-attachments
+    (conversation-id text attachments callback
+                     &key target-event key-events errback owner progress)
+  "Encrypt, upload, and send typed ATTACHMENTS with TEXT to CONVERSATION-ID.
+
+Each attachment supplies `:path' and `:attachment-kind'.  TARGET-EVENT and
+KEY-EVENTS select reply semantics.  CALLBACK receives the acknowledged
+normalized event and a nil envelope.  ERRBACK and OWNER own the complete
+staged-media, upload, and non-retrying send lifecycle.  PROGRESS receives
+upload phase plists."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message))))
+        (attachment-count (and (listp attachments) (length attachments)))
+        stages workflow-handle settled-p)
+    (cl-labels
+        ((release-stages
+           ()
+           (dolist (stage stages)
+             (when-let* ((stage-id (plist-get stage :stage-id)))
+               (ignore-errors
+                 (chirp-xchat-native-release-media-stage stage-id))))
+           (setq stages nil))
+         (retire-workflow
+           ()
+           (when (and (appkit-handle-p workflow-handle)
+                      (appkit-handle-alive-p workflow-handle))
+             (appkit-retire-handle workflow-handle)
+             (setq workflow-handle nil)))
+         (fail
+           (message)
+           (unless settled-p
+             (setq settled-p t)
+             (release-stages)
+             (retire-workflow)
+             (funcall error-fn message)))
+         (finish-send
+           (uploaded)
+           (unless settled-p
+             (release-stages)
+             (retire-workflow)
+             (let ((prepare
+                    (if target-event
+                        (lambda ()
+                          (chirp-xchat-native-prepare-reply
+                           conversation-id text target-event key-events
+                           uploaded))
+                      (lambda ()
+                        (chirp-xchat-native-prepare-text
+                         conversation-id text uploaded)))))
+               (chirp-backend--dm-send-prepared
+                conversation-id prepare
+                (lambda (event envelope)
+                  (unless settled-p
+                    (setq settled-p t)
+                    (funcall callback event envelope)))
+                :errback #'fail :owner owner))))
+         (upload-next
+           (remaining uploaded index)
+           (unless settled-p
+             (if (null remaining)
+                 (finish-send (nreverse uploaded))
+               (let ((stage (car remaining)))
+                 (chirp-x-upload-chat-media
+                  conversation-id
+                  (plist-get stage :encrypted-file)
+                  (plist-get stage :encrypted-bytes)
+                  (lambda (media-hash)
+                    (when-let* ((stage-id (plist-get stage :stage-id)))
+                      (ignore-errors
+                        (chirp-xchat-native-release-media-stage stage-id))
+                      (setq stages (delq stage stages)))
+                    (upload-next
+                     (cdr remaining)
+                     (cons
+                      (list :media-hash-key media-hash
+                            :width (plist-get stage :width)
+                            :height (plist-get stage :height)
+                            :plaintext-bytes
+                            (plist-get stage :plaintext-bytes)
+                            :key-version (plist-get stage :key-version)
+                            :filename (plist-get stage :filename)
+                            :media-type (plist-get stage :media-type))
+                      uploaded)
+                     (1+ index)))
+                  :errback #'fail
+                  :owner owner
+                  :progress
+                  (and progress
+                       (lambda (event)
+                         (funcall
+                          progress
+                          (append
+                           (list :attachment-index (1+ index)
+                                 :attachment-count attachment-count)
+                           event))))))))))
+      (condition-case err
+          (progn
+            (unless (functionp callback)
+              (error "XChat attachment callback is not callable"))
+            (unless (functionp error-fn)
+              (error "XChat attachment error callback is not callable"))
+            (unless
+                (and (listp attachments)
+                     (<= 1 (length attachments) 10)
+                     (cl-every
+                      (lambda (attachment)
+                        (let ((file (plist-get attachment :path))
+                              (kind (plist-get attachment :attachment-kind)))
+                          (and (listp attachment)
+                               (memq kind '(photo video audio file gif))
+                               (stringp file)
+                               (file-regular-p file)
+                               (file-readable-p file))))
+                      attachments))
+              (error "XChat attachments must be 1 to 10 typed readable files"))
+            (unless (and (stringp text)
+                         (<= (string-bytes text) (* 16 1024))
+                         (or (not (string-empty-p (string-trim text)))
+                             attachments))
+              (error "XChat attachment caption is invalid"))
+            (when target-event
+              (unless (and (stringp target-event)
+                           (not (string-empty-p target-event))
+                           (listp key-events)
+                           (<= (length key-events) 64)
+                           (cl-every #'stringp key-events))
+                (error "XChat attachment reply target is invalid")))
+            (require 'chirp-xchat-native)
+            (dolist (attachment attachments)
+              (let* ((kind (plist-get attachment :attachment-kind))
+                     (stage
+                      (append
+                       (chirp-xchat-native-prepare-media-file
+                        conversation-id (plist-get attachment :path))
+                       (list :attachment-kind kind))))
+                (push stage stages)
+                (let ((actual (plist-get stage :media-type))
+                      (expected
+                       (pcase kind
+                         ('photo 1)
+                         ('gif 2)
+                         ('video 3)
+                         ('audio 4)
+                         ('file 5))))
+                  (unless (or (eq kind 'file) (= actual expected))
+                    (error
+                     "XChat %s attachment content does not match the selected type"
+                     kind))
+                  (setf (plist-get stage :media-type) expected))))
+            (setq stages (nreverse stages))
+            (when (and (> (length stages) 1)
+                       (cl-some
+                        (lambda (stage)
+                          (not (memq (plist-get stage :media-type) '(1 2 3))))
+                        stages))
+              (error
+               "Multiple XChat attachments must all be images, GIFs, or videos"))
+            (setq workflow-handle
+                  (appkit-register-handle
+                   (or owner (chirp-app)) 'function
+                   (lambda () (fail "XChat attachment send was canceled"))))
+            (upload-next stages nil 0))
+        ((error quit)
+         (let ((message (error-message-string err)))
+           (fail message)
+           (when (eq (car err) 'quit)
+             (signal (car err) (cdr err))))
+         nil)))))
+
+(cl-defun chirp-backend-dm-send-reaction
+    (conversation-id target-event emoji remove-p callback &key errback owner)
+  "Add or remove EMOJI on TARGET-EVENT in XChat CONVERSATION-ID.
+
+REMOVE-P selects removal.  CALLBACK, ERRBACK, and OWNER follow
+`chirp-backend-dm-send-text'."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (cond
+     ((not (and (stringp target-event)
+                (not (string-empty-p target-event))))
+      (funcall error-fn "XChat reaction target event is unavailable"))
+     ((not (and (stringp emoji)
+                (not (string-empty-p (string-trim emoji)))
+                (<= (string-bytes emoji) 256)
+                (not (string-match-p "[[:cntrl:]]" emoji))))
+      (funcall error-fn "XChat reaction emoji is invalid"))
+     ((not (memq remove-p '(nil t)))
+      (funcall error-fn "XChat reaction operation is invalid"))
+     (t
+      (chirp-backend--dm-send-prepared
+       conversation-id
+       (lambda ()
+         (chirp-xchat-native-prepare-reaction
+          conversation-id target-event emoji remove-p))
+       callback :errback errback :owner owner)))))
+
+(cl-defun chirp-backend-dm-inbox
+    (callback &key cursor (max-results 20) errback owner)
+  "Fetch one XChat inbox page and call CALLBACK.
+
+CURSOR continues inbox pagination.  MAX-RESULTS requests a positive page size,
+ERRBACK handles failures, and OWNER owns the transport lifecycle.  CALLBACK
+receives normalized conversations and a pagination envelope."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (if (not (and (integerp max-results)
+                  (<= 1 max-results chirp-xchat-max-inbox-items)))
+        (funcall error-fn "XChat inbox limit must be between 1 and 100")
+      (let ((operation-key (if cursor 'dm-inbox-page 'dm-inbox-initial))
+            variables validation-error)
+        (condition-case err
+            (setq variables
+                  (append
+                   (when cursor
+                     `(("continue_cursor" .
+                        ,(chirp-xchat-inbox-cursor-variables cursor))))
+                   `(("query_settings" .
+                      ,(chirp-xchat-query-settings max-results 200)))))
+          (error
+           (setq validation-error (error-message-string err))))
+        (if validation-error
+            (progn
+              (funcall error-fn validation-error)
+              nil)
+          (chirp-x-graphql-request
+           (chirp-backend--operation operation-key) variables
+           (lambda (payload)
+             (let (page normalization-error)
+               (condition-case err
+                   (setq page (chirp-xchat-inbox-page payload))
+                 (error
+                  (setq normalization-error (error-message-string err))))
+               (if normalization-error
+                   (funcall error-fn normalization-error)
+                 (pcase-let ((`(,conversations . ,envelope) page))
+                   (funcall callback conversations envelope)))))
+           :errback error-fn
+           :owner owner))))))
+
+(cl-defun chirp-backend-dm-conversation-data
+    (conversation-id callback &key errback owner)
+  "Fetch current XChat data for CONVERSATION-ID and call CALLBACK.
+
+ERRBACK handles failures and OWNER owns the transport lifecycle."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (if (not (and (stringp conversation-id)
+                  (not (string-empty-p conversation-id))))
+        (funcall error-fn "XChat conversation ID is invalid")
+      (chirp-x-graphql-request
+       (chirp-backend--operation 'dm-conversation-data)
+       `(("conversation_ids" . (,conversation-id))
+         ("include_user_public_keys" . :json-false)
+         ("include_juicebox_tokens" . :json-false)
+         ("include_all_group_member_user_objects" . t)
+         ("include_participants_results_for_inbox_preview" . t))
+       (lambda (payload)
+         (let (conversation normalization-error)
+           (condition-case err
+               (setq conversation
+                     (chirp-xchat-conversation-data payload conversation-id))
+             (error
+              (setq normalization-error (error-message-string err))))
+           (if normalization-error
+               (funcall error-fn normalization-error)
+             (funcall callback conversation nil))))
+       :errback error-fn
+       :owner owner))))
+
+(cl-defun chirp-backend-dm-history
+    (conversation-id cursor callback
+                     &key (max-results 200) errback owner)
+  "Fetch older XChat events for CONVERSATION-ID from CURSOR.
+
+MAX-RESULTS requests a positive event limit, ERRBACK handles failures, and
+OWNER owns the transport lifecycle.  CALLBACK receives normalized events in
+oldest-first order and a pagination envelope."
+  (let* ((error-fn (or errback (lambda (message) (message "%s" message))))
+         (sequence-id (plist-get cursor :sequence-id))
+         (key-version (or (plist-get cursor :key-version) "0")))
+    (cond
+     ((not (and (stringp conversation-id)
+                (not (string-empty-p conversation-id))))
+      (funcall error-fn "XChat conversation ID is invalid"))
+     ((not (and (stringp sequence-id)
+                (string-match-p "\\`[0-9]+\\'" sequence-id)
+                (stringp key-version)
+                (string-match-p "\\`[0-9]+\\'" key-version)))
+      (funcall error-fn "XChat history cursor is invalid"))
+     ((not (and (integerp max-results)
+                (<= 1 max-results chirp-xchat-max-history-events)))
+      (funcall error-fn "XChat history limit must be between 1 and 200"))
+     (t
+      (chirp-x-graphql-request
+       (chirp-backend--operation 'dm-conversation-page)
+       `(("conversation_id" . ,conversation-id)
+         ("min_local_sequence_id" . ,sequence-id)
+         ("min_conversation_key_version" . ,key-version)
+         ("query_settings" .
+          ,(chirp-xchat-query-settings 20 max-results)))
+       (lambda (payload)
+         (let (page normalization-error)
+           (condition-case err
+               (setq page
+                     (chirp-xchat-history-page
+                      payload conversation-id key-version))
+             (error
+              (setq normalization-error (error-message-string err))))
+           (if normalization-error
+               (funcall error-fn normalization-error)
+             (pcase-let ((`(,events . ,envelope) page))
+               (funcall callback events envelope)))))
+       :errback error-fn
+       :owner owner)))))
+
+;;; Timelines
+
+(defun chirp-backend--timeline-limit (max-results)
+  "Return a valid positive timeline limit from MAX-RESULTS."
+  (let ((limit (or max-results chirp-default-max-results)))
+    (unless (and (integerp limit) (> limit 0))
+      (error "Timeline result limit must be a positive integer: %S" limit))
+    limit))
+
+(defun chirp-backend--timeline-tweet (result promoted-p)
+  "Return raw RESULT, preserving visibility metadata.
+
+When PROMOTED-P is non-nil, mark the inner tweet as promoted."
+  (let ((tweet (or (chirp-get result "tweet") result)))
+    (if (not promoted-p)
+        result
+      (let ((marked (copy-tree tweet)))
+        (push '("isPromoted" . t) marked)
+        (if (chirp-get result "tweet")
+            (let ((copy (copy-tree result)))
+              (setcdr (assoc-string "tweet" copy t) marked)
+              copy)
+          marked)))))
+
+(defun chirp-backend--timeline-entry-tweet-items (entry)
+  "Return raw tweet occurrence items carried by timeline ENTRY."
+  (let* ((content (chirp-get entry "content"))
+         (item-content (or (chirp-get content "itemContent")
+                           (chirp-get-in entry '("item" "itemContent"))))
+         (entry-id (chirp-get entry "entryId"))
+         (promoted-p (or (chirp-get item-content "promotedMetadata")
+                         (and (stringp entry-id)
+                              (string-prefix-p "promoted-" entry-id))))
+         items)
+    (when-let* ((result (chirp-get-in item-content
+                                      '("tweet_results" "result"))))
+      (push (list :entry-id entry-id
+                  :tweet (chirp-backend--timeline-tweet result promoted-p))
+            items))
+    (dolist (nested (chirp-get content "items"))
+      (when-let* ((nested-content (chirp-get-in nested
+                                                '("item" "itemContent")))
+                  (result (chirp-get-in nested-content
+                                        '("tweet_results" "result"))))
+        (let ((nested-id (chirp-get nested "entryId")))
+          (push
+           (list
+            :entry-id (or nested-id entry-id)
+            :tweet
+            (chirp-backend--timeline-tweet
+             result
+             (or (chirp-get nested-content "promotedMetadata")
+                 (and (stringp nested-id)
+                      (string-prefix-p "promoted-" nested-id)))))
+           items))))
+    (nreverse items)))
+
+(defun chirp-backend--timeline-entries (instructions)
+  "Return flat timeline entries and module items from INSTRUCTIONS."
+  (cl-loop for instruction in instructions
+           append (or (chirp-get instruction "entries")
+                      (chirp-get instruction "moduleItems")
+                      (when-let* ((entry (chirp-get instruction "entry")))
+                        (list entry))
+                      '())))
+
+(defun chirp-backend--timeline-next-cursor (entries)
+  "Return the bottom continuation cursor carried by timeline ENTRIES."
+  (cl-loop for entry in entries
+           for content = (chirp-get entry "content")
+           when (equal (chirp-get content "cursorType") "Bottom")
+           return (chirp-get content "value")))
+
+(defun chirp-backend--timeline-page (payload paths limit label)
+  "Normalize timeline PAYLOAD found at PATHS to LIMIT items.
+
+LABEL names the timeline in errors.  Return a cons of normalized tweets and a
+Chirp pagination envelope."
+  (let* ((timeline
+          (cl-loop for path in paths
+                   for value = (chirp-get-in payload path)
+                   when (and value (chirp-object-p value))
+                   return value))
+         (instructions (and timeline (chirp-get timeline "instructions"))))
+    (unless (and timeline (listp instructions))
+      (error "X did not return %s" label))
+    (let* ((entries (chirp-backend--timeline-entries instructions))
+           (pinned-entries
+            (cl-loop for instruction in instructions
+                     when (equal (chirp-get instruction "type")
+                                 "TimelinePinEntry")
+                     when (chirp-get instruction "entry")
+                     collect it))
+           (tweet-items
+            (cl-loop for entry in entries
+                     for context = (and (memq entry pinned-entries) 'pinned)
+                     append
+                     (cl-loop
+                      for item in
+                      (chirp-backend--timeline-entry-tweet-items entry)
+                      collect
+                      (if context
+                          (plist-put item :timeline-context context)
+                        item))))
+           (tweets
+            (cl-loop for item in tweet-items
+                     for tweet =
+                     (car (chirp--top-level-tweets-from-x
+                           (list (plist-get item :tweet))))
+                     when tweet
+                     collect
+                     (let ((entry-id (plist-get item :entry-id))
+                           (context (plist-get item :timeline-context)))
+                       (when entry-id
+                         (plist-put tweet :timeline-entry-id entry-id))
+                       (when context
+                         (plist-put tweet :timeline-context context))
+                       tweet)))
+           (cursor (chirp-backend--timeline-next-cursor entries))
+           (envelope (and cursor
+                          `(("pagination" . (("nextCursor" . ,cursor)))))))
+      (cons (cl-subseq tweets 0 (min limit (length tweets))) envelope))))
+
+(defun chirp-backend--edit-history-tweets (payload)
+  "Return normalized tweet versions from edit-history PAYLOAD."
+  (let* ((timeline
+          (chirp-get-in
+           payload
+           '("data" "tweet_result_by_rest_id" "result"
+             "edit_history_timeline" "timeline")))
+         (instructions
+          (and (chirp-object-p timeline)
+               (chirp-get timeline "instructions"))))
+    (unless (and timeline (listp instructions))
+      (error "X did not return tweet edit history"))
+    (let* ((entries (chirp-backend--timeline-entries instructions))
+           (tweet-items
+            (cl-mapcan #'chirp-backend--timeline-entry-tweet-items entries))
+           (raw-tweets (mapcar (lambda (item) (plist-get item :tweet))
+                               tweet-items))
+           (tweets (chirp--top-level-tweets-from-x raw-tweets)))
+      (unless tweets
+        (error "X returned tweet edit history Chirp could not parse"))
+      tweets)))
+
+(cl-defun chirp-backend--request-timeline
+    (operation-key variables paths limit callback &key errback label owner)
+  "Request OPERATION-KEY and adapt its timeline at PATHS.
+
+VARIABLES are sent to X, LIMIT caps normalized tweets, and CALLBACK receives
+tweets plus a pagination envelope.  ERRBACK handles failures.  LABEL names the
+timeline in errors, and OWNER optionally owns the transport lifecycle."
+  (let* ((operation (chirp-backend--operation operation-key))
+         (error-fn (or errback (lambda (message) (message "%s" message))))
+         (timeline-label (or label (plist-get operation :name))))
+    (chirp-x-graphql-request
+     operation variables
+     (lambda (payload)
+       (condition-case err
+           (pcase-let ((`(,tweets . ,envelope)
+                        (chirp-backend--timeline-page
+                         payload paths limit timeline-label)))
+             (funcall callback tweets envelope))
+         (error
+          (funcall error-fn (error-message-string err)))))
+     :errback error-fn
+     :owner owner)))
+
+(defun chirp-backend-feed
+    (callback &optional following errback max-results cursor owner)
+  "Fetch a Home or Following timeline through X's web GraphQL API.
+
+CALLBACK receives normalized tweets and a pagination envelope.  FOLLOWING
+selects the chronological Following timeline.  ERRBACK handles transport or
+response failures, MAX-RESULTS limits the response, CURSOR continues
+pagination, and OWNER optionally owns the transport lifecycle."
+  (let ((limit (chirp-backend--timeline-limit max-results)))
+    (chirp-backend--request-timeline
+     (if following 'following 'home)
+     (append `(("count" . ,limit)
+               ("includePromotedContent" . :json-false)
+               ("latestControlAvailable" . t)
+               ("requestContext" . "launch"))
+             (when cursor
+               `(("cursor" . ,cursor))))
+     '(("data" "home" "home_timeline_urt"))
+     limit callback :errback errback :label "a home timeline" :owner owner)))
+
+;;; Notifications
+
+(defconst chirp-backend--notification-kinds
+  '(("heart_icon" . "like")
+    ("person_icon" . "follow")
+    ("retweet_icon" . "retweet")
+    ("mention_icon" . "mention")
+    ("reply_icon" . "reply")
+    ("quote_icon" . "quote"))
+  "Map X notification icon identifiers to Chirp activity kinds.")
+
+(defun chirp-backend--notification-tweet-id (item)
+  "Return the first target tweet ID referenced by notification ITEM."
+  (cl-loop for target in (chirp-get-in item '("template" "target_objects"))
+           for result = (chirp-get-in target '("tweet_results" "result"))
+           for tweet = (and result (chirp--tweet-from-x result))
+           when tweet return (plist-get tweet :id)))
+
+(defun chirp-backend--normalize-notification (entry)
+  "Normalize one X notification timeline ENTRY, or return nil."
+  (when-let* ((item (chirp-get-in entry '("content" "itemContent")))
+              (id (chirp-first-nonblank
+                   (chirp-get item "id")
+                   (chirp-get entry "entryId"))))
+    (let* ((icon (chirp-get item "notification_icon"))
+           (kind (or (cdr (assoc-string icon
+                                        chirp-backend--notification-kinds))
+                     "unknown"))
+           (message (chirp-first-nonblank
+                     (chirp-get-in item '("rich_message" "text"))))
+           (tweet-id (chirp-backend--notification-tweet-id item))
+           (timestamp (chirp-get item "timestamp_ms")))
+      (append `(("id" . ,id)
+                ("type" . ,kind))
+              (when message `(("message" . ,message)))
+              (when timestamp `(("timestampMs" . ,timestamp)))
+              (when tweet-id `(("tweetId" . ,tweet-id)))))))
+
+(defun chirp-backend-notifications (callback &optional errback max-results)
+  "Fetch account activity notifications and call CALLBACK.
+
+ERRBACK handles failures and MAX-RESULTS limits the response."
+  (let ((limit (chirp-backend--timeline-limit max-results))
+        (error-fn (or errback (lambda (message) (message "%s" message)))))
+    (chirp-x-graphql-request
+     (chirp-backend--operation 'notifications)
+     `(("timeline_type" . "All")
+       ("count" . ,limit))
+     (lambda (payload)
+       (if-let* ((timeline
+                  (chirp-get-in
+                   payload
+                   '("data" "viewer_v2" "user_results" "result"
+                     "notification_timeline" "timeline")))
+                 (instructions (chirp-get timeline "instructions")))
+           (let* ((entries (chirp-backend--timeline-entries instructions))
+                  (notifications
+                   (delq nil (mapcar #'chirp-backend--normalize-notification
+                                     entries)))
+                  (next-cursor (chirp-backend--timeline-next-cursor entries)))
+             (when (> (length notifications) limit)
+               (setq notifications (cl-subseq notifications 0 limit)))
+             (funcall callback
+                      notifications
+                      (and next-cursor
+                           `(("pagination" .
+                              (("nextCursor" . ,next-cursor)))))))
+         (funcall error-fn "X did not return a notification timeline")))
+     :errback error-fn)))
+
+;;; Search and Translation
+
+(defun chirp-backend-bookmarks (callback &optional errback)
+  "Fetch bookmarks and call CALLBACK, or ERRBACK on failure."
+  (let ((limit (chirp-backend--timeline-limit nil)))
+    (chirp-backend--request-timeline
+     'bookmarks
+     `(("count" . ,limit)
+       ("includePromotedContent" . :json-false)
+       ("latestControlAvailable" . t)
+       ("requestContext" . "launch"))
+     '(("data" "bookmark_timeline" "timeline")
+       ("data" "bookmark_timeline_v2" "timeline"))
+     limit callback :errback errback :label "the bookmarks timeline")))
+
+(defun chirp-backend-search (query callback &optional errback)
+  "Search for QUERY and call CALLBACK, or ERRBACK on failure."
+  (let ((limit (chirp-backend--timeline-limit nil)))
+    (chirp-backend--request-timeline
+     'search
+     `(("count" . ,limit)
+       ("rawQuery" . ,query)
+       ("querySource" . "typed_query")
+       ("product" . "Top"))
+     '(("data" "search_by_raw_query" "search_timeline" "timeline"))
+     limit callback :errback errback :label "the search timeline")))
+
+(defun chirp-backend-search-users
+    (query callback &optional errback max-results)
+  "Search users matching QUERY and call CALLBACK with up to MAX-RESULTS users.
+ERRBACK receives request failures."
+  (let* ((clean-query (string-trim (string-remove-prefix "@" query)))
+         (limit (or max-results 10))
+         (error-fn (or errback (lambda (message) (message "%s" message)))))
+    (cond
+     ((string-empty-p clean-query)
+      (funcall callback nil nil))
+     ((not (and (integerp limit) (> limit 0)))
+      (funcall error-fn "User search limit must be a positive integer"))
+     (t
+      (chirp-x-api-request
+       'web "1.1/search/typeahead.json"
+       (lambda (payload)
+         (let ((seen (make-hash-table :test #'equal))
+               users)
+           (dolist (user (chirp-backend--collect-users
+                          (chirp-get payload "users")))
+             (let ((key (or (plist-get user :id)
+                            (plist-get user :handle))))
+               (when (and key (not (gethash key seen)))
+                 (puthash key t seen)
+                 (push user users))))
+           (setq users (nreverse users))
+           (when (> (length users) limit)
+             (setq users (cl-subseq users 0 limit)))
+           (funcall callback users nil)))
+       :query `(("q" . ,clean-query)
+                ("src" . "search_box")
+                ("result_type" . "users")
+                ("count" . ,limit))
+       :errback error-fn)))))
+
+(defun chirp-backend-translate (tweet-id language callback &optional errback)
+  "Translate TWEET-ID into LANGUAGE and call CALLBACK, or ERRBACK on failure."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (if (not (and (stringp language)
+                  (string-match-p
+                   "\\`[[:alpha:]]\\{2,3\\}\\(?:-[[:alnum:]]\\{2,8\\}\\)*\\'"
+                   language)))
+        (funcall error-fn "Tweet translation requires an ISO language code")
+      (chirp-x-api-request
+       'legacy
+       (format
+        (concat
+         "strato/column/None/tweetId=%s,destinationLanguage=Some(%s),"
+         "translationSource=Some(Google),feature=None,timeout=None,"
+         "onlyCached=None/translation/service/translateTweet")
+        tweet-id language)
+       (lambda (payload)
+         (if-let* ((translation
+                    (chirp-first-nonblank
+                     (chirp-get payload "translation"))))
+             (funcall
+              callback
+              (append
+               `(("id" . ,(or (chirp-first-nonblank
+                               (chirp-get payload "id_str" "id"))
+                              tweet-id))
+                 ("translation" . ,translation))
+               (cl-loop for key in '("sourceLanguage"
+                                     "localizedSourceLanguage"
+                                     "destinationLanguage"
+                                     "translationSource"
+                                     "translationState")
+                        for value = (chirp-get payload key)
+                        when value collect (cons key value)))
+              nil)
+           (let ((state (chirp-get payload "translationState")))
+             (funcall error-fn
+                      (if state
+                          (format "X did not return a translation (%s)" state)
+                        "X did not return a translation")))))
+       :errback error-fn))))
+
+;;; Profiles and Lists
+
+(defun chirp-backend-whoami (callback &optional errback)
+  "Fetch the authenticated user profile and call CALLBACK, or ERRBACK on failure."
+  (chirp-backend--cached-read
+   '(:whoami)
+   (lambda (success error)
+     (chirp-x-graphql-request
+      (chirp-backend--operation 'viewer) nil
+      (lambda (payload)
+        (let ((user (chirp--user-from-x
+                     (chirp-get-in
+                      payload '("data" "viewer" "user_results" "result")))))
+          (if user
+              (funcall success user nil)
+            (funcall error "X did not return the authenticated profile"))))
+      :errback error))
+   callback
+   errback))
+
+(defun chirp-backend-likes (handle callback &optional errback)
+  "Fetch liked tweets for HANDLE and call CALLBACK, or ERRBACK on failure."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
+    (chirp-backend-user
+     handle
+     (lambda (user _envelope)
+       (if-let* ((user-id (plist-get user :id)))
+           (let ((limit (chirp-backend--timeline-limit nil)))
+             (chirp-backend--request-timeline
+              'likes
+              `(("userId" . ,user-id)
+                ("count" . ,limit)
+                ("includePromotedContent" . :json-false)
+                ("withClientEventToken" . :json-false)
+                ("withBirdwatchNotes" . :json-false)
+                ("withVoice" . t))
+              chirp-backend--user-timeline-paths limit
+              (lambda (tweets envelope)
+                (dolist (tweet tweets)
+                  (plist-put tweet :liked-p t))
+                (funcall callback tweets envelope))
+              :errback error-fn :label "the likes timeline"))
+         (funcall error-fn "X profile did not include a user ID")))
+     error-fn)))
+
+(defun chirp-backend--normalize-list-info (item source)
+  "Normalize X list ITEM tagged with SOURCE, or return nil."
+  (when-let* ((id (chirp-first-nonblank
+                   (chirp-get item "id_str" "id"))))
+    (let ((owner (chirp-get item "user")))
+      `(("id" . ,id)
+        ("name" . ,(or (chirp-get item "name") id))
+        ("slug" . ,(or (chirp-get item "slug") ""))
+        ("description" . ,(or (chirp-get item "description") ""))
+        ("mode" . ,(or (chirp-get item "mode") ""))
+        ("memberCount" . ,(or (chirp-get item "member_count") 0))
+        ("subscriberCount" . ,(or (chirp-get item "subscriber_count") 0))
+        ("uri" . ,(or (chirp-get item "uri") ""))
+        ("fullName" . ,(or (chirp-get item "full_name") ""))
+        ("owner" . (("name" . ,(or (chirp-get owner "name") ""))
+                    ("screenName" . ,(or (chirp-get owner "screen_name") ""))
+                    ("profileImageUrl" .
+                     ,(or (chirp-get owner "profile_image_url_https"
+                                     "profile_image_url")
+                          ""))))
+        ("following" . ,(chirp-boolean-value
+                         (chirp-get item "following")))
+        ("sources" . (,source))))))
+
+(defun chirp-backend--request-list-collection
+    (endpoint source user-id callback errback
+              &optional cursor page accumulated)
+  "Fetch list collection ENDPOINT tagged SOURCE for USER-ID.
+
+CALLBACK receives all normalized pages.  ERRBACK receives request failures.
+CURSOR, PAGE, and ACCUMULATED carry private pagination state."
+  (let ((cursor (or cursor "-1"))
+        (page (or page 0)))
+    (chirp-x-api-request
+     'web (format "1.1/lists/%s.json" endpoint)
+     (lambda (payload)
+       (let* ((items
+               (delq nil
+                     (mapcar (lambda (item)
+                               (chirp-backend--normalize-list-info item source))
+                             (chirp-get payload "lists"))))
+              (all-items (append accumulated items))
+              (next (chirp-get payload "next_cursor_str" "next_cursor")))
+         (if (and next
+                  (not (equal (format "%s" next) "0"))
+                  (not (equal (format "%s" next) cursor))
+                  (< page 19))
+             (chirp-backend--request-list-collection
+              endpoint source user-id callback errback
+              (format "%s" next) (1+ page) all-items)
+           (funcall callback all-items))))
+     :query `(("user_id" . ,user-id)
+              ("count" . 1000)
+              ("cursor" . ,cursor))
+     :errback errback)))
+
+(defun chirp-backend--merge-list-collections (owned subscribed member)
+  "Merge OWNED, SUBSCRIBED, and MEMBER list metadata without duplicate IDs."
+  (let ((by-id (make-hash-table :test #'equal))
+        result)
+    (dolist (item (append owned subscribed member))
+      (let* ((id (chirp-get item "id"))
+             (existing (and id (gethash id by-id))))
+        (if existing
+            (setcdr (assoc-string "sources" existing t)
+                    (delete-dups
+                     (append (chirp-get existing "sources")
+                             (chirp-get item "sources"))))
+          (when id
+            (puthash id item by-id)
+            (push item result)))))
+    (nreverse result)))
+
+(defun chirp-backend-lists (callback &optional errback)
+  "Fetch accessible list metadata and call CALLBACK, or ERRBACK on failure."
+  (chirp-backend--cached-read
+   chirp-backend--lists-cache-key
+   (lambda (success error)
+     (chirp-backend-whoami
+      (lambda (user _envelope)
+        (if-let* ((user-id (plist-get user :id)))
+            (let ((remaining 3)
+                  owned subscribed member finished)
+              (cl-labels
+                  ((complete (source items)
+                     (unless finished
+                       (pcase source
+                         ('owned (setq owned items))
+                         ('subscribed (setq subscribed items))
+                         ('member (setq member items)))
+                       (setq remaining (1- remaining))
+                       (when (zerop remaining)
+                         (setq finished t)
+                         (funcall success
+                                  (chirp-backend--merge-list-collections
+                                   owned subscribed member)
+                                  nil))))
+                   (fail (message)
+                     (unless finished
+                       (setq finished t)
+                       (funcall error message))))
+                (chirp-backend--request-list-collection
+                 "ownerships" "owned" user-id
+                 (lambda (items) (complete 'owned items)) #'fail)
+                (chirp-backend--request-list-collection
+                 "subscriptions" "subscribed" user-id
+                 (lambda (items) (complete 'subscribed items)) #'fail)
+                (chirp-backend--request-list-collection
+                 "memberships" "member" user-id
+                 (lambda (items) (complete 'member items)) #'fail)))
+          (funcall error "X profile did not include a user ID")))
+      error))
+   callback
+   errback))
+
+(defun chirp-backend-list (list-id callback &optional errback)
+  "Fetch LIST-ID timeline data and call CALLBACK, or ERRBACK on failure."
+  (let ((limit (chirp-backend--timeline-limit nil)))
+    (chirp-backend--request-timeline
+     'list
+     `(("listId" . ,list-id)
+       ("count" . ,limit))
+     '(("data" "list" "tweets_timeline" "timeline"))
+     limit callback :errback errback :label "the list timeline")))
+
+;;; Tweet Reads
+
+(defun chirp-backend--tweet-matches-id-p (tweet tweet-id)
+  "Return non-nil when TWEET or its raw wrapper identifies TWEET-ID."
+  (or (equal (plist-get tweet :id) tweet-id)
+      (equal (chirp-first-nonblank
+              (chirp-get (plist-get tweet :raw) "rest_id" "id_str" "id"))
+             tweet-id)))
+
+(defun chirp-backend-thread (tweet-id callback &optional errback)
+  "Fetch TWEET-ID thread data and call CALLBACK, or ERRBACK on failure."
+  (let ((limit (chirp-backend--timeline-limit chirp-thread-max-results)))
+    (chirp-backend--cached-read
+     (list :thread tweet-id)
+     (lambda (success error)
+       (chirp-backend--request-timeline
+        'thread
+        `(("focalTweetId" . ,tweet-id)
+          ("count" . ,limit)
+          ("referrer" . "tweet")
+          ("with_rux_injections" . :json-false)
+          ("includePromotedContent" . t)
+          ("rankingMode" . "Relevance")
+          ("withCommunity" . :json-false)
+          ("withQuickPromoteEligibilityTweetFields" . :json-false)
+          ("withBirdwatchNotes" . :json-false)
+          ("withVoice" . :json-false))
+        '(("data" "tweetResult" "result" "timeline")
+          ("data" "threaded_conversation_with_injections_v2"))
+        limit
+        (lambda (tweets envelope)
+          (if-let* ((focus (cl-find-if
+                            (lambda (tweet)
+                              (chirp-backend--tweet-matches-id-p
+                               tweet tweet-id))
+                            tweets)))
+              (funcall success
+                       (cons focus (cl-remove focus tweets :test #'eq))
+                       envelope)
+            (funcall error
+                     (format "X did not return tweet %s in its thread"
+                             tweet-id))))
+        :errback error :label "the tweet conversation"))
+     callback
+     errback)))
+
+(defun chirp-backend-tweet (tweet-id callback &optional errback)
+  "Fetch TWEET-ID and call CALLBACK, or ERRBACK on failure."
+  (chirp-backend-thread
+   tweet-id
+   (lambda (tweets envelope)
+     (if-let* ((tweet (or (cl-find-if
+                           (lambda (item)
+                             (chirp-backend--tweet-matches-id-p item tweet-id))
+                           tweets)
+                          (car tweets))))
+         (funcall callback tweet envelope)
+       (funcall (or errback #'ignore)
+                "X returned tweet detail Chirp could not parse.")))
+   errback))
+
+(defun chirp-backend-edit-history (tweet-id callback &optional errback)
+  "Fetch TWEET-ID edit history and call CALLBACK, or ERRBACK on failure."
+  (chirp-backend--cached-read
+   (list :edit-history tweet-id)
+   (lambda (success error)
+     (chirp-x-graphql-request
+      (chirp-backend--operation 'edit-history)
+      `(("tweetId" . ,tweet-id)
+        ("withQuickPromoteEligibilityTweetFields" . t))
+      (lambda (payload)
+        (condition-case err
+            (funcall success
+                     (chirp-backend--edit-history-tweets payload)
+                     nil)
+          (error
+           (funcall error (error-message-string err)))))
+      :errback error))
+   callback
+   errback))
+
+(defun chirp-backend-article (tweet-id callback &optional errback)
+  "Fetch article content for TWEET-ID and call CALLBACK, or ERRBACK on failure."
+  (chirp-backend--cached-read
+   (list :article tweet-id)
+   (lambda (success error)
+     (chirp-x-graphql-request
+      (chirp-backend--operation 'article)
+      `(("tweetId" . ,tweet-id)
+        ("withCommunity" . :json-false)
+        ("includePromotedContent" . :json-false)
+        ("withVoice" . :json-false))
+      (lambda (payload)
+        (let ((tweet
+               (chirp-apply-tweet-state-overrides
+                (chirp--tweet-from-x
+                 (chirp-get-in
+                  payload '("data" "tweetResult" "result"))))))
+          (if (and tweet
+                   (or (plist-get tweet :article-title)
+                       (plist-get tweet :article-text)))
+              (funcall success tweet nil)
+            (funcall error "X did not return article content"))))
+      :errback error))
+   callback
+   errback))
+
+(defun chirp-backend-user (handle callback &optional errback)
+  "Fetch profile data for HANDLE and call CALLBACK, or ERRBACK on failure."
+  (let ((clean-handle (string-remove-prefix "@" handle)))
+    (chirp-backend--cached-read
+     (list :user (chirp-backend--normalize-handle clean-handle))
+     (lambda (success error)
+       (chirp-x-graphql-request
+        (chirp-backend--operation 'user)
+        `(("screen_name" . ,clean-handle)
+          ("withSafetyModeUserFields" . t))
+        (lambda (payload)
+          (let ((user (chirp--user-from-x
+                       (chirp-get-in payload '("data" "user" "result")))))
+            (if user
+                (funcall success user nil)
+              (funcall error (format "X did not return profile @%s"
+                                     clean-handle)))))
+        :errback error))
+     callback
+     errback)))
+
+(defun chirp-backend--profile-timeline-variables
+    (operation-key user-id limit cursor)
+  "Return profile OPERATION-KEY variables for USER-ID, LIMIT, and CURSOR."
+  (append
+   (pcase operation-key
+     ('user-tweets
+      `(("userId" . ,user-id)
+        ("count" . ,limit)
+        ("includePromotedContent" . :json-false)
+        ("latestControlAvailable" . t)
+        ("requestContext" . "launch")
+        ("withQuickPromoteEligibilityTweetFields" . t)
+        ("withVoice" . t)))
+     ('user-highlights
+      `(("userId" . ,user-id)
+        ("count" . ,limit)
+        ("includePromotedContent" . t)
+        ("withVoice" . t)))
+     ('user-media
+      `(("userId" . ,user-id)
+        ("count" . ,limit)
+        ("includePromotedContent" . :json-false)
+        ("withClientEventToken" . :json-false)
+        ("withBirdwatchNotes" . :json-false)
+        ("withVoice" . t)))
+     (_ (error "Unknown profile timeline operation: %S" operation-key)))
+   (when cursor
+     `(("cursor" . ,cursor)))))
+
+(defun chirp-backend--profile-timeline
+    (timeline-kind cache-key handle callback &optional errback max-results cursor)
+  "Fetch profile TIMELINE-KIND using CACHE-KEY for HANDLE.
+
+CALLBACK receives tweets and an envelope.  ERRBACK handles failures,
+MAX-RESULTS limits the response, and CURSOR bypasses the initial-page cache."
+  (let* ((clean-handle (string-remove-prefix "@" handle))
+         (limit (chirp-backend--timeline-limit
+                 (or max-results chirp-profile-post-limit)))
+         (fetch-page
+          (lambda (success error)
+            (if (eq timeline-kind 'user-replies)
+                (chirp-backend--request-timeline
+                 'search
+                 (append `(("count" . ,limit)
+                           ("rawQuery" . ,(format "from:%s filter:replies"
+                                                  clean-handle))
+                           ("querySource" . "typed_query")
+                           ("product" . "Latest"))
+                         (when cursor `(("cursor" . ,cursor))))
+                 '(("data" "search_by_raw_query"
+                    "search_timeline" "timeline"))
+                 limit success :errback error :label "the replies timeline")
+              (chirp-backend-user
+               clean-handle
+               (lambda (user _envelope)
+                 (if-let* ((user-id (plist-get user :id)))
+                     (chirp-backend--request-timeline
+                      timeline-kind
+                      (chirp-backend--profile-timeline-variables
+                       timeline-kind user-id limit cursor)
+                      chirp-backend--user-timeline-paths limit success
+                      :errback error :label "the profile timeline")
+                   (funcall error "X profile did not include a user ID")))
+               error)))))
+    (if cursor
+        (funcall fetch-page callback
+                 (or errback (lambda (message) (message "%s" message))))
+      (chirp-backend--cached-read cache-key fetch-page callback errback))))
+
+(defun chirp-backend-user-posts (handle callback &optional errback max-results cursor)
+  "Fetch posts for HANDLE and call CALLBACK.
+
+ERRBACK handles failures and MAX-RESULTS limits the response.  When CURSOR is
+non-nil, continue from it without using the short-lived read cache."
+  (chirp-backend--profile-timeline
+   'user-tweets (list :user-posts (chirp-backend--normalize-handle handle))
+   handle callback errback max-results cursor))
+
+(defun chirp-backend-user-replies (handle callback &optional errback max-results cursor)
+  "Fetch replies by HANDLE and call CALLBACK.
+
+ERRBACK handles failures, MAX-RESULTS limits the response, and CURSOR continues
+pagination."
+  (chirp-backend--profile-timeline
+   'user-replies
+   (list :profile-timeline (chirp-backend--normalize-handle handle) 'replies)
+   handle callback errback max-results cursor))
+
+(defun chirp-backend-user-highlights (handle callback &optional errback max-results cursor)
+  "Fetch highlights for HANDLE and call CALLBACK.
+
+ERRBACK handles failures, MAX-RESULTS limits the response, and CURSOR continues
+pagination."
+  (chirp-backend--profile-timeline
+   'user-highlights
+   (list :profile-timeline (chirp-backend--normalize-handle handle) 'highlights)
+   handle callback errback max-results cursor))
+
+(defun chirp-backend-user-media (handle callback &optional errback max-results cursor)
+  "Fetch media posts for HANDLE and call CALLBACK.
+
+ERRBACK handles failures, MAX-RESULTS limits the response, and CURSOR continues
+pagination."
+  (chirp-backend--profile-timeline
+   'user-media
+   (list :profile-timeline (chirp-backend--normalize-handle handle) 'media)
+   handle callback errback max-results cursor))
+
+(defun chirp-backend--collect-users (data)
+  "Normalize DATA into a list of user plists."
+  (if (listp data)
+      (delq nil (mapcar #'chirp--user-from-x data))
+    nil))
+
+(defun chirp-backend--user-collection
+    (kind cache-key handle callback &optional errback)
+  "Fetch user collection KIND through CACHE-KEY for HANDLE.
+
+CALLBACK receives normalized users and an optional pagination envelope.
+ERRBACK receives transport or response failures."
+  (chirp-backend--cached-read
+   cache-key
+   (lambda (success error)
+     (chirp-backend-user
+      handle
+      (lambda (user _envelope)
+        (if-let* ((user-id (plist-get user :id)))
+            (chirp-x-api-request
+             'legacy
+             (format "%s/list.json"
+                     (pcase kind
+                       ('followers "followers")
+                       ('following "friends")
+                       (_ (error "Unknown user collection: %S" kind))))
+             (lambda (payload)
+               (let* ((users (chirp-backend--collect-users
+                              (chirp-get payload "users")))
+                      (cursor (chirp-get payload
+                                         "next_cursor_str" "next_cursor")))
+                 (funcall
+                  success users
+                  (and cursor
+                       `(("pagination" . (("nextCursor" . ,cursor))))))))
+             :query `(("user_id" . ,user-id)
+                      ("count" . ,chirp-default-max-results)
+                      ("cursor" . "-1")
+                      ("skip_status" . "true")
+                      ("include_user_entities" . "false"))
+             :errback error)
+          (funcall error "X profile did not include a user ID")))
+      error))
+   callback
+   errback))
+
+(defun chirp-backend-followers (handle callback &optional errback)
+  "Fetch followers for HANDLE and call CALLBACK, or ERRBACK on failure."
+  (chirp-backend--user-collection
+   'followers (list :followers (chirp-backend--normalize-handle handle))
+   handle callback errback))
+
+(defun chirp-backend-following-users (handle callback &optional errback)
+  "Fetch accounts followed by HANDLE and call CALLBACK, or ERRBACK on failure."
+  (chirp-backend--user-collection
+   'following (list :following-users (chirp-backend--normalize-handle handle))
+   handle callback errback))
+
+(provide 'chirp-backend)
+
+;;; chirp-backend.el ends here

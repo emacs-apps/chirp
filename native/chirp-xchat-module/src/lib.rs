@@ -1,0 +1,3286 @@
+// Copyright (C) 2026 Chirp contributors
+// SPDX-License-Identifier: MIT
+
+#[cfg(feature = "test-vector")]
+use std::time::Instant;
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    fmt,
+    fs::File,
+    io::{BufReader, Read, Seek, SeekFrom, Write},
+    panic::{catch_unwind, AssertUnwindSafe},
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, TryRecvError},
+        Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+#[cfg(feature = "juicebox")]
+use chat_xdk_core::keys::juicebox::{JuiceboxApi, JuiceboxClient, JuiceboxConfig};
+use chat_xdk_core::{
+    keys::juicebox::{RecoverFailureReason, RecoverResult},
+    ChatCore,
+};
+use chat_xdk_core::{
+    prelude::XChatConversationKey, AttachmentDescriptor, AttachmentInfo, EncryptMessageParams,
+    EncryptReactionParams, EncryptReplyParams, Event, Message, MessageContent,
+    ReplyPreviewValidation, SendPayload,
+};
+use emacs::{defun, Env, IntoLisp, Result, ResultExt, Transfer, Value};
+use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
+use url::Url;
+use zeroize::{Zeroize, Zeroizing};
+
+emacs::plugin_is_GPL_compatible!();
+
+const MODULE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/chat-xdk-0.4.3");
+const MAX_JOB_ID: i64 = (1 << 28) - 1;
+const MAX_RECOVERY_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_REGISTERED_KEYS: usize = 32;
+const MAX_DECRYPT_INPUT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_ENCRYPT_INPUT_BYTES: usize = 32 * 1024;
+const MAX_MESSAGE_TEXT_BYTES: usize = 16 * 1024;
+const MAX_ENCRYPT_EVENT_INPUT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_REPLY_KEY_EVENTS: usize = 64;
+const MAX_REACTION_EMOJI_BYTES: usize = 256;
+const MAX_SIGNING_KEYS: usize = 512;
+const MAX_X_USER_ID_BYTES: usize = 32;
+const MAX_PUBLIC_KEY_VERSION_BYTES: usize = 128;
+const PUBLIC_KEY_LENGTHS: &[usize] = &[33, 65, 91];
+const MAX_DECRYPT_EVENT_BYTES: usize = 1024 * 1024;
+const MAX_DECRYPT_EVENT_BASE64_BYTES: usize = 4 * MAX_DECRYPT_EVENT_BYTES.div_ceil(3);
+const MAX_PUBLIC_KEY_BYTES: usize = 91;
+const MAX_MEDIA_PLAINTEXT_BYTES: usize = 50 * 1024 * 1024;
+const MAX_MEDIA_CIPHERTEXT_BYTES: usize =
+    MAX_MEDIA_PLAINTEXT_BYTES + (17 * MAX_MEDIA_PLAINTEXT_BYTES.div_ceil(1024)) + 24;
+const MAX_MEDIA_BASE64_BYTES: usize = 4 * MAX_MEDIA_CIPHERTEXT_BYTES.div_ceil(3);
+const MAX_MEDIA_CONVERSATIONS: usize = 100;
+const MAX_MEDIA_STAGES: usize = 10;
+const MAX_ATTACHMENTS_PER_MESSAGE: usize = 10;
+const MAX_MEDIA_PATH_BYTES: usize = 4096;
+const MEDIA_PROBE_BYTES: usize = 1024 * 1024;
+#[cfg(feature = "juicebox")]
+const RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Debug)]
+enum NativeError {
+    Closed,
+    Busy,
+    Stale,
+    InvalidInput(String),
+    WorkerFailed,
+    Xdk(String),
+}
+
+impl fmt::Display for NativeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Closed => formatter.write_str("XChat native session is closed"),
+            Self::Busy => formatter.write_str("XChat recovery is already active"),
+            Self::Stale => formatter.write_str("XChat recovery job is stale"),
+            Self::InvalidInput(message) => formatter.write_str(message),
+            Self::WorkerFailed => formatter.write_str("XChat recovery worker failed"),
+            Self::Xdk(message) => write!(formatter, "XChat SDK failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for NativeError {}
+
+#[derive(Default)]
+struct CancelToken {
+    requested: AtomicBool,
+}
+
+impl CancelToken {
+    fn request(&self) -> bool {
+        !self.requested.swap(true, Ordering::AcqRel)
+    }
+
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "test-vector")]
+    fn wait(&self, duration: Duration) -> bool {
+        let deadline = Instant::now() + duration;
+        while !self.requested() {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            thread::sleep((deadline - now).min(Duration::from_millis(5)));
+        }
+        self.requested()
+    }
+}
+
+struct RecoveredKeys {
+    bytes: Zeroizing<Vec<u8>>,
+    public_key_version: String,
+    user_id: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RecoveryFailure {
+    NotRegistered,
+    InvalidAuth,
+    UpgradeRequired,
+    RateLimited,
+    AssertionFailed,
+    KeyReconstructionFailed,
+    NoTokens,
+    RegisteredKeyMismatch,
+    AmbiguousRegisteredKey,
+}
+
+enum WorkerTerminal {
+    Recovered(RecoveredKeys),
+    IncorrectPin { guesses_remaining: Option<u16> },
+    Failure(RecoveryFailure),
+    Uncertain,
+    Cancelled,
+    WorkerFailed,
+}
+
+struct RecoveryJob {
+    id: i64,
+    epoch: i64,
+    cancel: Arc<CancelToken>,
+    receiver: Receiver<WorkerTerminal>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl RecoveryJob {
+    fn join(&mut self) -> bool {
+        self.thread
+            .take()
+            .is_none_or(|thread| thread.join().is_ok())
+    }
+
+    fn cancel_and_join(mut self) {
+        self.cancel.request();
+        let _ = self.join();
+    }
+
+    fn cancel_and_detach(mut self) {
+        self.cancel.request();
+        drop(self.thread.take());
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryInput {
+    user_id: String,
+    sdk_config: String,
+    tokens: BTreeMap<String, String>,
+    max_guess_count: u16,
+    registered_keys: Vec<RegisteredKey>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisteredKey {
+    version: String,
+    identity_public_key: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SdkConfiguration {
+    realms: Vec<RealmConfiguration>,
+    register_threshold: u32,
+    recover_threshold: u32,
+    pin_hashing_mode: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RealmConfiguration {
+    id: String,
+    address: String,
+    #[serde(default)]
+    public_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecryptInput {
+    conversation_id: String,
+    events: Vec<String>,
+    signing_keys: Vec<SigningKeyInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncryptTextInput {
+    conversation_id: String,
+    text: String,
+    #[serde(default)]
+    conversation_key_version: Option<String>,
+    #[serde(default)]
+    attachments: Vec<OutgoingMediaAttachment>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncryptReplyInput {
+    conversation_id: String,
+    text: String,
+    #[serde(default)]
+    conversation_key_version: Option<String>,
+    target_event: String,
+    #[serde(default)]
+    key_events: Vec<String>,
+    #[serde(default)]
+    attachments: Vec<OutgoingMediaAttachment>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EncryptReactionInput {
+    conversation_id: String,
+    target_event: String,
+    emoji: String,
+    remove: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutgoingMediaAttachment {
+    media_hash_key: String,
+    width: i64,
+    height: i64,
+    filesize_bytes: i64,
+    filename: String,
+    media_type: i32,
+    #[serde(default)]
+    duration_millis: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrepareMediaInput {
+    conversation_id: String,
+    file_path: String,
+}
+
+#[derive(Serialize)]
+struct PreparedMedia {
+    stage_id: i64,
+    encrypted_file: String,
+    encrypted_bytes: u64,
+    plaintext_bytes: u64,
+    key_version: String,
+    filename: String,
+    mime_type: String,
+    media_type: i32,
+    width: i64,
+    height: i64,
+}
+
+struct MediaStage {
+    file: NamedTempFile,
+}
+
+#[derive(Serialize)]
+struct PreparedMessage {
+    message_id: String,
+    encoded_message_create_event: String,
+    encoded_message_event_signature: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SigningKeyInput {
+    user_id: String,
+    public_key_version: String,
+    public_key: String,
+    identity_public_key: String,
+    identity_public_key_signature: String,
+}
+
+#[cfg(feature = "juicebox")]
+struct RecoveryRequest {
+    pin: Zeroizing<Vec<u8>>,
+    user_id: String,
+    config: JuiceboxConfig,
+    registered_keys: Vec<RegisteredKey>,
+}
+
+#[cfg(feature = "juicebox")]
+impl Drop for RecoveryRequest {
+    fn drop(&mut self) {
+        self.config.config_json.zeroize();
+        for token in self.config.tokens.values_mut() {
+            token.zeroize();
+        }
+    }
+}
+
+struct NativeState {
+    core: Option<ChatCore>,
+    user_id: Option<String>,
+    conversation_keys: HashMap<String, HashMap<String, XChatConversationKey>>,
+    next_job_id: i64,
+    recovery: Option<RecoveryJob>,
+    media_stages: HashMap<i64, MediaStage>,
+    next_media_stage_id: i64,
+}
+
+struct ClosedState {
+    core: Option<ChatCore>,
+    user_id: Option<String>,
+    conversation_keys: HashMap<String, HashMap<String, XChatConversationKey>>,
+    recovery: Option<RecoveryJob>,
+    media_stages: HashMap<i64, MediaStage>,
+}
+
+struct NativeSession {
+    state: Mutex<NativeState>,
+}
+
+impl NativeSession {
+    fn new() -> Self {
+        let core = ChatCore::new();
+        core.set_cache_keys(true);
+        Self {
+            state: Mutex::new(NativeState {
+                core: Some(core),
+                user_id: None,
+                conversation_keys: HashMap::new(),
+                next_job_id: 1,
+                recovery: None,
+                media_stages: HashMap::new(),
+                next_media_stage_id: 1,
+            }),
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, NativeState> {
+        self.state.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    #[cfg(any(test, feature = "test-vector"))]
+    fn with_core<T>(
+        &self,
+        operation: impl FnOnce(&ChatCore) -> std::result::Result<T, NativeError>,
+    ) -> std::result::Result<T, NativeError> {
+        let state = self.lock_state();
+        let core = state.core.as_ref().ok_or(NativeError::Closed)?;
+        operation(core)
+    }
+
+    fn close(&self) -> ClosedState {
+        let mut state = self.lock_state();
+        ClosedState {
+            core: state.core.take(),
+            user_id: state.user_id.take(),
+            recovery: state.recovery.take(),
+            conversation_keys: std::mem::take(&mut state.conversation_keys),
+            media_stages: std::mem::take(&mut state.media_stages),
+        }
+    }
+
+    fn destroy(&self) -> bool {
+        let mut closed = self.close();
+        let existed = closed.core.is_some();
+        if let Some(recovery) = closed.recovery.take() {
+            recovery.cancel_and_join();
+        }
+        drop(closed.user_id.take());
+        drop(closed.core.take());
+        drop(closed.conversation_keys);
+        drop(closed.media_stages);
+        existed
+    }
+
+    fn live(&self) -> bool {
+        self.lock_state().core.is_some()
+    }
+
+    fn unlocked(&self) -> std::result::Result<bool, NativeError> {
+        let state = self.lock_state();
+        state
+            .core
+            .as_ref()
+            .map(|core| core.is_unlocked() && state.user_id.is_some())
+            .ok_or(NativeError::Closed)
+    }
+
+    fn decrypt(&self, input_json: String) -> std::result::Result<String, NativeError> {
+        let (conversation_id, events, signing_keys) = parse_decrypt_input(input_json)?;
+        let mut state = self.lock_state();
+        let core = state.core.as_ref().ok_or(NativeError::Closed)?;
+        if !core.is_unlocked() {
+            return Err(NativeError::InvalidInput(
+                "XChat native session is locked".into(),
+            ));
+        }
+        let (output, conversation_keys) = decrypt_events(core, &events, &signing_keys)?;
+        if output
+            .messages
+            .iter()
+            .any(|message| message.conversation_id.as_deref() != Some(conversation_id.as_str()))
+        {
+            return Err(NativeError::Xdk(
+                "decrypted message belongs to another conversation".into(),
+            ));
+        }
+        if !output.messages.is_empty() && !conversation_keys.is_empty() {
+            if !state.conversation_keys.contains_key(&conversation_id)
+                && state.conversation_keys.len() >= MAX_MEDIA_CONVERSATIONS
+            {
+                return Err(NativeError::InvalidInput(
+                    "XChat native media key cache is full".into(),
+                ));
+            }
+            state
+                .conversation_keys
+                .insert(conversation_id, conversation_keys);
+        }
+        serde_json::to_string(&output).map_err(|error| NativeError::Xdk(error.to_string()))
+    }
+
+    fn decrypt_media(
+        &self,
+        conversation_id: &str,
+        key_version: &str,
+        encrypted_base64: &str,
+    ) -> std::result::Result<Zeroizing<Vec<u8>>, NativeError> {
+        if !valid_conversation_id(conversation_id)
+            || !valid_public_key_version(key_version)
+            || encrypted_base64.len() > MAX_MEDIA_BASE64_BYTES
+        {
+            return Err(NativeError::InvalidInput(
+                "XChat native media input is invalid".into(),
+            ));
+        }
+        let encrypted = BASE64.decode(encrypted_base64).map_err(|_| {
+            NativeError::InvalidInput("XChat native media ciphertext is invalid".into())
+        })?;
+        if encrypted.is_empty() || encrypted.len() > MAX_MEDIA_CIPHERTEXT_BYTES {
+            return Err(NativeError::InvalidInput(
+                "XChat native media ciphertext size is invalid".into(),
+            ));
+        }
+        let state = self.lock_state();
+        let core = state.core.as_ref().ok_or(NativeError::Closed)?;
+        if !core.is_unlocked() {
+            return Err(NativeError::InvalidInput(
+                "XChat native session is locked".into(),
+            ));
+        }
+        let key = state
+            .conversation_keys
+            .get(conversation_id)
+            .and_then(|keys| keys.get(key_version))
+            .ok_or_else(|| {
+                NativeError::InvalidInput(
+                    "XChat native media conversation key is unavailable".into(),
+                )
+            })?;
+        let plaintext = core
+            .decrypt_stream(&encrypted, key)
+            .map_err(|_| NativeError::Xdk("media decryption failed".into()))?;
+        if plaintext.len() > MAX_MEDIA_PLAINTEXT_BYTES {
+            return Err(NativeError::Xdk(
+                "decrypted XChat media exceeds 50 MiB".into(),
+            ));
+        }
+        Ok(Zeroizing::new(plaintext))
+    }
+
+    fn prepare_media(&self, input_json: String) -> std::result::Result<String, NativeError> {
+        let input = parse_prepare_media_input(&input_json)?;
+        let path = Path::new(&input.file_path);
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| NativeError::InvalidInput("XChat media filename is invalid".into()))?
+            .to_string();
+        let file = File::open(path)
+            .map_err(|_| NativeError::InvalidInput("XChat media file is not readable".into()))?;
+        let metadata = file.metadata().map_err(|_| {
+            NativeError::InvalidInput("XChat media file metadata is unavailable".into())
+        })?;
+        if !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_MEDIA_PLAINTEXT_BYTES as u64
+        {
+            return Err(NativeError::InvalidInput(
+                "XChat media file must contain between 1 byte and 50 MiB".into(),
+            ));
+        }
+
+        let mut state = self.lock_state();
+        let core = state.core.as_ref().ok_or(NativeError::Closed)?;
+        if !core.is_unlocked() {
+            return Err(NativeError::InvalidInput(
+                "XChat native session is locked".into(),
+            ));
+        }
+        if state.media_stages.len() >= MAX_MEDIA_STAGES {
+            return Err(NativeError::InvalidInput(
+                "XChat native media staging is full".into(),
+            ));
+        }
+        let (key_version, key) = state
+            .conversation_keys
+            .get(&input.conversation_id)
+            .and_then(|keys| {
+                keys.iter()
+                    .filter_map(|(version, key)| {
+                        version
+                            .parse::<u64>()
+                            .ok()
+                            .map(|number| (number, version, key))
+                    })
+                    .max_by_key(|(number, _, _)| *number)
+            })
+            .map(|(_, version, key)| (version.clone(), key.clone()))
+            .ok_or_else(|| {
+                NativeError::InvalidInput(
+                    "XChat native media conversation key is unavailable".into(),
+                )
+            })?;
+
+        let mut reader = BufReader::new(file);
+        let mut probe = vec![0; (metadata.len() as usize).min(MEDIA_PROBE_BYTES)];
+        let probe_bytes = reader
+            .read(&mut probe)
+            .map_err(|_| NativeError::InvalidInput("XChat media file could not be read".into()))?;
+        probe.truncate(probe_bytes);
+        reader.seek(SeekFrom::Start(0)).map_err(|_| {
+            NativeError::InvalidInput("XChat media file could not be rewound".into())
+        })?;
+        let mime_type = chat_xdk_core::utils::detect_mime_type(&probe)
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let dimensions = chat_xdk_core::utils::detect_image_dimensions(&probe);
+        let (width, height) = dimensions
+            .map(|value| (i64::from(value.width), i64::from(value.height)))
+            .unwrap_or((0, 0));
+        let media_type = match mime_type.as_str() {
+            "image/gif" => 2,
+            "image/svg+xml" => 6,
+            value if value.starts_with("image/") => 1,
+            value if value.starts_with("video/") => 3,
+            value if value.starts_with("audio/") => 4,
+            _ => 5,
+        };
+
+        let mut staged_file = NamedTempFile::new()
+            .map_err(|_| NativeError::Xdk("media staging file could not be created".into()))?;
+        chat_xdk_core::crypto::encryption::encrypt_stream(&key, &mut reader, &mut staged_file)
+            .map_err(|_| NativeError::Xdk("media encryption failed".into()))?;
+        staged_file
+            .flush()
+            .map_err(|_| NativeError::Xdk("encrypted media could not be flushed".into()))?;
+        let encrypted_bytes = staged_file
+            .as_file()
+            .metadata()
+            .map_err(|_| NativeError::Xdk("encrypted media metadata is unavailable".into()))?
+            .len();
+        let encrypted_file = staged_file
+            .path()
+            .to_str()
+            .ok_or_else(|| NativeError::Xdk("media staging path is invalid".into()))?
+            .to_string();
+
+        let mut stage_id = state.next_media_stage_id;
+        while state.media_stages.contains_key(&stage_id) {
+            stage_id = if stage_id >= MAX_JOB_ID {
+                1
+            } else {
+                stage_id + 1
+            };
+        }
+        state.next_media_stage_id = if stage_id >= MAX_JOB_ID {
+            1
+        } else {
+            stage_id + 1
+        };
+        state
+            .media_stages
+            .insert(stage_id, MediaStage { file: staged_file });
+        serde_json::to_string(&PreparedMedia {
+            stage_id,
+            encrypted_file,
+            encrypted_bytes,
+            plaintext_bytes: metadata.len(),
+            key_version,
+            filename,
+            mime_type,
+            media_type,
+            width,
+            height,
+        })
+        .map_err(|error| {
+            state.media_stages.remove(&stage_id);
+            NativeError::Xdk(error.to_string())
+        })
+    }
+
+    fn release_media(&self, stage_id: i64) -> std::result::Result<bool, NativeError> {
+        if !(1..=MAX_JOB_ID).contains(&stage_id) {
+            return Err(NativeError::InvalidInput(
+                "XChat native media stage ID is invalid".into(),
+            ));
+        }
+        let mut state = self.lock_state();
+        if state.core.is_none() {
+            return Err(NativeError::Closed);
+        }
+        Ok(state
+            .media_stages
+            .remove(&stage_id)
+            .map(|stage| {
+                let _ = stage.file.close();
+                true
+            })
+            .unwrap_or(false))
+    }
+
+    fn conversation_key_for_version(
+        &self,
+        conversation_id: &str,
+        key_version: Option<&str>,
+    ) -> std::result::Result<Option<XChatConversationKey>, NativeError> {
+        let Some(key_version) = key_version else {
+            return Ok(None);
+        };
+        let state = self.lock_state();
+        if state.core.is_none() {
+            return Err(NativeError::Closed);
+        }
+        state
+            .conversation_keys
+            .get(conversation_id)
+            .and_then(|keys| keys.get(key_version))
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| {
+                NativeError::InvalidInput(
+                    "XChat attachment conversation key version is unavailable".into(),
+                )
+            })
+    }
+
+    fn prepare_payload(
+        &self,
+        operation: impl FnOnce(&ChatCore, &str) -> std::result::Result<SendPayload, NativeError>,
+    ) -> std::result::Result<SendPayload, NativeError> {
+        let state = self.lock_state();
+        let core = state.core.as_ref().ok_or(NativeError::Closed)?;
+        let sender_id = state.user_id.as_ref().ok_or_else(|| {
+            NativeError::InvalidInput("XChat native sender identity is unavailable".into())
+        })?;
+        if !core.is_unlocked() {
+            return Err(NativeError::InvalidInput(
+                "XChat native session is locked".into(),
+            ));
+        }
+        operation(core, sender_id)
+    }
+
+    fn encrypt_payload(
+        &self,
+        operation: impl FnOnce(&ChatCore, &str) -> std::result::Result<SendPayload, NativeError>,
+    ) -> std::result::Result<String, NativeError> {
+        let payload = self.prepare_payload(operation)?;
+        serde_json::to_string(&PreparedMessage {
+            message_id: payload.message_id,
+            encoded_message_create_event: payload.encrypted_content,
+            encoded_message_event_signature: payload.encoded_event_signature,
+        })
+        .map_err(|error| NativeError::Xdk(error.to_string()))
+    }
+
+    fn encrypt_text(&self, input_json: String) -> std::result::Result<String, NativeError> {
+        let input = parse_encrypt_text_input(&input_json)?;
+        let explicit_key = self.conversation_key_for_version(
+            &input.conversation_id,
+            input.conversation_key_version.as_deref(),
+        )?;
+        let attachments = outgoing_attachment_descriptors(input.attachments);
+        self.encrypt_payload(|core, sender_id| {
+            let mut params = EncryptMessageParams::new(input.conversation_id, input.text);
+            params.sender_id = Some(sender_id.to_string());
+            if let (Some(key), Some(version)) = (explicit_key, input.conversation_key_version) {
+                params.conversation_key = Some(key.to_bytes());
+                params.conversation_key_version = Some(version);
+            }
+            if !attachments.is_empty() {
+                params.attachments = Some(attachments);
+            }
+            core.encrypt_message(params).map_err(|_| {
+                NativeError::Xdk("message encryption failed for this conversation".into())
+            })
+        })
+    }
+
+    #[cfg(test)]
+    fn prepare_text_payload(
+        &self,
+        input_json: &str,
+    ) -> std::result::Result<SendPayload, NativeError> {
+        let input = parse_encrypt_text_input(input_json)?;
+        let explicit_key = self.conversation_key_for_version(
+            &input.conversation_id,
+            input.conversation_key_version.as_deref(),
+        )?;
+        let attachments = outgoing_attachment_descriptors(input.attachments);
+        self.prepare_payload(|core, sender_id| {
+            let mut params = EncryptMessageParams::new(input.conversation_id, input.text);
+            params.sender_id = Some(sender_id.to_string());
+            if let (Some(key), Some(version)) = (explicit_key, input.conversation_key_version) {
+                params.conversation_key = Some(key.to_bytes());
+                params.conversation_key_version = Some(version);
+            }
+            if !attachments.is_empty() {
+                params.attachments = Some(attachments);
+            }
+            core.encrypt_message(params).map_err(|_| {
+                NativeError::Xdk("message encryption failed for this conversation".into())
+            })
+        })
+    }
+
+    fn encrypt_reply(&self, input_json: String) -> std::result::Result<String, NativeError> {
+        let input = parse_encrypt_reply_input(&input_json)?;
+        let explicit_key = self.conversation_key_for_version(
+            &input.conversation_id,
+            input.conversation_key_version.as_deref(),
+        )?;
+        let attachments = outgoing_attachment_descriptors(input.attachments);
+        self.encrypt_payload(|core, sender_id| {
+            let mut params =
+                EncryptReplyParams::new(input.conversation_id, input.text, input.target_event);
+            params.sender_id = Some(sender_id.to_string());
+            if let (Some(key), Some(version)) = (explicit_key, input.conversation_key_version) {
+                params.conversation_key = Some(key.to_bytes());
+                params.conversation_key_version = Some(version);
+            }
+            if !input.key_events.is_empty() {
+                params.reply_to_ckces = Some(input.key_events);
+            }
+            if !attachments.is_empty() {
+                params.attachments = Some(attachments);
+            }
+            core.encrypt_reply(params).map_err(|_| {
+                NativeError::Xdk("reply encryption failed for this conversation".into())
+            })
+        })
+    }
+
+    fn encrypt_reaction(&self, input_json: String) -> std::result::Result<String, NativeError> {
+        let input = parse_encrypt_reaction_input(&input_json)?;
+        self.encrypt_payload(|core, sender_id| {
+            let mut params = EncryptReactionParams::new(input.target_event, input.emoji);
+            params.conversation_id = Some(input.conversation_id);
+            params.sender_id = Some(sender_id.to_string());
+            let result = if input.remove {
+                core.encrypt_remove_reaction(&params)
+            } else {
+                core.encrypt_add_reaction(&params)
+            };
+            result.map_err(|_| {
+                NativeError::Xdk("reaction encryption failed for this conversation".into())
+            })
+        })
+    }
+
+    fn spawn_recovery(
+        &self,
+        epoch: i64,
+        operation: impl FnOnce(Arc<CancelToken>) -> WorkerTerminal + Send + 'static,
+    ) -> std::result::Result<i64, NativeError> {
+        if epoch <= 0 {
+            return Err(NativeError::InvalidInput(
+                "XChat recovery epoch must be positive".into(),
+            ));
+        }
+        let mut state = self.lock_state();
+        let core = state.core.as_ref().ok_or(NativeError::Closed)?;
+        if core.is_unlocked() {
+            return Err(NativeError::InvalidInput(
+                "XChat native session is already unlocked".into(),
+            ));
+        }
+        if state.recovery.is_some() {
+            return Err(NativeError::Busy);
+        }
+        let id = state.next_job_id;
+        let next_id = id
+            .checked_add(1)
+            .filter(|next| *next <= MAX_JOB_ID)
+            .ok_or_else(|| NativeError::InvalidInput("XChat recovery job IDs exhausted".into()))?;
+        let cancel = Arc::new(CancelToken::default());
+        let worker_cancel = Arc::clone(&cancel);
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("chirp-xchat-recovery".into())
+            .spawn(move || {
+                let mut terminal =
+                    catch_unwind(AssertUnwindSafe(|| operation(Arc::clone(&worker_cancel))))
+                        .unwrap_or(WorkerTerminal::WorkerFailed);
+                if worker_cancel.requested() {
+                    terminal = WorkerTerminal::Cancelled;
+                }
+                let _ = sender.send(terminal);
+            })
+            .map_err(|_| NativeError::WorkerFailed)?;
+        state.next_job_id = next_id;
+        state.recovery = Some(RecoveryJob {
+            id,
+            epoch,
+            cancel,
+            receiver,
+            thread: Some(worker),
+        });
+        Ok(id)
+    }
+
+    #[cfg(feature = "juicebox")]
+    fn start_recovery(
+        &self,
+        epoch: i64,
+        pin: String,
+        input_json: String,
+    ) -> std::result::Result<i64, NativeError> {
+        let request = parse_recovery_request(pin, input_json)?;
+        self.spawn_recovery(epoch, move |cancel| network_recover(request, cancel))
+    }
+
+    #[cfg(feature = "test-vector")]
+    fn start_mock_recovery(
+        &self,
+        epoch: i64,
+        pin: String,
+        delay_msec: i64,
+    ) -> std::result::Result<i64, NativeError> {
+        if !(0..=5_000).contains(&delay_msec) {
+            return Err(NativeError::InvalidInput(
+                "XChat mock recovery delay is out of range".into(),
+            ));
+        }
+        let pin = validate_pin(pin)?;
+        let delay = Duration::from_millis(delay_msec as u64);
+        self.spawn_recovery(epoch, move |cancel| mock_recover(pin, delay, &cancel))
+    }
+
+    fn poll_recovery(&self, id: i64, epoch: i64) -> std::result::Result<RecoveryPoll, NativeError> {
+        let (mut job, terminal) = {
+            let mut state = self.lock_state();
+            if state.core.is_none() {
+                return Err(NativeError::Closed);
+            }
+            let job = state.recovery.as_ref().ok_or(NativeError::Stale)?;
+            if job.id != id || job.epoch != epoch {
+                return Err(NativeError::Stale);
+            }
+            match job.receiver.try_recv() {
+                Err(TryRecvError::Empty) => return Ok(RecoveryPoll::Pending),
+                result => {
+                    let job = state.recovery.take().ok_or(NativeError::Stale)?;
+                    let terminal = result.ok();
+                    (job, terminal)
+                }
+            }
+        };
+        if !job.join() {
+            return Err(NativeError::WorkerFailed);
+        }
+        if job.cancel.requested() {
+            return Ok(RecoveryPoll::Cancelled);
+        }
+        match terminal.ok_or(NativeError::WorkerFailed)? {
+            WorkerTerminal::Recovered(keys) => {
+                let mut state = self.lock_state();
+                let core = state.core.as_ref().ok_or(NativeError::Closed)?;
+                core.import_keys_with_version(&keys.bytes, &keys.public_key_version)
+                    .map_err(|error| NativeError::Xdk(error.to_string()))?;
+                state.user_id = Some(keys.user_id);
+                Ok(RecoveryPoll::Unlocked {
+                    public_key_version: keys.public_key_version,
+                })
+            }
+            WorkerTerminal::IncorrectPin { guesses_remaining } => {
+                Ok(RecoveryPoll::IncorrectPin { guesses_remaining })
+            }
+            WorkerTerminal::Failure(reason) => Ok(RecoveryPoll::Failure(reason)),
+            WorkerTerminal::Uncertain => Ok(RecoveryPoll::Uncertain),
+            WorkerTerminal::Cancelled => Ok(RecoveryPoll::Cancelled),
+            WorkerTerminal::WorkerFailed => Err(NativeError::WorkerFailed),
+        }
+    }
+
+    fn cancel_recovery(&self, id: i64, epoch: i64) -> std::result::Result<bool, NativeError> {
+        let state = self.lock_state();
+        if state.core.is_none() {
+            return Err(NativeError::Closed);
+        }
+        let job = state.recovery.as_ref().ok_or(NativeError::Stale)?;
+        if job.id != id || job.epoch != epoch {
+            return Err(NativeError::Stale);
+        }
+        Ok(job.cancel.request())
+    }
+}
+
+impl Drop for NativeSession {
+    fn drop(&mut self) {
+        let mut closed = self.close();
+        if let Some(recovery) = closed.recovery.take() {
+            recovery.cancel_and_detach();
+        }
+        drop(closed.user_id.take());
+        drop(closed.core.take());
+    }
+}
+
+impl Transfer for NativeSession {
+    fn type_name() -> &'static str {
+        "Chirp XChat native session"
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RecoveryPoll {
+    Pending,
+    Unlocked { public_key_version: String },
+    IncorrectPin { guesses_remaining: Option<u16> },
+    Failure(RecoveryFailure),
+    Uncertain,
+    Cancelled,
+}
+
+fn validate_pin(pin: String) -> std::result::Result<Zeroizing<Vec<u8>>, NativeError> {
+    let pin = Zeroizing::new(pin.into_bytes());
+    if pin.len() != 4 || !pin.iter().all(u8::is_ascii_digit) {
+        return Err(NativeError::InvalidInput(
+            "XChat recovery PIN must contain exactly four ASCII digits".into(),
+        ));
+    }
+    Ok(pin)
+}
+fn valid_decimal(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= max_bytes && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn valid_public_key_version(value: &str) -> bool {
+    valid_decimal(value, MAX_PUBLIC_KEY_VERSION_BYTES)
+        && (value.len() == 1 || !value.starts_with('0'))
+}
+
+#[cfg(feature = "juicebox")]
+fn parse_recovery_request(
+    pin: String,
+    input_json: String,
+) -> std::result::Result<RecoveryRequest, NativeError> {
+    let encoded = Zeroizing::new(input_json);
+    let pin = validate_pin(pin)?;
+    if encoded.len() > MAX_RECOVERY_INPUT_BYTES {
+        return Err(NativeError::InvalidInput(
+            "XChat recovery configuration exceeds 1 MiB".into(),
+        ));
+    }
+    let mut input: RecoveryInput = serde_json::from_str(&encoded)
+        .map_err(|_| NativeError::InvalidInput("XChat recovery configuration is invalid".into()))?;
+    if let Err(error) = validate_recovery_input(&input) {
+        input.zeroize_secrets();
+        return Err(error);
+    }
+    let config = JuiceboxConfig::new(
+        std::mem::take(&mut input.sdk_config),
+        std::mem::take(&mut input.tokens).into_iter().collect(),
+        input.max_guess_count,
+    );
+    Ok(RecoveryRequest {
+        pin,
+        user_id: std::mem::take(&mut input.user_id),
+        config,
+        registered_keys: std::mem::take(&mut input.registered_keys),
+    })
+}
+
+impl RecoveryInput {
+    fn zeroize_secrets(&mut self) {
+        self.sdk_config.zeroize();
+        for token in self.tokens.values_mut() {
+            token.zeroize();
+        }
+    }
+}
+
+fn validate_recovery_input(input: &RecoveryInput) -> std::result::Result<(), NativeError> {
+    if !valid_decimal(&input.user_id, MAX_X_USER_ID_BYTES) {
+        return Err(NativeError::InvalidInput(
+            "XChat recovery user identity is invalid".into(),
+        ));
+    }
+    if input.sdk_config.len() > MAX_RECOVERY_INPUT_BYTES / 2 {
+        return Err(NativeError::InvalidInput(
+            "XChat Juicebox SDK configuration is too large".into(),
+        ));
+    }
+    if !(1..=20).contains(&input.max_guess_count) {
+        return Err(NativeError::InvalidInput(
+            "XChat Juicebox guess limit is invalid".into(),
+        ));
+    }
+    if input.registered_keys.is_empty() || input.registered_keys.len() > MAX_REGISTERED_KEYS {
+        return Err(NativeError::InvalidInput(
+            "XChat registered public-key count is invalid".into(),
+        ));
+    }
+
+    let sdk: SdkConfiguration = serde_json::from_str(&input.sdk_config).map_err(|_| {
+        NativeError::InvalidInput("XChat Juicebox SDK configuration is invalid".into())
+    })?;
+    if sdk.realms.is_empty() || sdk.realms.len() > 16 {
+        return Err(NativeError::InvalidInput(
+            "XChat Juicebox realm count is invalid".into(),
+        ));
+    }
+    let realm_count = sdk.realms.len() as u32;
+    if sdk.recover_threshold == 0
+        || sdk.recover_threshold <= realm_count / 2
+        || sdk.recover_threshold > sdk.register_threshold
+        || sdk.register_threshold > realm_count
+    {
+        return Err(NativeError::InvalidInput(
+            "XChat Juicebox thresholds are invalid".into(),
+        ));
+    }
+    if sdk.pin_hashing_mode != "Standard2019" {
+        return Err(NativeError::InvalidInput(
+            "XChat Juicebox PIN hashing mode is unsupported".into(),
+        ));
+    }
+
+    let mut realm_ids = HashSet::with_capacity(sdk.realms.len());
+    for realm in sdk.realms {
+        if !valid_hex(&realm.id, 32) || !realm_ids.insert(realm.id) {
+            return Err(NativeError::InvalidInput(
+                "XChat Juicebox realm identity is invalid".into(),
+            ));
+        }
+        let address = Url::parse(&realm.address).map_err(|_| {
+            NativeError::InvalidInput("XChat Juicebox realm address is invalid".into())
+        })?;
+        if !realm.address.is_ascii()
+            || realm.address.len() > 2048
+            || address.scheme() != "https"
+            || address.host_str().is_none()
+            || address.port().is_some_and(|port| port != 443)
+            || !address.username().is_empty()
+            || address.password().is_some()
+            || address.query().is_some()
+            || address.fragment().is_some()
+        {
+            return Err(NativeError::InvalidInput(
+                "XChat Juicebox realm address is not trusted HTTPS".into(),
+            ));
+        }
+        if realm
+            .public_key
+            .as_deref()
+            .is_some_and(|key| !valid_hex(key, 64))
+        {
+            return Err(NativeError::InvalidInput(
+                "XChat Juicebox realm public key is invalid".into(),
+            ));
+        }
+    }
+
+    let token_ids = input.tokens.keys().cloned().collect::<HashSet<_>>();
+    if token_ids != realm_ids
+        || input.tokens.values().any(|token| {
+            token.is_empty()
+                || token.len() > 16 * 1024
+                || !token.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+    {
+        return Err(NativeError::InvalidInput(
+            "XChat Juicebox realm tokens are invalid".into(),
+        ));
+    }
+
+    let mut versions = HashSet::with_capacity(input.registered_keys.len());
+    for key in &input.registered_keys {
+        if !valid_public_key_version(&key.version) || !versions.insert(key.version.as_str()) {
+            return Err(NativeError::InvalidInput(
+                "XChat registered public-key version is invalid".into(),
+            ));
+        }
+        let identity = BASE64.decode(&key.identity_public_key).map_err(|_| {
+            NativeError::InvalidInput("XChat registered identity key is invalid".into())
+        })?;
+        if !PUBLIC_KEY_LENGTHS.contains(&identity.len()) {
+            return Err(NativeError::InvalidInput(
+                "XChat registered identity key has an invalid length".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_hex(value: &str, length: usize) -> bool {
+    value.len() == length && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn matching_public_key_version(
+    recovered: &[u8],
+    registered_keys: &[RegisteredKey],
+) -> std::result::Result<String, RecoveryFailure> {
+    let core = ChatCore::new();
+    core.import_keys(recovered)
+        .map_err(|_| RecoveryFailure::KeyReconstructionFailed)?;
+    let mut matches = registered_keys.iter().filter(|key| {
+        core.matches_registered_key(&key.identity_public_key)
+            .unwrap_or(false)
+    });
+    let version = matches.next().map(|key| key.version.clone());
+    let ambiguous = version.is_some() && matches.next().is_some();
+    core.lock();
+    if ambiguous {
+        Err(RecoveryFailure::AmbiguousRegisteredKey)
+    } else {
+        version.ok_or(RecoveryFailure::RegisteredKeyMismatch)
+    }
+}
+
+fn recovery_terminal(
+    result: RecoverResult,
+    recovered: impl FnOnce(Zeroizing<Vec<u8>>) -> WorkerTerminal,
+) -> WorkerTerminal {
+    match result {
+        RecoverResult::Success(bytes) => recovered(bytes),
+        RecoverResult::Failure {
+            reason: RecoverFailureReason::InvalidPin,
+            guesses_remaining,
+        } => WorkerTerminal::IncorrectPin { guesses_remaining },
+        RecoverResult::Failure {
+            reason: RecoverFailureReason::NotRegistered,
+            ..
+        } => WorkerTerminal::Failure(RecoveryFailure::NotRegistered),
+        RecoverResult::Failure {
+            reason: RecoverFailureReason::InvalidAuth,
+            ..
+        } => WorkerTerminal::Failure(RecoveryFailure::InvalidAuth),
+        RecoverResult::Failure {
+            reason: RecoverFailureReason::UpgradeRequired,
+            ..
+        } => WorkerTerminal::Failure(RecoveryFailure::UpgradeRequired),
+        RecoverResult::Failure {
+            reason: RecoverFailureReason::RateLimitExceeded,
+            ..
+        } => WorkerTerminal::Failure(RecoveryFailure::RateLimited),
+        RecoverResult::Failure {
+            reason: RecoverFailureReason::Transient,
+            ..
+        } => WorkerTerminal::Uncertain,
+        RecoverResult::Failure {
+            reason: RecoverFailureReason::Assertion,
+            ..
+        } => WorkerTerminal::Failure(RecoveryFailure::AssertionFailed),
+        RecoverResult::KeyReconstructionFailed => {
+            WorkerTerminal::Failure(RecoveryFailure::KeyReconstructionFailed)
+        }
+        RecoverResult::NoTokens => WorkerTerminal::Failure(RecoveryFailure::NoTokens),
+    }
+}
+
+#[cfg(feature = "juicebox")]
+enum NetworkOutcome {
+    Recovered(RecoverResult),
+    Cancelled,
+    TimedOut,
+}
+
+#[cfg(feature = "juicebox")]
+async fn wait_for_cancellation(cancel: &CancelToken) {
+    while !cancel.requested() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[cfg(feature = "juicebox")]
+fn recover_with_api(
+    request: RecoveryRequest,
+    cancel: Arc<CancelToken>,
+    client: Arc<dyn JuiceboxApi>,
+    timeout: Duration,
+) -> WorkerTerminal {
+    if cancel.requested() {
+        return WorkerTerminal::Cancelled;
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => return WorkerTerminal::WorkerFailed,
+    };
+    let outcome = runtime.block_on(async {
+        tokio::select! {
+            biased;
+            _ = wait_for_cancellation(&cancel) => NetworkOutcome::Cancelled,
+            _ = tokio::time::sleep(timeout) => NetworkOutcome::TimedOut,
+            result = client.recover_private_key(&request.pin, &request.config) => {
+                NetworkOutcome::Recovered(result)
+            }
+        }
+    });
+    match outcome {
+        NetworkOutcome::Recovered(result) => recovery_terminal(result, |bytes| {
+            match matching_public_key_version(&bytes, &request.registered_keys) {
+                Ok(public_key_version) => WorkerTerminal::Recovered(RecoveredKeys {
+                    bytes,
+                    public_key_version,
+                    user_id: request.user_id.clone(),
+                }),
+                Err(reason) => WorkerTerminal::Failure(reason),
+            }
+        }),
+        NetworkOutcome::Cancelled => WorkerTerminal::Cancelled,
+        NetworkOutcome::TimedOut => WorkerTerminal::Uncertain,
+    }
+}
+
+#[cfg(feature = "juicebox")]
+fn network_recover(request: RecoveryRequest, cancel: Arc<CancelToken>) -> WorkerTerminal {
+    recover_with_api(
+        request,
+        cancel,
+        Arc::new(JuiceboxClient::new()),
+        RECOVERY_TIMEOUT,
+    )
+}
+
+#[cfg(feature = "test-vector")]
+fn mock_recover(pin: Zeroizing<Vec<u8>>, delay: Duration, cancel: &CancelToken) -> WorkerTerminal {
+    if cancel.wait(delay) {
+        return WorkerTerminal::Cancelled;
+    }
+    let correct = pin.as_slice() == b"2580";
+    let uncertain = pin.as_slice() == b"0000";
+    let panic_requested = pin.as_slice() == b"9999";
+    drop(pin);
+    if panic_requested {
+        panic!("synthetic recovery worker failure");
+    }
+    let (result, public_key_version, user_id) = if correct {
+        match official_recovered_keys() {
+            Ok(keys) => (
+                RecoverResult::Success(keys.bytes),
+                keys.public_key_version,
+                keys.user_id,
+            ),
+            Err(_) => return WorkerTerminal::WorkerFailed,
+        }
+    } else if uncertain {
+        (
+            RecoverResult::Failure {
+                reason: RecoverFailureReason::Transient,
+                guesses_remaining: None,
+            },
+            String::new(),
+            String::new(),
+        )
+    } else {
+        (
+            RecoverResult::Failure {
+                reason: RecoverFailureReason::InvalidPin,
+                guesses_remaining: Some(19),
+            },
+            String::new(),
+            String::new(),
+        )
+    };
+    let terminal = recovery_terminal(result, |bytes| {
+        WorkerTerminal::Recovered(RecoveredKeys {
+            bytes,
+            public_key_version,
+            user_id,
+        })
+    });
+    if cancel.requested() {
+        drop(terminal);
+        WorkerTerminal::Cancelled
+    } else {
+        terminal
+    }
+}
+
+fn valid_conversation_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.contains(',')
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn parse_decrypt_input(
+    input_json: String,
+) -> std::result::Result<(String, Vec<String>, Vec<chat_xdk_core::SigningKeyEntry>), NativeError> {
+    if input_json.len() > MAX_DECRYPT_INPUT_BYTES {
+        return Err(NativeError::InvalidInput(
+            "XChat native decrypt input exceeds 20 MiB".into(),
+        ));
+    }
+    let input: DecryptInput = serde_json::from_str(&input_json)
+        .map_err(|_| NativeError::InvalidInput("XChat native decrypt input is invalid".into()))?;
+    if !valid_conversation_id(&input.conversation_id) {
+        return Err(NativeError::InvalidInput(
+            "XChat native conversation ID is invalid".into(),
+        ));
+    }
+    if input.events.is_empty() || input.events.len() > 200 {
+        return Err(NativeError::InvalidInput(
+            "XChat native decrypt event count is invalid".into(),
+        ));
+    }
+    if input.signing_keys.is_empty() || input.signing_keys.len() > MAX_SIGNING_KEYS {
+        return Err(NativeError::InvalidInput(
+            "XChat native signing-key count is invalid".into(),
+        ));
+    }
+    let total_key_bytes = {
+        let mut identities = HashSet::with_capacity(input.signing_keys.len());
+        let mut total = 0usize;
+        for key in &input.signing_keys {
+            let identity = (key.user_id.as_str(), key.public_key_version.as_str());
+            total = total
+                .checked_add(key.public_key.len())
+                .and_then(|size| size.checked_add(key.identity_public_key.len()))
+                .and_then(|size| size.checked_add(key.identity_public_key_signature.len()))
+                .ok_or_else(|| {
+                    NativeError::InvalidInput("XChat native signing-key size overflowed".into())
+                })?;
+            if !valid_decimal(&key.user_id, MAX_X_USER_ID_BYTES)
+                || !valid_public_key_version(&key.public_key_version)
+                || !identities.insert(identity)
+                || !valid_base64_length(&key.public_key, PUBLIC_KEY_LENGTHS)
+                || !valid_base64_length(&key.identity_public_key, PUBLIC_KEY_LENGTHS)
+                || !valid_base64_length(&key.identity_public_key_signature, &[64])
+            {
+                return Err(NativeError::InvalidInput(
+                    "XChat native signing key is invalid".into(),
+                ));
+            }
+        }
+        total
+    };
+    if total_key_bytes > 4 * 1024 * 1024 {
+        return Err(NativeError::InvalidInput(
+            "XChat native signing keys exceed 4 MiB".into(),
+        ));
+    }
+    let signing_keys = input
+        .signing_keys
+        .into_iter()
+        .map(|key| chat_xdk_core::SigningKeyEntry {
+            user_id: key.user_id,
+            public_key_version: key.public_key_version,
+            public_key: key.public_key,
+            identity_public_key: key.identity_public_key,
+            identity_public_key_signature: key.identity_public_key_signature,
+        })
+        .collect();
+    Ok((input.conversation_id, input.events, signing_keys))
+}
+
+fn valid_outgoing_attachments(attachments: &[OutgoingMediaAttachment]) -> bool {
+    !attachments.is_empty()
+        && attachments.len() <= MAX_ATTACHMENTS_PER_MESSAGE
+        && attachments.iter().all(|attachment| {
+            !attachment.media_hash_key.is_empty()
+                && attachment.media_hash_key.len() <= 2048
+                && attachment
+                    .media_hash_key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                && (0..=i64::from(i32::MAX)).contains(&attachment.width)
+                && (0..=i64::from(i32::MAX)).contains(&attachment.height)
+                && (1..=MAX_MEDIA_PLAINTEXT_BYTES as i64).contains(&attachment.filesize_bytes)
+                && !attachment.filename.is_empty()
+                && attachment.filename.len() <= 1024
+                && !attachment.filename.chars().any(char::is_control)
+                && (1..=6).contains(&attachment.media_type)
+                && attachment
+                    .duration_millis
+                    .is_none_or(|duration| duration >= 0)
+        })
+}
+
+fn outgoing_attachment_descriptors(
+    attachments: Vec<OutgoingMediaAttachment>,
+) -> Vec<AttachmentDescriptor> {
+    attachments
+        .into_iter()
+        .map(|attachment| AttachmentDescriptor::Media {
+            media_hash_key: attachment.media_hash_key,
+            width: attachment.width,
+            height: attachment.height,
+            filesize_bytes: attachment.filesize_bytes,
+            filename: attachment.filename,
+            media_type: Some(attachment.media_type),
+            duration_millis: attachment.duration_millis,
+        })
+        .collect()
+}
+
+fn parse_prepare_media_input(
+    input_json: &str,
+) -> std::result::Result<PrepareMediaInput, NativeError> {
+    if input_json.len() > MAX_MEDIA_PATH_BYTES + 512 {
+        return Err(NativeError::InvalidInput(
+            "XChat native media preparation input is too large".into(),
+        ));
+    }
+    let input: PrepareMediaInput = serde_json::from_str(input_json).map_err(|_| {
+        NativeError::InvalidInput("XChat native media preparation input is invalid".into())
+    })?;
+    if !valid_conversation_id(&input.conversation_id)
+        || input.file_path.is_empty()
+        || input.file_path.len() > MAX_MEDIA_PATH_BYTES
+        || input.file_path.chars().any(|value| value == '\0')
+    {
+        return Err(NativeError::InvalidInput(
+            "XChat native media preparation input is invalid".into(),
+        ));
+    }
+    Ok(input)
+}
+
+fn parse_encrypt_text_input(
+    input_json: &str,
+) -> std::result::Result<EncryptTextInput, NativeError> {
+    if input_json.len() > MAX_ENCRYPT_INPUT_BYTES {
+        return Err(NativeError::InvalidInput(
+            "XChat native message input exceeds 32 KiB".into(),
+        ));
+    }
+    let input: EncryptTextInput = serde_json::from_str(input_json)
+        .map_err(|_| NativeError::InvalidInput("XChat native message input is invalid".into()))?;
+    if !valid_conversation_id(&input.conversation_id) {
+        return Err(NativeError::InvalidInput(
+            "XChat native conversation ID is invalid".into(),
+        ));
+    }
+    if input.text.len() > MAX_MESSAGE_TEXT_BYTES
+        || (input.text.trim().is_empty() && input.attachments.is_empty())
+        || (!input.attachments.is_empty() && !valid_outgoing_attachments(&input.attachments))
+        || (input.attachments.is_empty() != input.conversation_key_version.is_none())
+        || input
+            .conversation_key_version
+            .as_deref()
+            .is_some_and(|version| !valid_public_key_version(version))
+    {
+        return Err(NativeError::InvalidInput(
+            "XChat message text or attachments are invalid".into(),
+        ));
+    }
+    Ok(input)
+}
+
+fn parse_encrypt_reply_input(
+    input_json: &str,
+) -> std::result::Result<EncryptReplyInput, NativeError> {
+    if input_json.len() > MAX_ENCRYPT_EVENT_INPUT_BYTES {
+        return Err(NativeError::InvalidInput(
+            "XChat native reply input exceeds 20 MiB".into(),
+        ));
+    }
+    let input: EncryptReplyInput = serde_json::from_str(input_json)
+        .map_err(|_| NativeError::InvalidInput("XChat native reply input is invalid".into()))?;
+    if !valid_conversation_id(&input.conversation_id) {
+        return Err(NativeError::InvalidInput(
+            "XChat native conversation ID is invalid".into(),
+        ));
+    }
+    if input.text.len() > MAX_MESSAGE_TEXT_BYTES
+        || (input.text.trim().is_empty() && input.attachments.is_empty())
+        || (!input.attachments.is_empty() && !valid_outgoing_attachments(&input.attachments))
+        || (input.attachments.is_empty() != input.conversation_key_version.is_none())
+        || input
+            .conversation_key_version
+            .as_deref()
+            .is_some_and(|version| !valid_public_key_version(version))
+    {
+        return Err(NativeError::InvalidInput(
+            "XChat reply text or attachments are invalid".into(),
+        ));
+    }
+    if input.key_events.len() > MAX_REPLY_KEY_EVENTS {
+        return Err(NativeError::InvalidInput(
+            "XChat reply carries too many conversation-key events".into(),
+        ));
+    }
+    let mut decoded = Vec::new();
+    if !valid_encoded_event(&input.target_event, &mut decoded)
+        || !input
+            .key_events
+            .iter()
+            .all(|event| valid_encoded_event(event, &mut decoded))
+    {
+        return Err(NativeError::InvalidInput(
+            "XChat reply carries an invalid encoded event".into(),
+        ));
+    }
+    Ok(input)
+}
+
+fn parse_encrypt_reaction_input(
+    input_json: &str,
+) -> std::result::Result<EncryptReactionInput, NativeError> {
+    if input_json.len() > MAX_ENCRYPT_EVENT_INPUT_BYTES {
+        return Err(NativeError::InvalidInput(
+            "XChat native reaction input exceeds 20 MiB".into(),
+        ));
+    }
+    let input: EncryptReactionInput = serde_json::from_str(input_json)
+        .map_err(|_| NativeError::InvalidInput("XChat native reaction input is invalid".into()))?;
+    if !valid_conversation_id(&input.conversation_id) {
+        return Err(NativeError::InvalidInput(
+            "XChat native conversation ID is invalid".into(),
+        ));
+    }
+    if input.emoji.trim().is_empty()
+        || input.emoji.len() > MAX_REACTION_EMOJI_BYTES
+        || input.emoji.chars().any(char::is_control)
+    {
+        return Err(NativeError::InvalidInput(
+            "XChat reaction emoji is invalid".into(),
+        ));
+    }
+    let mut decoded = Vec::new();
+    if !valid_encoded_event(&input.target_event, &mut decoded) {
+        return Err(NativeError::InvalidInput(
+            "XChat reaction target event is invalid".into(),
+        ));
+    }
+    Ok(input)
+}
+
+fn valid_base64_length(value: &str, lengths: &[usize]) -> bool {
+    let mut decoded = [0; MAX_PUBLIC_KEY_BYTES];
+    value.len() <= 2048
+        && BASE64
+            .decode_slice(value, &mut decoded)
+            .is_ok_and(|length| lengths.contains(&length))
+}
+
+fn valid_encoded_event(value: &str, decoded: &mut Vec<u8>) -> bool {
+    decoded.clear();
+    value.len() <= MAX_DECRYPT_EVENT_BASE64_BYTES
+        && BASE64.decode_vec(value, decoded).is_ok()
+        && decoded.len() <= MAX_DECRYPT_EVENT_BYTES
+}
+
+#[derive(Serialize)]
+struct VerifiedMessage {
+    sequence_id: Option<String>,
+    id: Option<String>,
+    sender_id: Option<String>,
+    conversation_id: Option<String>,
+    created_at_msec: Option<i64>,
+    content_kind: &'static str,
+    text: Option<String>,
+    target_message_id: Option<String>,
+    attachments: Vec<VerifiedAttachment>,
+    reply: bool,
+    reply_text: Option<String>,
+    reply_attachment_count: usize,
+    key_version: Option<String>,
+    verified: bool,
+}
+
+#[derive(Serialize)]
+struct VerifiedAttachment {
+    kind: &'static str,
+    media_hash_key: Option<String>,
+    url: Option<String>,
+    preview_url: Option<String>,
+    name: Option<String>,
+    attachment_id: Option<String>,
+    filesize_bytes: Option<i64>,
+    width: Option<i64>,
+    height: Option<i64>,
+}
+
+fn media_kind(value: Option<&str>) -> &'static str {
+    match value {
+        Some("image") => "image",
+        Some("gif") => "gif",
+        Some("video") => "video",
+        Some("audio") => "audio",
+        Some("file") => "file",
+        Some("svg") => "svg",
+        _ => "media",
+    }
+}
+
+fn verified_attachment(attachment: AttachmentInfo) -> VerifiedAttachment {
+    match attachment {
+        AttachmentInfo::Media(media) => {
+            let (width, height) = media.dimensions.map_or((None, None), |dimensions| {
+                (dimensions.width, dimensions.height)
+            });
+            VerifiedAttachment {
+                kind: media_kind(media.media_type.as_deref()),
+                media_hash_key: media.media_hash_key,
+                url: media.legacy_media_url_https,
+                preview_url: media.legacy_media_preview_url,
+                name: media.filename,
+                attachment_id: media.attachment_id,
+                filesize_bytes: media.filesize_bytes,
+                width,
+                height,
+            }
+        }
+        AttachmentInfo::Url(url) => VerifiedAttachment {
+            kind: "url",
+            media_hash_key: url
+                .banner_image_media_hash_key
+                .or(url.favicon_image_media_hash_key),
+            url: url.url,
+            preview_url: None,
+            name: url.display_title,
+            attachment_id: url.attachment_id,
+            filesize_bytes: None,
+            width: None,
+            height: None,
+        },
+        AttachmentInfo::Post(post) => VerifiedAttachment {
+            kind: "post",
+            media_hash_key: None,
+            url: post.post_url,
+            preview_url: None,
+            name: None,
+            attachment_id: post.attachment_id,
+            filesize_bytes: None,
+            width: None,
+            height: None,
+        },
+        AttachmentInfo::UnifiedCard(card) => VerifiedAttachment {
+            kind: "unified-card",
+            media_hash_key: None,
+            url: card.url,
+            preview_url: None,
+            name: None,
+            attachment_id: card.attachment_id,
+            filesize_bytes: None,
+            width: None,
+            height: None,
+        },
+        AttachmentInfo::Money(money) => VerifiedAttachment {
+            kind: "money",
+            media_hash_key: None,
+            url: None,
+            preview_url: None,
+            name: money.fallback_text,
+            attachment_id: None,
+            filesize_bytes: None,
+            width: None,
+            height: None,
+        },
+    }
+}
+
+fn verified_message(message: Message) -> Option<VerifiedMessage> {
+    let Message {
+        meta,
+        content,
+        key_version,
+        verified,
+        attachments,
+        reply_preview_validation,
+        ..
+    } = message;
+    if !verified {
+        return None;
+    }
+    let reply = matches!(
+        reply_preview_validation,
+        Some(ReplyPreviewValidation::Valid)
+    );
+    let (content_kind, text, target_message_id, reply_text, reply_attachment_count) = match content
+    {
+        MessageContent::Text {
+            text,
+            replying_to_preview,
+            ..
+        } => {
+            let preview = replying_to_preview.filter(|_| reply);
+            let attachment_count = preview
+                .as_ref()
+                .and_then(|value| value.attachments.as_ref())
+                .map_or(0, Vec::len);
+            (
+                "text",
+                Some(text),
+                None,
+                preview.and_then(|value| value.message_text),
+                attachment_count,
+            )
+        }
+        MessageContent::Reaction {
+            emoji,
+            target_message_id,
+        } => ("reaction", Some(emoji), Some(target_message_id), None, 0),
+        MessageContent::ReactionRemoved {
+            emoji,
+            target_message_id,
+        } => (
+            "reaction-removed",
+            Some(emoji),
+            Some(target_message_id),
+            None,
+            0,
+        ),
+        MessageContent::Edit {
+            new_text,
+            target_message_id,
+            ..
+        } => ("edit", Some(new_text), Some(target_message_id), None, 0),
+        MessageContent::MarkRead => ("mark-read", None, None, None, 0),
+        MessageContent::MarkUnread => ("mark-unread", None, None, None, 0),
+        MessageContent::Unknown { .. } => ("unknown", None, None, None, 0),
+    };
+    Some(VerifiedMessage {
+        sequence_id: meta.sequence_id,
+        id: meta.id,
+        sender_id: meta.sender_id,
+        conversation_id: meta.conversation_id,
+        created_at_msec: meta.created_at_msec,
+        content_kind,
+        text,
+        target_message_id,
+        attachments: attachments.into_iter().map(verified_attachment).collect(),
+        reply,
+        reply_text,
+        reply_attachment_count,
+        key_version,
+        verified: true,
+    })
+}
+
+#[derive(Serialize)]
+struct DecryptOutput {
+    messages: Vec<VerifiedMessage>,
+    errors: BTreeMap<usize, String>,
+}
+
+fn decrypt_events(
+    core: &ChatCore,
+    events: &[String],
+    signing_keys: &[chat_xdk_core::SigningKeyEntry],
+) -> std::result::Result<(DecryptOutput, HashMap<String, XChatConversationKey>), NativeError> {
+    if events.len() > 200 {
+        return Err(NativeError::InvalidInput(
+            "XChat native decrypt accepts at most 200 events".into(),
+        ));
+    }
+    let event_bytes = events.iter().try_fold(0usize, |total, event| {
+        total.checked_add(event.len()).ok_or_else(|| {
+            NativeError::InvalidInput("XChat native decrypt input size overflowed".into())
+        })
+    })?;
+    if event_bytes > 16 * 1024 * 1024 {
+        return Err(NativeError::InvalidInput(
+            "XChat native decrypt input exceeds 16 MiB".into(),
+        ));
+    }
+    let mut decoded = Vec::new();
+    for event in events {
+        if !valid_encoded_event(event, &mut decoded) {
+            return Err(NativeError::InvalidInput(
+                "XChat native decrypt event is invalid".into(),
+            ));
+        }
+    }
+    drop(decoded);
+
+    let event_refs = events.iter().map(String::as_str).collect::<Vec<_>>();
+    let result = core.decrypt_events(&event_refs, signing_keys);
+    let messages = result
+        .messages
+        .into_iter()
+        .filter_map(|decrypted| match decrypted.event {
+            Event::Message(message) => verified_message(*message),
+            _ => None,
+        })
+        .collect();
+    let errors = result.errors.into_iter().collect();
+    Ok((
+        DecryptOutput { messages, errors },
+        result.conversation_keys.keys,
+    ))
+}
+
+#[emacs::module(
+    name = "chirp-xchat-native-module",
+    defun_prefix = "chirp-xchat-native"
+)]
+fn init(env: &Env) -> Result<()> {
+    env.define_error(
+        "chirp-xchat-native-error",
+        "Chirp XChat native module error",
+        (env.intern("error")?,),
+    )?;
+    Ok(())
+}
+
+/// Return the native module and pinned chat-xdk versions.
+#[defun]
+fn version() -> Result<&'static str> {
+    Ok(MODULE_VERSION)
+}
+
+/// Create and return an opaque XChat crypto session.
+#[defun(user_ptr)]
+fn session_create() -> Result<NativeSession> {
+    Ok(NativeSession::new())
+}
+
+/// Return whether SESSION still owns native crypto state.
+#[defun]
+fn session_live_p(session: &NativeSession) -> Result<bool> {
+    Ok(session.live())
+}
+
+/// Return whether SESSION has imported its native identity keys.
+#[defun]
+fn session_unlocked_p(env: &Env, session: &NativeSession) -> Result<bool> {
+    session
+        .unlocked()
+        .or_signal(env, "chirp-xchat-native-error")
+}
+
+/// Return verified plaintext events decrypted inside SESSION.
+#[defun]
+fn decrypt(env: &Env, session: &NativeSession, input_json: String) -> Result<String> {
+    session
+        .decrypt(input_json)
+        .or_signal(env, "chirp-xchat-native-error")
+}
+
+/// Prepare one encrypted and signed text message inside SESSION.
+#[defun]
+fn encrypt_text(env: &Env, session: &NativeSession, input_json: String) -> Result<String> {
+    session
+        .encrypt_text(input_json)
+        .or_signal(env, "chirp-xchat-native-error")
+}
+
+/// Prepare one encrypted and signed reply inside SESSION.
+#[defun]
+fn encrypt_reply(env: &Env, session: &NativeSession, input_json: String) -> Result<String> {
+    session
+        .encrypt_reply(input_json)
+        .or_signal(env, "chirp-xchat-native-error")
+}
+
+/// Prepare one encrypted and signed reaction operation inside SESSION.
+#[defun]
+fn encrypt_reaction(env: &Env, session: &NativeSession, input_json: String) -> Result<String> {
+    session
+        .encrypt_reaction(input_json)
+        .or_signal(env, "chirp-xchat-native-error")
+}
+
+/// Encrypt one local media file into a bounded native staging file.
+#[defun]
+fn prepare_media(env: &Env, session: &NativeSession, input_json: String) -> Result<String> {
+    session
+        .prepare_media(input_json)
+        .or_signal(env, "chirp-xchat-native-error")
+}
+
+/// Release one native encrypted-media staging file.
+#[defun]
+fn release_media(env: &Env, session: &NativeSession, stage_id: i64) -> Result<bool> {
+    session
+        .release_media(stage_id)
+        .or_signal(env, "chirp-xchat-native-error")
+}
+
+/// Decrypt one downloaded XChat media blob inside SESSION.
+#[defun]
+fn decrypt_media<'e>(
+    env: &'e Env,
+    session: &NativeSession,
+    conversation_id: String,
+    key_version: String,
+    encrypted_base64: String,
+) -> Result<Value<'e>> {
+    let plaintext = session
+        .decrypt_media(&conversation_id, &key_version, &encrypted_base64)
+        .or_signal(env, "chirp-xchat-native-error")?;
+    let encoded = Zeroizing::new(BASE64.encode(plaintext.as_slice()));
+    encoded.as_str().into_lisp(env)
+}
+
+/// Destroy SESSION's native crypto state and return whether it was live.
+#[defun]
+fn session_destroy(session: &NativeSession) -> Result<bool> {
+    Ok(session.destroy())
+}
+
+/// Start one official Juicebox recovery attempt in SESSION.
+#[cfg(feature = "juicebox")]
+#[defun]
+fn recovery_start(
+    env: &Env,
+    session: &NativeSession,
+    epoch: i64,
+    pin: String,
+    input_json: String,
+) -> Result<i64> {
+    session
+        .start_recovery(epoch, pin, input_json)
+        .or_signal(env, "chirp-xchat-native-error")
+}
+
+/// Poll recovery JOB-ID in SESSION for EPOCH without blocking.
+#[defun]
+fn recovery_poll<'e>(
+    env: &'e Env,
+    session: &NativeSession,
+    job_id: i64,
+    epoch: i64,
+) -> Result<Value<'e>> {
+    let poll = session
+        .poll_recovery(job_id, epoch)
+        .or_signal(env, "chirp-xchat-native-error")?;
+    recovery_poll_value(env, poll, job_id)
+}
+
+/// Request cancellation of recovery JOB-ID in SESSION for EPOCH.
+#[defun]
+fn recovery_cancel(env: &Env, session: &NativeSession, job_id: i64, epoch: i64) -> Result<bool> {
+    session
+        .cancel_recovery(job_id, epoch)
+        .or_signal(env, "chirp-xchat-native-error")
+}
+
+/// Verify the bundled official synthetic vector inside SESSION.
+#[cfg(feature = "test-vector")]
+#[defun]
+fn test_decrypt_official_vector(env: &Env, session: &NativeSession) -> Result<String> {
+    run_official_vector(session).or_signal(env, "chirp-xchat-native-error")
+}
+
+/// Start one delayed, network-free synthetic recovery in SESSION.
+#[cfg(feature = "test-vector")]
+#[defun]
+fn test_recovery_start(
+    env: &Env,
+    session: &NativeSession,
+    epoch: i64,
+    pin: String,
+    delay_msec: i64,
+) -> Result<i64> {
+    session
+        .start_mock_recovery(epoch, pin, delay_msec)
+        .or_signal(env, "chirp-xchat-native-error")
+}
+
+/// Poll synthetic recovery JOB-ID in SESSION for EPOCH.
+#[cfg(feature = "test-vector")]
+#[defun]
+fn test_recovery_poll<'e>(
+    env: &'e Env,
+    session: &NativeSession,
+    job_id: i64,
+    epoch: i64,
+) -> Result<Value<'e>> {
+    let poll = session
+        .poll_recovery(job_id, epoch)
+        .or_signal(env, "chirp-xchat-native-error")?;
+    recovery_poll_value(env, poll, job_id)
+}
+
+/// Cancel synthetic recovery JOB-ID in SESSION for EPOCH.
+#[cfg(feature = "test-vector")]
+#[defun]
+fn test_recovery_cancel(
+    env: &Env,
+    session: &NativeSession,
+    job_id: i64,
+    epoch: i64,
+) -> Result<bool> {
+    session
+        .cancel_recovery(job_id, epoch)
+        .or_signal(env, "chirp-xchat-native-error")
+}
+
+fn recovery_poll_value<'e>(env: &'e Env, poll: RecoveryPoll, job_id: i64) -> Result<Value<'e>> {
+    match poll {
+        RecoveryPoll::Pending => recovery_status(env, "pending", job_id),
+        RecoveryPoll::Unlocked { public_key_version } => env.list((
+            env.intern(":status")?,
+            env.intern("unlocked")?,
+            env.intern(":job-id")?,
+            job_id,
+            env.intern(":public-key-version")?,
+            public_key_version,
+        )),
+        RecoveryPoll::IncorrectPin {
+            guesses_remaining: Some(guesses),
+        } => env.list((
+            env.intern(":status")?,
+            env.intern("incorrect-pin")?,
+            env.intern(":job-id")?,
+            job_id,
+            env.intern(":guesses-remaining")?,
+            i64::from(guesses),
+        )),
+        RecoveryPoll::IncorrectPin {
+            guesses_remaining: None,
+        } => recovery_status(env, "incorrect-pin", job_id),
+        RecoveryPoll::Failure(reason) => recovery_status(
+            env,
+            match reason {
+                RecoveryFailure::NotRegistered => "not-registered",
+                RecoveryFailure::InvalidAuth => "invalid-auth",
+                RecoveryFailure::UpgradeRequired => "upgrade-required",
+                RecoveryFailure::RateLimited => "rate-limited",
+                RecoveryFailure::AssertionFailed => "assertion-failed",
+                RecoveryFailure::KeyReconstructionFailed => "key-reconstruction-failed",
+                RecoveryFailure::NoTokens => "no-tokens",
+                RecoveryFailure::RegisteredKeyMismatch => "registered-key-mismatch",
+                RecoveryFailure::AmbiguousRegisteredKey => "ambiguous-registered-key",
+            },
+            job_id,
+        ),
+        RecoveryPoll::Uncertain => recovery_status(env, "uncertain", job_id),
+        RecoveryPoll::Cancelled => recovery_status(env, "cancelled", job_id),
+    }
+}
+
+fn recovery_status<'e>(env: &'e Env, status: &str, job_id: i64) -> Result<Value<'e>> {
+    env.list((
+        env.intern(":status")?,
+        env.intern(status)?,
+        env.intern(":job-id")?,
+        job_id,
+    ))
+}
+
+#[cfg(feature = "test-vector")]
+#[derive(serde::Deserialize)]
+struct OfficialVector {
+    private_keys_concat_b64: String,
+    event_key_change_b64: String,
+    event_message_b64: String,
+    event_conversation_id: String,
+    event_sender_id: String,
+    event_recipient_key_version: String,
+    event_signing_key_version: String,
+    event_message_text: String,
+    identity_public_b64: String,
+    signing_public_b64: String,
+    identity_public_key_signature_b64: String,
+}
+
+#[cfg(feature = "test-vector")]
+fn parse_official_vector() -> std::result::Result<OfficialVector, NativeError> {
+    serde_json::from_str(include_str!("../tests/fixtures/sdk_vectors.json"))
+        .map_err(|_| NativeError::InvalidInput("official XChat vector is invalid".into()))
+}
+
+#[cfg(feature = "test-vector")]
+fn take_private_keys(
+    vector: &mut OfficialVector,
+) -> std::result::Result<Zeroizing<Vec<u8>>, NativeError> {
+    let encoded = Zeroizing::new(std::mem::take(&mut vector.private_keys_concat_b64));
+    BASE64
+        .decode(encoded.as_bytes())
+        .map(Zeroizing::new)
+        .map_err(|_| {
+            NativeError::InvalidInput("official XChat private-key vector is invalid".into())
+        })
+}
+
+#[cfg(feature = "test-vector")]
+fn official_recipient_user_id(vector: &OfficialVector) -> std::result::Result<String, NativeError> {
+    vector
+        .event_conversation_id
+        .split([':', '-'])
+        .find(|participant| {
+            *participant != vector.event_sender_id
+                && !participant.is_empty()
+                && participant.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .map(str::to_string)
+        .ok_or_else(|| NativeError::InvalidInput("official XChat recipient is invalid".into()))
+}
+
+#[cfg(feature = "test-vector")]
+fn official_recovered_keys() -> std::result::Result<RecoveredKeys, NativeError> {
+    let mut vector = parse_official_vector()?;
+    let user_id = official_recipient_user_id(&vector)?;
+    let bytes = take_private_keys(&mut vector)?;
+    Ok(RecoveredKeys {
+        bytes,
+        public_key_version: vector.event_recipient_key_version,
+        user_id,
+    })
+}
+
+#[cfg(feature = "test-vector")]
+fn run_official_vector(session: &NativeSession) -> std::result::Result<String, NativeError> {
+    let mut vector = parse_official_vector()?;
+    let user_id = official_recipient_user_id(&vector)?;
+    let private_keys = take_private_keys(&mut vector)?;
+    let output = session.with_core(|core| {
+        core.import_keys_with_version(&private_keys, &vector.event_recipient_key_version)
+            .map_err(|error| NativeError::Xdk(error.to_string()))?;
+        let signing_keys = [chat_xdk_core::SigningKeyEntry {
+            user_id: vector.event_sender_id,
+            public_key_version: vector.event_signing_key_version,
+            public_key: vector.signing_public_b64,
+            identity_public_key: vector.identity_public_b64,
+            identity_public_key_signature: vector.identity_public_key_signature_b64,
+        }];
+        let events = vec![vector.event_key_change_b64, vector.event_message_b64];
+        let (output, _) = decrypt_events(core, &events, &signing_keys)?;
+        if output.messages.len() != 1
+            || output.messages[0].text.as_deref() != Some(&vector.event_message_text)
+        {
+            return Err(NativeError::Xdk(
+                "official vector did not produce its verified message".into(),
+            ));
+        }
+        serde_json::to_string(&output).map_err(|error| NativeError::Xdk(error.to_string()))
+    })?;
+    session.lock_state().user_id = Some(user_id);
+    Ok(output)
+}
+
+#[cfg(all(test, feature = "test-vector"))]
+mod tests {
+    use super::*;
+    #[cfg(feature = "juicebox")]
+    use chat_xdk_core::keys::juicebox::{DeleteResult, RegisterResult};
+    #[cfg(feature = "juicebox")]
+    use std::sync::atomic::AtomicUsize;
+
+    #[cfg(feature = "juicebox")]
+    enum MockRecovery {
+        Return(Mutex<Option<RecoverResult>>),
+        Pending(Arc<AtomicBool>),
+    }
+
+    #[cfg(feature = "juicebox")]
+    struct MockJuicebox {
+        calls: Arc<AtomicUsize>,
+        recovery: MockRecovery,
+    }
+
+    #[cfg(feature = "juicebox")]
+    struct DropFlag(Arc<AtomicBool>);
+
+    #[cfg(feature = "juicebox")]
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[cfg(feature = "juicebox")]
+    #[async_trait::async_trait]
+    impl JuiceboxApi for MockJuicebox {
+        async fn register_private_key(
+            &self,
+            _pin: &[u8],
+            _config: &JuiceboxConfig,
+            _secret: &[u8],
+        ) -> RegisterResult {
+            unreachable!("recovery tests never register keys")
+        }
+
+        async fn recover_private_key(
+            &self,
+            _pin: &[u8],
+            _config: &JuiceboxConfig,
+        ) -> RecoverResult {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            match &self.recovery {
+                MockRecovery::Return(result) => result
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                    .expect("mock recovery is called exactly once"),
+                MockRecovery::Pending(dropped) => {
+                    let _drop = DropFlag(Arc::clone(dropped));
+                    std::future::pending::<RecoverResult>().await
+                }
+            }
+        }
+
+        async fn delete_keys(&self, _config: &JuiceboxConfig) -> DeleteResult {
+            unreachable!("recovery tests never delete keys")
+        }
+    }
+
+    fn wait_for_terminal(
+        session: &NativeSession,
+        job_id: i64,
+        epoch: i64,
+    ) -> std::result::Result<RecoveryPoll, NativeError> {
+        for _ in 0..200 {
+            let poll = session.poll_recovery(job_id, epoch)?;
+            if poll != RecoveryPoll::Pending {
+                return Ok(poll);
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("synthetic recovery did not settle");
+    }
+
+    fn wait_for_worker_exit(session: &NativeSession) {
+        for _ in 0..200 {
+            let finished = session
+                .lock_state()
+                .recovery
+                .as_ref()
+                .and_then(|job| job.thread.as_ref())
+                .is_some_and(JoinHandle::is_finished);
+            if finished {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("synthetic recovery worker did not exit");
+    }
+
+    fn valid_recovery_input() -> RecoveryInput {
+        let vector = parse_official_vector().expect("official vector parses");
+        let realm_id = "01".repeat(16);
+        RecoveryInput {
+            user_id: "2222".into(),
+            sdk_config: serde_json::json!({
+                "realms": [{
+                    "id": realm_id.clone(),
+                    "address": "https://realm.example/",
+                    "public_key": "11".repeat(32)
+                }],
+                "register_threshold": 1,
+                "recover_threshold": 1,
+                "pin_hashing_mode": "Standard2019"
+            })
+            .to_string(),
+            tokens: [(realm_id, "opaque-token".to_string())]
+                .into_iter()
+                .collect(),
+            max_guess_count: 20,
+            registered_keys: vec![RegisteredKey {
+                version: vector.event_recipient_key_version,
+                identity_public_key: vector.identity_public_b64,
+            }],
+        }
+    }
+
+    #[cfg(feature = "juicebox")]
+    fn valid_recovery_json() -> String {
+        let input = valid_recovery_input();
+        let registered_keys = input
+            .registered_keys
+            .iter()
+            .map(|key| {
+                serde_json::json!({
+                    "version": key.version,
+                    "identity_public_key": key.identity_public_key
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "user_id": input.user_id,
+            "sdk_config": input.sdk_config,
+            "tokens": input.tokens,
+            "max_guess_count": input.max_guess_count,
+            "registered_keys": registered_keys
+        })
+        .to_string()
+    }
+
+    #[cfg(feature = "juicebox")]
+    fn valid_recovery_request() -> RecoveryRequest {
+        let input = valid_recovery_input();
+        RecoveryRequest {
+            pin: validate_pin("2580".into()).expect("PIN is valid"),
+            user_id: input.user_id,
+            config: JuiceboxConfig::new(
+                input.sdk_config,
+                input.tokens.into_iter().collect(),
+                input.max_guess_count,
+            ),
+            registered_keys: input.registered_keys,
+        }
+    }
+
+    #[test]
+    fn official_vector_returns_only_verified_plaintext() {
+        let session = NativeSession::new();
+        let output = run_official_vector(&session).expect("official vector decrypts");
+        let parsed: serde_json::Value = serde_json::from_str(&output).expect("valid JSON");
+        assert_eq!(parsed["messages"].as_array().map(Vec::len), Some(1));
+        assert_eq!(parsed["messages"][0]["verified"], true);
+        assert_eq!(
+            parsed["errors"].as_object().map(serde_json::Map::len),
+            Some(0)
+        );
+        assert!(!output.contains("private_key"));
+        assert!(!output.contains("conversation_key"));
+        assert!(!output.contains("original_b64"));
+
+        let message = &parsed["messages"][0];
+        let conversation_id = message["conversation_id"]
+            .as_str()
+            .expect("fixture has a conversation ID");
+        let plaintext = "outbound fixture message";
+        let prepared = session
+            .encrypt_text(
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "text": plaintext
+                })
+                .to_string(),
+            )
+            .expect("verified cached key prepares a message");
+        let payload: serde_json::Value =
+            serde_json::from_str(&prepared).expect("prepared payload is JSON");
+        assert!(payload["message_id"].as_str().is_some());
+        assert!(payload["encoded_message_create_event"].as_str().is_some());
+        assert!(payload["encoded_message_event_signature"]
+            .as_str()
+            .is_some());
+        assert!(!prepared.contains(plaintext));
+        assert!(!prepared.contains("conversation_key"));
+
+        let vector = parse_official_vector().expect("official vector parses");
+        let reply_text = "outbound fixture reply";
+        let prepared_reply = session
+            .encrypt_reply(
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "text": reply_text,
+                    "target_event": vector.event_message_b64,
+                    "key_events": [vector.event_key_change_b64]
+                })
+                .to_string(),
+            )
+            .expect("verified cached key prepares a reply");
+        let reply_payload: serde_json::Value =
+            serde_json::from_str(&prepared_reply).expect("prepared reply is JSON");
+        assert!(reply_payload["message_id"].as_str().is_some());
+        assert!(!prepared_reply.contains(reply_text));
+        assert!(!prepared_reply.contains("conversation_key"));
+
+        for remove in [false, true] {
+            let prepared_reaction = session
+                .encrypt_reaction(
+                    serde_json::json!({
+                        "conversation_id": conversation_id,
+                        "target_event": vector.event_message_b64,
+                        "emoji": "🔥",
+                        "remove": remove
+                    })
+                    .to_string(),
+                )
+                .expect("verified cached key prepares a reaction");
+            let reaction_payload: serde_json::Value =
+                serde_json::from_str(&prepared_reaction).expect("prepared reaction is JSON");
+            assert!(reaction_payload["message_id"].as_str().is_some());
+            assert!(!prepared_reaction.contains("🔥"));
+            assert!(!prepared_reaction.contains("conversation_key"));
+        }
+    }
+
+    #[test]
+    fn verified_message_preserves_media_and_valid_reply_facts() {
+        let preview = chat_xdk_core::ReplyingToPreview {
+            sender_id: None,
+            message_text: Some("quoted".into()),
+            entities: None,
+            attachments: None,
+            sender_display_name: None,
+            replying_to_message_sequence_id: None,
+            replying_to_message_id: None,
+        };
+        let content = MessageContent::Text {
+            text: String::new(),
+            entities: None,
+            attachments: None,
+            replying_to_preview: Some(preview),
+            forwarded_message: None,
+            sent_from: None,
+            quick_reply: None,
+            ctas: None,
+        };
+        let attachment = AttachmentInfo::Media(chat_xdk_core::MediaAttachmentInfo {
+            media_hash_key: Some("media-hash".into()),
+            dimensions: None,
+            media_type: Some("image".into()),
+            duration_millis: None,
+            filesize_bytes: None,
+            filename: Some("photo.jpg".into()),
+            attachment_id: None,
+            legacy_media_url_https: Some("https://pbs.twimg.com/photo.jpg".into()),
+            legacy_media_preview_url: None,
+        });
+        let message = chat_xdk_core::Message {
+            meta: chat_xdk_core::EventMeta::default(),
+            content,
+            key_version: Some("1".into()),
+            verified: true,
+            should_notify: None,
+            ttl_msec: None,
+            attachments: vec![attachment],
+            media_hashes: Vec::new(),
+            reply_preview_validation: Some(ReplyPreviewValidation::Valid),
+        };
+        let mut invalid_reply = message.clone();
+        invalid_reply.reply_preview_validation = Some(ReplyPreviewValidation::Invalid);
+
+        let output = verified_message(message).expect("verified message is exported");
+        assert_eq!(output.content_kind, "text");
+        assert_eq!(output.text.as_deref(), Some(""));
+        assert!(output.reply);
+        assert_eq!(output.reply_text.as_deref(), Some("quoted"));
+        assert_eq!(output.attachments.len(), 1);
+        assert_eq!(output.attachments[0].kind, "image");
+        assert_eq!(
+            output.attachments[0].media_hash_key.as_deref(),
+            Some("media-hash")
+        );
+        assert_eq!(
+            output.attachments[0].url.as_deref(),
+            Some("https://pbs.twimg.com/photo.jpg")
+        );
+        let invalid = verified_message(invalid_reply).expect("message remains verified");
+        assert!(!invalid.reply);
+        assert_eq!(invalid.reply_text, None);
+        assert_eq!(invalid.reply_attachment_count, 0);
+    }
+    #[test]
+    fn verified_reaction_preserves_target_sequence_identity() {
+        let message = chat_xdk_core::Message {
+            meta: chat_xdk_core::EventMeta::default(),
+            content: MessageContent::Reaction {
+                emoji: "🔥".into(),
+                target_message_id: "2094820808055113564".into(),
+            },
+            key_version: Some("1".into()),
+            verified: true,
+            should_notify: None,
+            ttl_msec: None,
+            attachments: Vec::new(),
+            media_hashes: Vec::new(),
+            reply_preview_validation: None,
+        };
+        let output = verified_message(message).expect("verified reaction is exported");
+        assert_eq!(output.content_kind, "reaction");
+        assert_eq!(output.text.as_deref(), Some("🔥"));
+        assert_eq!(
+            output.target_message_id.as_deref(),
+            Some("2094820808055113564")
+        );
+    }
+
+    #[test]
+    fn media_decryption_uses_the_cached_verified_key_version() {
+        let mut vector = parse_official_vector().expect("official vector parses");
+        let user_id = official_recipient_user_id(&vector).expect("recipient is valid");
+        let private_keys = take_private_keys(&mut vector).expect("private keys decode");
+        let conversation_id = vector.event_conversation_id.clone();
+        let session = NativeSession::new();
+        session
+            .with_core(|core| {
+                core.import_keys_with_version(&private_keys, &vector.event_recipient_key_version)
+                    .map_err(|error| NativeError::Xdk(error.to_string()))
+            })
+            .expect("official identity imports");
+        session.lock_state().user_id = Some(user_id);
+        let output = session
+            .decrypt(
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "events": [
+                        vector.event_key_change_b64,
+                        vector.event_message_b64,
+                    ],
+                    "signing_keys": [{
+                        "user_id": vector.event_sender_id,
+                        "public_key_version": vector.event_signing_key_version,
+                        "public_key": vector.signing_public_b64,
+                        "identity_public_key": vector.identity_public_b64,
+                        "identity_public_key_signature":
+                            vector.identity_public_key_signature_b64,
+                    }],
+                })
+                .to_string(),
+            )
+            .expect("official event batch decrypts");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("decrypt output is JSON");
+        let key_version = parsed["messages"][0]["key_version"]
+            .as_str()
+            .expect("message key version")
+            .to_string();
+        let plaintext = b"GIF89a encrypted attachment";
+        let encrypted = {
+            let state = session.lock_state();
+            let core = state.core.as_ref().expect("session is live");
+            let key = state
+                .conversation_keys
+                .get(&conversation_id)
+                .and_then(|keys| keys.get(&key_version))
+                .expect("verified key is retained");
+            core.encrypt_stream(plaintext, key)
+                .expect("fixture media encrypts")
+        };
+        let decrypted = session
+            .decrypt_media(&conversation_id, &key_version, &BASE64.encode(encrypted))
+            .expect("media decrypts");
+        assert_eq!(decrypted.as_slice(), plaintext);
+    }
+
+    #[test]
+    fn media_preparation_streams_and_releases_staging_file() {
+        let mut vector = parse_official_vector().expect("official vector parses");
+        let user_id = official_recipient_user_id(&vector).expect("recipient is valid");
+        let private_keys = take_private_keys(&mut vector).expect("private keys decode");
+        let conversation_id = vector.event_conversation_id.clone();
+        let session = NativeSession::new();
+        session
+            .with_core(|core| {
+                core.import_keys_with_version(&private_keys, &vector.event_recipient_key_version)
+                    .map_err(|error| NativeError::Xdk(error.to_string()))
+            })
+            .expect("official identity imports");
+        session.lock_state().user_id = Some(user_id);
+        session
+            .decrypt(
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "events": [
+                        vector.event_key_change_b64,
+                        vector.event_message_b64,
+                    ],
+                    "signing_keys": [{
+                        "user_id": vector.event_sender_id,
+                        "public_key_version": vector.event_signing_key_version,
+                        "public_key": vector.signing_public_b64,
+                        "identity_public_key": vector.identity_public_b64,
+                        "identity_public_key_signature":
+                            vector.identity_public_key_signature_b64,
+                    }],
+                })
+                .to_string(),
+            )
+            .expect("official event batch decrypts");
+
+        let plaintext = b"GIF89a\x20\x00\x10\x00streamed attachment";
+        let mut source = NamedTempFile::new().expect("source tempfile opens");
+        source.write_all(plaintext).expect("source tempfile writes");
+        source.flush().expect("source tempfile flushes");
+        let output = session
+            .prepare_media(
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "file_path": source.path(),
+                })
+                .to_string(),
+            )
+            .expect("media stages");
+        let prepared: serde_json::Value =
+            serde_json::from_str(&output).expect("staging output is JSON");
+        let stage_id = prepared["stage_id"].as_i64().expect("stage id");
+        let encrypted_path =
+            std::path::PathBuf::from(prepared["encrypted_file"].as_str().expect("stage path"));
+        let encrypted = std::fs::read(&encrypted_path).expect("ciphertext is readable");
+        assert_eq!(prepared["mime_type"], "image/gif");
+        assert_eq!(prepared["media_type"], 2);
+        assert_eq!(prepared["width"], 32);
+        assert_eq!(prepared["height"], 16);
+        assert_eq!(
+            prepared["plaintext_bytes"],
+            serde_json::Value::from(plaintext.len())
+        );
+        let key_version = prepared["key_version"]
+            .as_str()
+            .expect("staging key version")
+            .to_string();
+        let decrypted = session
+            .decrypt_media(&conversation_id, &key_version, &BASE64.encode(encrypted))
+            .expect("staged media decrypts");
+        assert_eq!(decrypted.as_slice(), plaintext);
+        let payload = session
+            .prepare_text_payload(
+                &serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "conversation_key_version": key_version,
+                    "text": "",
+                    "attachments": [{
+                        "media_hash_key": "media_hash",
+                        "width": 32,
+                        "height": 16,
+                        "filesize_bytes": plaintext.len(),
+                        "filename": "animation.gif",
+                        "media_type": 2
+                    }]
+                })
+                .to_string(),
+            )
+            .expect("attachment message uses the staging key version");
+        assert!(!payload.encrypted_content.is_empty());
+        assert!(session.release_media(stage_id).expect("stage releases"));
+        assert!(!encrypted_path.exists());
+        assert!(!session
+            .release_media(stage_id)
+            .expect("release is idempotent"));
+    }
+
+    #[test]
+    fn destroy_is_idempotent_and_closes_the_session() {
+        let session = NativeSession::new();
+        assert!(session.destroy());
+        assert!(!session.destroy());
+        assert!(matches!(
+            run_official_vector(&session),
+            Err(NativeError::Closed)
+        ));
+    }
+
+    #[test]
+    fn decrypt_bounds_are_enforced_before_sdk_work() {
+        let core = ChatCore::new();
+        let too_many = vec![String::new(); 201];
+        assert!(matches!(
+            decrypt_events(&core, &too_many, &[]),
+            Err(NativeError::InvalidInput(_))
+        ));
+        let too_large = vec!["x".repeat(16 * 1024 * 1024 + 1)];
+        assert!(matches!(
+            decrypt_events(&core, &too_large, &[]),
+            Err(NativeError::InvalidInput(_))
+        ));
+    }
+    #[test]
+    fn x_identity_rules_reject_ambiguous_or_unbounded_values() {
+        assert!(valid_decimal("0", MAX_X_USER_ID_BYTES));
+        assert!(valid_decimal(
+            &"9".repeat(MAX_X_USER_ID_BYTES),
+            MAX_X_USER_ID_BYTES
+        ));
+        assert!(!valid_decimal("", MAX_X_USER_ID_BYTES));
+        assert!(!valid_decimal("user-1", MAX_X_USER_ID_BYTES));
+        assert!(!valid_decimal(
+            &"9".repeat(MAX_X_USER_ID_BYTES + 1),
+            MAX_X_USER_ID_BYTES
+        ));
+
+        assert!(valid_public_key_version("0"));
+        assert!(valid_public_key_version("12"));
+        assert!(!valid_public_key_version(""));
+        assert!(!valid_public_key_version("01"));
+        assert!(!valid_public_key_version("v1"));
+        assert!(!valid_public_key_version(
+            &"9".repeat(MAX_PUBLIC_KEY_VERSION_BYTES + 1)
+        ));
+    }
+
+    #[test]
+    fn decrypt_input_uses_shared_x_identity_rules() {
+        let vector = parse_official_vector().expect("official vector parses");
+        let input = |user_id: &str, public_key_version: &str| {
+            serde_json::json!({
+                "conversation_id": &vector.event_conversation_id,
+                "events": [&vector.event_message_b64],
+                "signing_keys": [{
+                    "user_id": user_id,
+                    "public_key_version": public_key_version,
+                    "public_key": &vector.signing_public_b64,
+                    "identity_public_key": &vector.identity_public_b64,
+                    "identity_public_key_signature":
+                        &vector.identity_public_key_signature_b64
+                }]
+            })
+            .to_string()
+        };
+        assert!(parse_decrypt_input(input(
+            &vector.event_sender_id,
+            &vector.event_signing_key_version
+        ))
+        .is_ok());
+        assert!(matches!(
+            parse_decrypt_input(input("sender", &vector.event_signing_key_version)),
+            Err(NativeError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            parse_decrypt_input(input(&vector.event_sender_id, "01")),
+            Err(NativeError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn encoded_event_validation_accepts_only_the_decoded_size_limit() {
+        let mut decoded = Vec::new();
+        let maximum = BASE64.encode(vec![0; MAX_DECRYPT_EVENT_BYTES]);
+        assert!(valid_encoded_event(&maximum, &mut decoded));
+        assert_eq!(decoded.len(), MAX_DECRYPT_EVENT_BYTES);
+
+        let oversized = BASE64.encode(vec![0; MAX_DECRYPT_EVENT_BYTES + 1]);
+        assert!(!valid_encoded_event(&oversized, &mut decoded));
+        assert!(!valid_encoded_event("not base64", &mut decoded));
+    }
+
+    #[test]
+    fn encrypt_text_input_is_strictly_bounded() {
+        let valid = serde_json::json!({
+            "conversation_id": "1-2",
+            "text": "hello"
+        })
+        .to_string();
+        assert!(parse_encrypt_text_input(&valid).is_ok());
+
+        let attachment = serde_json::json!({
+            "conversation_id": "1-2",
+            "conversation_key_version": "7",
+            "text": "",
+            "attachments": [{
+                "media_hash_key": "hash",
+                "width": 20,
+                "height": 10,
+                "filesize_bytes": 40,
+                "filename": "photo.jpg",
+                "media_type": 1
+            }]
+        })
+        .to_string();
+        assert!(parse_encrypt_text_input(&attachment).is_ok());
+        let missing_version = attachment.replace("\"conversation_key_version\":\"7\",", "");
+        assert!(matches!(
+            parse_encrypt_text_input(&missing_version),
+            Err(NativeError::InvalidInput(_))
+        ));
+
+        let sender_override = serde_json::json!({
+            "conversation_id": "1-2",
+            "sender_id": "9999",
+            "text": "hello"
+        })
+        .to_string();
+        assert!(matches!(
+            parse_encrypt_text_input(&sender_override),
+            Err(NativeError::InvalidInput(_))
+        ));
+
+        let empty = valid.replace("hello", "   ");
+        assert!(matches!(
+            parse_encrypt_text_input(&empty),
+            Err(NativeError::InvalidInput(_))
+        ));
+        let oversized = serde_json::json!({
+            "conversation_id": "1-2",
+            "text": "x".repeat(MAX_MESSAGE_TEXT_BYTES + 1)
+        })
+        .to_string();
+        assert!(matches!(
+            parse_encrypt_text_input(&oversized),
+            Err(NativeError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn reply_and_reaction_inputs_are_strictly_bounded() {
+        let encoded = BASE64.encode([0_u8]);
+        let reply = serde_json::json!({
+            "conversation_id": "1-2",
+            "text": "reply",
+            "target_event": encoded,
+            "key_events": [encoded]
+        })
+        .to_string();
+        assert!(parse_encrypt_reply_input(&reply).is_ok());
+
+        let reaction = serde_json::json!({
+            "conversation_id": "1-2",
+            "target_event": encoded,
+            "emoji": "🔥",
+            "remove": false
+        })
+        .to_string();
+        assert!(parse_encrypt_reaction_input(&reaction).is_ok());
+
+        let spoofed = serde_json::json!({
+            "conversation_id": "1-2",
+            "target_event": encoded,
+            "emoji": "🔥",
+            "remove": false,
+            "sender_id": "9999"
+        })
+        .to_string();
+        assert!(matches!(
+            parse_encrypt_reaction_input(&spoofed),
+            Err(NativeError::InvalidInput(_))
+        ));
+
+        let empty_emoji = reaction.replace("🔥", "");
+        assert!(matches!(
+            parse_encrypt_reaction_input(&empty_emoji),
+            Err(NativeError::InvalidInput(_))
+        ));
+    }
+    #[cfg(feature = "juicebox")]
+    #[test]
+    fn production_recovery_json_is_strictly_parsed_before_work() {
+        let request = parse_recovery_request("2580".into(), valid_recovery_json())
+            .expect("valid recovery input parses");
+        assert_eq!(request.user_id, "2222");
+        assert_eq!(request.config.max_guess_count, 20);
+        assert_eq!(request.registered_keys.len(), 1);
+
+        let invalid =
+            valid_recovery_json().replace("\"max_guess_count\":20", "\"max_guess_count\":0");
+        assert!(matches!(
+            parse_recovery_request("2580".into(), invalid),
+            Err(NativeError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn recovery_input_requires_bounded_https_realms_and_exact_tokens() {
+        let mut input = valid_recovery_input();
+        assert!(validate_recovery_input(&input).is_ok());
+
+        input.user_id = "other-user".into();
+        assert!(matches!(
+            validate_recovery_input(&input),
+            Err(NativeError::InvalidInput(_))
+        ));
+        input = valid_recovery_input();
+        input.registered_keys[0].version = "01".into();
+        assert!(matches!(
+            validate_recovery_input(&input),
+            Err(NativeError::InvalidInput(_))
+        ));
+
+        input = valid_recovery_input();
+        input.sdk_config = input.sdk_config.replace("https://", "http://");
+        assert!(matches!(
+            validate_recovery_input(&input),
+            Err(NativeError::InvalidInput(_))
+        ));
+
+        input = valid_recovery_input();
+        input.sdk_config = input
+            .sdk_config
+            .replace("https://realm.example/", "https://realm.example:443/");
+        assert!(validate_recovery_input(&input).is_ok());
+
+        input = valid_recovery_input();
+        input.sdk_config = input
+            .sdk_config
+            .replace("https://realm.example/", "https://realm.example:8443/");
+        assert!(matches!(
+            validate_recovery_input(&input),
+            Err(NativeError::InvalidInput(_))
+        ));
+
+        input = valid_recovery_input();
+        input.tokens.clear();
+        assert!(matches!(
+            validate_recovery_input(&input),
+            Err(NativeError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn recovered_identity_selects_exact_registered_version() {
+        let mut vector = parse_official_vector().expect("official vector parses");
+        let private_keys = take_private_keys(&mut vector).expect("private keys decode");
+        let registered = vec![RegisteredKey {
+            version: vector.event_recipient_key_version.clone(),
+            identity_public_key: vector.identity_public_b64.clone(),
+        }];
+        assert_eq!(
+            matching_public_key_version(&private_keys, &registered),
+            Ok(vector.event_recipient_key_version)
+        );
+
+        let ambiguous = vec![
+            RegisteredKey {
+                version: "1".into(),
+                identity_public_key: vector.identity_public_b64.clone(),
+            },
+            RegisteredKey {
+                version: "2".into(),
+                identity_public_key: vector.identity_public_b64,
+            },
+        ];
+        assert_eq!(
+            matching_public_key_version(&private_keys, &ambiguous),
+            Err(RecoveryFailure::AmbiguousRegisteredKey)
+        );
+    }
+
+    #[cfg(feature = "juicebox")]
+    #[test]
+    fn production_worker_calls_recovery_once_and_preserves_transient_state() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client = Arc::new(MockJuicebox {
+            calls: Arc::clone(&calls),
+            recovery: MockRecovery::Return(Mutex::new(Some(RecoverResult::Failure {
+                reason: RecoverFailureReason::Transient,
+                guesses_remaining: None,
+            }))),
+        });
+        let terminal = recover_with_api(
+            valid_recovery_request(),
+            Arc::new(CancelToken::default()),
+            client,
+            Duration::from_secs(1),
+        );
+        assert!(matches!(terminal, WorkerTerminal::Uncertain));
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+    }
+
+    #[cfg(feature = "juicebox")]
+    #[test]
+    fn production_cancellation_drops_the_inflight_recovery_future() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let client = Arc::new(MockJuicebox {
+            calls: Arc::clone(&calls),
+            recovery: MockRecovery::Pending(Arc::clone(&dropped)),
+        });
+        let session = NativeSession::new();
+        let request = valid_recovery_request();
+        let job_id = session
+            .spawn_recovery(12, move |cancel| {
+                recover_with_api(request, cancel, client, Duration::from_secs(10))
+            })
+            .expect("recovery starts");
+        for _ in 0..200 {
+            if calls.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(session.cancel_recovery(job_id, 12).unwrap());
+        assert_eq!(
+            wait_for_terminal(&session, job_id, 12).unwrap(),
+            RecoveryPoll::Cancelled
+        );
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(!session.unlocked().unwrap());
+    }
+
+    #[test]
+    fn official_recovery_failures_remain_distinct() {
+        let cases = [
+            (
+                RecoverFailureReason::NotRegistered,
+                RecoveryFailure::NotRegistered,
+            ),
+            (
+                RecoverFailureReason::InvalidAuth,
+                RecoveryFailure::InvalidAuth,
+            ),
+            (
+                RecoverFailureReason::UpgradeRequired,
+                RecoveryFailure::UpgradeRequired,
+            ),
+            (
+                RecoverFailureReason::RateLimitExceeded,
+                RecoveryFailure::RateLimited,
+            ),
+            (
+                RecoverFailureReason::Assertion,
+                RecoveryFailure::AssertionFailed,
+            ),
+        ];
+        for (reason, expected) in cases {
+            let terminal = recovery_terminal(
+                RecoverResult::Failure {
+                    reason,
+                    guesses_remaining: None,
+                },
+                |_| unreachable!("failure cannot recover keys"),
+            );
+            assert!(matches!(terminal, WorkerTerminal::Failure(actual) if actual == expected));
+        }
+        assert!(matches!(
+            recovery_terminal(RecoverResult::KeyReconstructionFailed, |_| unreachable!()),
+            WorkerTerminal::Failure(RecoveryFailure::KeyReconstructionFailed)
+        ));
+        assert!(matches!(
+            recovery_terminal(RecoverResult::NoTokens, |_| unreachable!()),
+            WorkerTerminal::Failure(RecoveryFailure::NoTokens)
+        ));
+        assert!(matches!(
+            recovery_terminal(
+                RecoverResult::Failure {
+                    reason: RecoverFailureReason::InvalidPin,
+                    guesses_remaining: Some(0)
+                },
+                |_| unreachable!()
+            ),
+            WorkerTerminal::IncorrectPin {
+                guesses_remaining: Some(0)
+            }
+        ));
+    }
+
+    #[test]
+    fn async_mock_recovery_imports_keys_once() {
+        let session = NativeSession::new();
+        let job_id = session
+            .start_mock_recovery(7, "2580".into(), 20)
+            .expect("recovery starts");
+        assert_eq!(
+            session.poll_recovery(job_id, 7).unwrap(),
+            RecoveryPoll::Pending
+        );
+        assert!(matches!(
+            session.start_mock_recovery(7, "2580".into(), 0),
+            Err(NativeError::Busy)
+        ));
+        assert_eq!(
+            wait_for_terminal(&session, job_id, 7).unwrap(),
+            RecoveryPoll::Unlocked {
+                public_key_version: "1".into()
+            }
+        );
+        assert!(session.unlocked().unwrap());
+        assert_eq!(session.lock_state().user_id.as_deref(), Some("2222"));
+        assert!(matches!(
+            session.poll_recovery(job_id, 7),
+            Err(NativeError::Stale)
+        ));
+    }
+
+    #[cfg(feature = "juicebox")]
+    #[test]
+    fn recovered_registered_identity_signs_the_outbound_event() {
+        let recovered = official_recovered_keys().expect("official keys recover");
+        let client = Arc::new(MockJuicebox {
+            calls: Arc::new(AtomicUsize::new(0)),
+            recovery: MockRecovery::Return(Mutex::new(Some(RecoverResult::Success(
+                recovered.bytes,
+            )))),
+        });
+        let session = NativeSession::new();
+        let request = valid_recovery_request();
+        let job_id = session
+            .spawn_recovery(21, move |cancel| {
+                recover_with_api(request, cancel, client, Duration::from_secs(1))
+            })
+            .expect("production recovery starts");
+        assert!(matches!(
+            wait_for_terminal(&session, job_id, 21).unwrap(),
+            RecoveryPoll::Unlocked { .. }
+        ));
+
+        let vector = parse_official_vector().expect("official vector parses");
+        let sender_id = official_recipient_user_id(&vector).expect("recipient is valid");
+        let remote_key = chat_xdk_core::SigningKeyEntry {
+            user_id: vector.event_sender_id.clone(),
+            public_key_version: vector.event_signing_key_version.clone(),
+            public_key: vector.signing_public_b64.clone(),
+            identity_public_key: vector.identity_public_b64.clone(),
+            identity_public_key_signature: vector.identity_public_key_signature_b64.clone(),
+        };
+        session
+            .with_core(|core| {
+                let events = [
+                    vector.event_key_change_b64.clone(),
+                    vector.event_message_b64.clone(),
+                ];
+                let (output, _) = decrypt_events(core, &events, &[remote_key])?;
+                if output.messages.len() != 1 {
+                    return Err(NativeError::Xdk(
+                        "official key event did not seed the conversation".into(),
+                    ));
+                }
+                Ok(())
+            })
+            .expect("conversation key is cached");
+
+        let plaintext = "identity-bound outbound message";
+        let input = serde_json::json!({
+            "conversation_id": vector.event_conversation_id.clone(),
+            "text": plaintext
+        })
+        .to_string();
+        let payload = session
+            .prepare_text_payload(&input)
+            .expect("bound identity prepares a message");
+        let framed = chat_xdk_core::internals::frame_send_payload(
+            &payload,
+            &payload.message_id,
+            &sender_id,
+            &vector.event_conversation_id,
+        )
+        .expect("prepared payload frames as an inbound event");
+        let sender_key = chat_xdk_core::SigningKeyEntry {
+            user_id: sender_id.clone(),
+            public_key_version: payload.signature_info.public_key_version.clone(),
+            public_key: vector.signing_public_b64.clone(),
+            identity_public_key: vector.identity_public_b64.clone(),
+            identity_public_key_signature: vector.identity_public_key_signature_b64.clone(),
+        };
+        let (verified, _) = session
+            .with_core(|core| decrypt_events(core, &[framed], &[sender_key]))
+            .expect("prepared event decrypts");
+        assert_eq!(verified.messages.len(), 1);
+        assert_eq!(
+            verified.messages[0].sender_id.as_deref(),
+            Some(sender_id.as_str())
+        );
+        assert_eq!(verified.messages[0].text.as_deref(), Some(plaintext));
+        assert!(verified.messages[0].verified);
+
+        let forged = chat_xdk_core::internals::frame_send_payload(
+            &payload,
+            &payload.message_id,
+            "9999",
+            &vector.event_conversation_id,
+        )
+        .expect("forged sender event frames");
+        let forged_key = chat_xdk_core::SigningKeyEntry {
+            user_id: "9999".into(),
+            public_key_version: payload.signature_info.public_key_version,
+            public_key: vector.signing_public_b64,
+            identity_public_key: vector.identity_public_b64,
+            identity_public_key_signature: vector.identity_public_key_signature_b64,
+        };
+        let (rejected, _) = session
+            .with_core(|core| decrypt_events(core, &[forged], &[forged_key]))
+            .expect("forged event is processed safely");
+        assert!(rejected.messages.is_empty());
+        assert_eq!(rejected.errors.len(), 1);
+    }
+
+    #[test]
+    fn invalid_pin_preserves_remaining_guesses() {
+        let session = NativeSession::new();
+        let job_id = session
+            .start_mock_recovery(8, "1111".into(), 0)
+            .expect("recovery starts");
+        assert_eq!(
+            wait_for_terminal(&session, job_id, 8).unwrap(),
+            RecoveryPoll::IncorrectPin {
+                guesses_remaining: Some(19)
+            }
+        );
+        assert!(!session.unlocked().unwrap());
+
+        let next_job_id = session
+            .start_mock_recovery(8, "2580".into(), 0)
+            .expect("a later explicit submission starts");
+        assert!(next_job_id > job_id);
+        assert_eq!(
+            wait_for_terminal(&session, next_job_id, 8).unwrap(),
+            RecoveryPoll::Unlocked {
+                public_key_version: "1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn stale_identifiers_do_not_consume_or_cancel_current_recovery() {
+        let session = NativeSession::new();
+        let job_id = session
+            .start_mock_recovery(9, "2580".into(), 20)
+            .expect("recovery starts");
+        assert!(matches!(
+            session.poll_recovery(job_id + 1, 9),
+            Err(NativeError::Stale)
+        ));
+        assert!(matches!(
+            session.cancel_recovery(job_id, 10),
+            Err(NativeError::Stale)
+        ));
+        assert_eq!(
+            wait_for_terminal(&session, job_id, 9).unwrap(),
+            RecoveryPoll::Unlocked {
+                public_key_version: "1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn cancellation_and_destroy_settle_pending_workers() {
+        let session = NativeSession::new();
+        let job_id = session
+            .start_mock_recovery(10, "2580".into(), 1_000)
+            .expect("recovery starts");
+        assert!(session.cancel_recovery(job_id, 10).unwrap());
+        assert!(!session.cancel_recovery(job_id, 10).unwrap());
+        assert_eq!(
+            wait_for_terminal(&session, job_id, 10).unwrap(),
+            RecoveryPoll::Cancelled
+        );
+
+        let second = session
+            .start_mock_recovery(10, "2580".into(), 1_000)
+            .expect("another explicit recovery starts");
+        assert!(second > job_id);
+        assert!(session.destroy());
+        assert!(!session.live());
+    }
+
+    #[test]
+    fn cancellation_after_delivery_prevents_key_import() {
+        let session = NativeSession::new();
+        let job_id = session
+            .start_mock_recovery(11, "2580".into(), 0)
+            .expect("recovery starts");
+        wait_for_worker_exit(&session);
+        assert!(session.cancel_recovery(job_id, 11).unwrap());
+        assert_eq!(
+            wait_for_terminal(&session, job_id, 11).unwrap(),
+            RecoveryPoll::Cancelled
+        );
+        assert!(!session.unlocked().unwrap());
+    }
+
+    #[test]
+    fn worker_panics_are_sanitized() {
+        let session = NativeSession::new();
+        let job_id = session
+            .start_mock_recovery(11, "9999".into(), 0)
+            .expect("recovery starts");
+        assert!(matches!(
+            wait_for_terminal(&session, job_id, 11),
+            Err(NativeError::WorkerFailed)
+        ));
+        assert!(!session.unlocked().unwrap());
+    }
+
+    #[test]
+    fn worker_boundary_types_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<WorkerTerminal>();
+        assert_send::<RecoveryJob>();
+        #[cfg(feature = "juicebox")]
+        assert_send::<RecoveryRequest>();
+    }
+}
