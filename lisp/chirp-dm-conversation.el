@@ -1562,23 +1562,23 @@ Disjoint focused fragments are bridged through older history before merging."
     (appkit-evil-set-initial-states
      '(chirp-dm-conversation--mode) 'normal)
     (appkit-evil-map
-      (:map chirp-dm-conversation--mode-map
-       :nm
-       "g r" #'chirp-dm-refresh-conversation
-       "RET" #'chirp-dm-return-dwim
-       "Z a" #'chirp-dm-attach
-       "Z f" #'chirp-dm-attach-file
-       :i
-       "RET" #'newline
-       "<return>" #'newline)
-      (:map chirp-dm-conversation--timeline-mode-map
-       :nm
-       "!" #'chirp-dm-toggle-reaction
-       "q" #'chirp-quit-current-buffer
-       "r" #'chirp-dm-reply-to-message
-         "g j" #'chirp-dm-next-message
-       "g k" #'chirp-dm-previous-message
-       "g n" #'chirp-dm-load-older-messages))
+      :map chirp-dm-conversation--mode-map
+      :nm
+      "g r" #'chirp-dm-refresh-conversation
+      "RET" #'chirp-dm-return-dwim
+      "Z a" #'chirp-dm-attach
+      "Z f" #'chirp-dm-attach-file
+      :i
+      "RET" #'newline
+      "<return>" #'newline
+      :map chirp-dm-conversation--timeline-mode-map
+      :nm
+      "!" #'chirp-dm-toggle-reaction
+      "q" #'chirp-quit-current-buffer
+      "r" #'chirp-dm-reply-to-message
+      "g j" #'chirp-dm-next-message
+      "g k" #'chirp-dm-previous-message
+      "g n" #'chirp-dm-load-older-messages)
     (appkit-evil-normalize-buffers '(chirp-dm-conversation--mode))))
 
 (with-eval-after-load 'evil

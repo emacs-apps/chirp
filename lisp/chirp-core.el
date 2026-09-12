@@ -341,35 +341,35 @@ commands still work, and displays alt text when the backend provides it."
     (appkit-evil-set-initial-states '(chirp-view-mode) 'normal)
     (appkit-evil-define-readonly-keys 'chirp-view-mode-map)
     (appkit-evil-map
-      (:map chirp-view-mode-map
-       :nm
-       "RET" #'chirp-open-at-point
-       "<return>" #'chirp-open-at-point
-       "TAB" #'chirp-toggle-home-following
-       "g r" #'chirp-refresh
-       "g j" #'chirp-next-entry
-       "g k" #'chirp-previous-entry
-       "g n" #'chirp-load-more
-       "g m" #'chirp-open-primary-media
-       "g d" #'chirp-media-download-at-point
-       "g u" #'chirp-open-author-at-point
-       "g S" #'chirp-thread-add-spam-rule
-       "?" #'chirp-dispatch
-       "o" #'chirp-transient-tweet-operate
-       "g x" #'chirp-browse-at-point
-       "g s" #'chirp-search
-       "c" #'chirp-compose-post
-       "r" #'chirp-reply-at-point
-       "Q" #'chirp-quote-at-point
-       "s" #'chirp-toggle-bookmark-at-point
-       "!" #'chirp-toggle-like-at-point
-       "Z l" #'chirp-copy-fixupx-url-at-point
-       "D" #'chirp-delete-at-point
-       "d d" #'chirp-delete-at-point)
-      (:map chirp-dm-inbox--mode-map
-       :nm
-       "g r" #'chirp-dm-refresh-inbox
-       "g n" #'chirp-dm-load-more-inbox))
+      :map chirp-view-mode-map
+      :nm
+      "RET" #'chirp-open-at-point
+      "<return>" #'chirp-open-at-point
+      "TAB" #'chirp-toggle-home-following
+      "g r" #'chirp-refresh
+      "g j" #'chirp-next-entry
+      "g k" #'chirp-previous-entry
+      "g n" #'chirp-load-more
+      "g m" #'chirp-open-primary-media
+      "g d" #'chirp-media-download-at-point
+      "g u" #'chirp-open-author-at-point
+      "g S" #'chirp-thread-add-spam-rule
+      "?" #'chirp-dispatch
+      "o" #'chirp-transient-tweet-operate
+      "g x" #'chirp-browse-at-point
+      "g s" #'chirp-search
+      "c" #'chirp-compose-post
+      "r" #'chirp-reply-at-point
+      "Q" #'chirp-quote-at-point
+      "s" #'chirp-toggle-bookmark-at-point
+      "!" #'chirp-toggle-like-at-point
+      "Z l" #'chirp-copy-fixupx-url-at-point
+      "D" #'chirp-delete-at-point
+      "d d" #'chirp-delete-at-point
+      :map chirp-dm-inbox--mode-map
+      :nm
+      "g r" #'chirp-dm-refresh-inbox
+      "g n" #'chirp-dm-load-more-inbox)
     (appkit-evil-normalize-buffers '(chirp-view-mode))))
 
 (chirp--setup-evil)

@@ -105,16 +105,16 @@ Either `draft' or `scheduled'.")
     (appkit-evil-set-initial-states '(chirp-unsent-mode) 'normal)
     (appkit-evil-define-readonly-keys 'chirp-unsent-mode-map)
     (appkit-evil-map
-      (:map chirp-unsent-mode-map
-       :nm
-       "RET" #'chirp-unsent-open
-       "g r" #'chirp-unsent-refresh
-       "M" #'chirp-unsent-mark
-       "U" #'chirp-unsent-unmark
-       "g U" #'chirp-unsent-unmark-all
-       "D" #'chirp-unsent-flag-delete
-       "X" #'chirp-unsent-execute
-       "TAB" #'chirp-unsent-toggle-kind))
+      :map chirp-unsent-mode-map
+      :nm
+      "RET" #'chirp-unsent-open
+      "g r" #'chirp-unsent-refresh
+      "M" #'chirp-unsent-mark
+      "U" #'chirp-unsent-unmark
+      "g U" #'chirp-unsent-unmark-all
+      "D" #'chirp-unsent-flag-delete
+      "X" #'chirp-unsent-execute
+      "TAB" #'chirp-unsent-toggle-kind)
     (appkit-evil-normalize-buffers '(chirp-unsent-mode))))
 
 (chirp-unsent--setup-evil)
