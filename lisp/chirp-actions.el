@@ -1,4 +1,4 @@
-;;; chirp-actions.el --- Transient write actions for chirp -*- lexical-binding: t; -*-
+;;; chirp-actions.el --- Compose and write actions for chirp -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2026
 ;; SPDX-License-Identifier: MIT
@@ -11,7 +11,6 @@
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'transient)
 (require 'appkit-core)
 (require 'appkit-compose)
 (require 'appkit-chat-compose)
@@ -20,16 +19,6 @@
 (require 'chirp-core)
 (require 'chirp-backend)
 (require 'chirp-media)
-
-(declare-function chirp-home "chirp" ())
-(declare-function chirp-following "chirp" ())
-(declare-function chirp-bookmarks "chirp" ())
-(declare-function chirp-likes "chirp" ())
-(declare-function chirp-list "chirp" (&optional list-id))
-(declare-function chirp-me "chirp" ())
-(declare-function chirp-unsent-drafts "chirp-unsent" ())
-(declare-function chirp-unsent-scheduled "chirp-unsent" ())
-(declare-function chirp-edit-history-open-at-point "chirp-edit-history" ())
 
 ;;; Options
 
@@ -1707,36 +1696,6 @@ target."
          (chirp-actions-show-error
           "No translated text returned by X")))
      #'chirp-actions-show-error)))
-
-(transient-define-prefix chirp-dispatch ()
-  "Show Chirp write actions."
-  [["Timeline"
-    ("h" "For You" chirp-home)
-    ("f" "Following" chirp-following)
-    ("u" "Me" chirp-me)
-    ("b" "Bookmarks" chirp-bookmarks)
-    ("L" "Liked" chirp-likes)
-    ("s" "List" chirp-list)]
-   ["Compose"
-    ("c" "Post" chirp-compose-post)
-    ("r" "Reply" chirp-reply-at-point)
-    ("Q" "Quote" chirp-quote-at-point)
-    ("d" "Drafts" chirp-unsent-drafts)
-    ("t" "Scheduled" chirp-unsent-scheduled)]
-   ["Tweet"
-    ("R" "Retweet" chirp-toggle-retweet-at-point)
-    ("H" "Edit history" chirp-edit-history-open-at-point)]
-   ["People"
-    ("+" "Follow" chirp-follow-user-at-point)
-    ("-" "Unfollow" chirp-unfollow-user-at-point)]
-   ["Engage"
-    ("l" "Like" chirp-toggle-like-at-point)
-    ("B" "Bookmark" chirp-toggle-bookmark-at-point)]
-   ["Other"
-    ("d" "Delete" chirp-delete-at-point)
-    ("T" "Translate" chirp-translate-at-point)
-    ("y" "Copy fixupx" chirp-copy-fixupx-url-at-point)
-    ("o" "Browser" chirp-browse-at-point)]])
 
 (provide 'chirp-actions)
 

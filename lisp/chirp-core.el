@@ -47,7 +47,8 @@
 (declare-function chirp-thread-open "chirp-thread" (tweet-id))
 (declare-function chirp-thread-open-tweet "chirp-thread" (tweet))
 (declare-function chirp-thread-add-spam-rule "chirp-thread" (&optional authorp))
-(declare-function chirp-dispatch "chirp-actions" ())
+(autoload 'chirp-dispatch "chirp-transient" nil t)
+(autoload 'chirp-transient-tweet-operate "chirp-transient" nil t)
 (declare-function chirp-toggle-follow-user-at-point "chirp-actions" ())
 (declare-function chirp-load-more "chirp-timeline" (&optional anchor-id))
 (declare-function chirp-toggle-home-following "chirp-timeline" ())
@@ -323,7 +324,7 @@ commands still work, and displays alt text when the backend provides it."
   "A" #'chirp-open-author-at-point
   "S" #'chirp-thread-add-spam-rule
   "x" #'chirp-dispatch
-  "o" #'chirp-browse-at-point
+  "o" #'chirp-transient-tweet-operate
   "q" #'chirp-quit-current-buffer)
 
 (define-derived-mode chirp-view-mode appkit-discussion-mode "Chirp"
@@ -354,6 +355,7 @@ commands still work, and displays alt text when the backend provides it."
        "g u" #'chirp-open-author-at-point
        "g S" #'chirp-thread-add-spam-rule
        "?" #'chirp-dispatch
+       "o" #'chirp-transient-tweet-operate
        "g x" #'chirp-browse-at-point
        "g s" #'chirp-search
        "c" #'chirp-compose-post

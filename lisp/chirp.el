@@ -30,6 +30,7 @@
 (require 'chirp-profile)
 (require 'chirp-timeline)
 (require 'chirp-dm)
+(require 'chirp-transient)
 
 (defun chirp--open-url-target (target)
   "Open parsed X URL TARGET in its owning Chirp view."

@@ -124,10 +124,11 @@ Direct-message reads never send read acknowledgments.  Text, replies, reactions,
 | ~D~ | download current media.  Evil: ~g d~ |
 | ~A~ | author profile.  Evil: ~g u~ |
 | ~S~ | add a spam phrase; ~C-u S~ starts from the display name.  Evil: ~g S~ |
-| ~x~ | actions menu.  Evil: ~?~ |
-| ~x r~ | reply, or refuse when X limits replies |
-| ~x T~ | translate the tweet |
-| ~o~ | open in a browser.  Evil: ~g x~ |
+| ~x~ | application menu (~chirp-dispatch~).  Evil: ~?~ |
+| ~o~ | tweet operations (~chirp-transient-tweet-operate~), also under ~x o~.  Evil: ~o~ |
+| ~o r~ | reply, or refuse when X limits replies |
+| ~o T~ | translate the tweet |
+| ~o o~ | open in a browser.  Evil: also ~g x~ |
 
 
 
