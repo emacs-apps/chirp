@@ -1564,6 +1564,7 @@ Disjoint focused fragments are bridged through older history before merging."
     (appkit-evil-map
       (:map chirp-dm-conversation--mode-map
        :nm
+       "g r" #'chirp-dm-refresh-conversation
        "RET" #'chirp-dm-return-dwim
        "Z a" #'chirp-dm-attach
        "Z f" #'chirp-dm-attach-file

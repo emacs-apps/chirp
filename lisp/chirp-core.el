@@ -345,7 +345,7 @@ commands still work, and displays alt text when the backend provides it."
        "RET" #'chirp-open-at-point
        "<return>" #'chirp-open-at-point
        "TAB" #'chirp-toggle-home-following
-       "g r" #'chirp-open-entry-at-point
+       "g r" #'chirp-refresh
        "g j" #'chirp-next-entry
        "g k" #'chirp-previous-entry
        "g n" #'chirp-load-more
