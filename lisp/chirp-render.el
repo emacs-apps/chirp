@@ -35,7 +35,7 @@
 (require 'appkit-projection)
 (require 'appkit-discussion)
 (require 'appkit-media-image)
-(require 'video-runtime)
+(require 'video)
 (require 'appkit-ui)
 (require 'chirp-core)
 (require 'chirp-time)
