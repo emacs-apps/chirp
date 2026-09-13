@@ -10,32 +10,12 @@
 ;;; Code:
 
 (require 'transient)
+(require 'chirp-actions)
+(require 'chirp-unsent)
+(require 'chirp-edit-history)
 
-(autoload 'chirp-home "chirp" nil t)
-(autoload 'chirp-following "chirp" nil t)
-(autoload 'chirp-bookmarks "chirp" nil t)
-(autoload 'chirp-likes "chirp" nil t)
-(autoload 'chirp-list "chirp" nil t)
-(autoload 'chirp-me "chirp" nil t)
-(autoload 'chirp-unsent-drafts "chirp-unsent" nil t)
-(autoload 'chirp-unsent-scheduled "chirp-unsent" nil t)
-(autoload 'chirp-edit-history-open-at-point "chirp-edit-history" nil t)
 
-(autoload 'chirp-compose-post "chirp-actions" nil t)
-(autoload 'chirp-reply-at-point "chirp-actions" nil t)
-(autoload 'chirp-quote-at-point "chirp-actions" nil t)
-(autoload 'chirp-toggle-retweet-at-point "chirp-actions" nil t)
-(autoload 'chirp-follow-user-at-point "chirp-actions" nil t)
-(autoload 'chirp-unfollow-user-at-point "chirp-actions" nil t)
-(autoload 'chirp-toggle-like-at-point "chirp-actions" nil t)
-(autoload 'chirp-toggle-bookmark-at-point "chirp-actions" nil t)
-(autoload 'chirp-delete-at-point "chirp-actions" nil t)
-(autoload 'chirp-translate-at-point "chirp-actions" nil t)
-(autoload 'chirp-copy-fixupx-url-at-point "chirp-actions" nil t)
-(autoload 'chirp-open-entry-at-point "chirp-core" nil t)
-(autoload 'chirp-browse-at-point "chirp-core" nil t)
-
-;;;###autoload(autoload 'chirp-transient-tweet-operate "chirp-transient" nil t)
+;;;###autoload(autoload 'chirp-transient-tweet-operate "chirp" nil t)
 (transient-define-prefix chirp-transient-tweet-operate ()
   "Operate on the tweet at point."
   [["Tweet"
@@ -53,7 +33,7 @@
     ("y" "Copy fixupx" chirp-copy-fixupx-url-at-point)
     ("o" "Browser" chirp-browse-at-point)]])
 
-;;;###autoload(autoload 'chirp-dispatch "chirp-transient" nil t)
+;;;###autoload(autoload 'chirp-dispatch "chirp" nil t)
 (transient-define-prefix chirp-dispatch ()
   "Show Chirp destinations and composition actions."
   [["Timeline"
