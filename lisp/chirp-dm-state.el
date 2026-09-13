@@ -126,7 +126,10 @@ not replaced by a later encrypted snapshot."
   (chirp-dm-state--refresh-derived-fields conversation))
 
 (defun chirp-dm-state-accept-live-event (event)
-  "Merge normalized websocket EVENT into its canonical conversation.\n\nReturn the canonical conversation, or nil when its metadata has not been\nloaded.  Existing inboxes promote the changed conversation to the recent edge."
+  "Merge normalized websocket EVENT into its canonical conversation.
+
+Return the canonical conversation, or nil when its metadata has not been
+loaded.  Existing inboxes promote the changed conversation to the recent edge."
   (let*
       ((conversation-id
         (and (listp event) (plist-get event :conversation-id)))
