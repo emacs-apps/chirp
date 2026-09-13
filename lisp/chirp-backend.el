@@ -946,7 +946,8 @@ Save mutations are never retried automatically."
     (condition-case err
         (chirp-backend--submit-unsent
          kind target-id items draft-id nil callback error-fn
-         :progress progress :owner owner)
+         :progress progress
+         :owner owner)
       (error
        (funcall error-fn (error-message-string err))
        nil))))
@@ -970,7 +971,8 @@ ERRBACK match `chirp-backend-save-draft'."
             (error "Schedule time is invalid"))
           (chirp-backend--submit-unsent
            kind target-id items scheduled-id execute-at callback error-fn
-           :progress progress :owner owner))
+           :progress progress
+           :owner owner))
       (error
        (funcall error-fn (error-message-string err))
        nil))))
@@ -1395,7 +1397,8 @@ failures, and OWNER owns the request lifecycle."
      (t
       (chirp-x-chat-media-request
        conversation-id media-hash callback
-       :errback error-fn :owner owner)))))
+       :errback error-fn
+       :owner owner)))))
 
 (cl-defun chirp-backend--dm-send-prepared
     (conversation-id prepare callback &key errback owner)
@@ -1463,7 +1466,9 @@ event and a nil envelope."
      conversation-id
      (lambda ()
        (chirp-xchat-native-prepare-text conversation-id text))
-     callback :errback errback :owner owner)))
+     callback
+     :errback errback
+     :owner owner)))
 
 (cl-defun chirp-backend-dm-send-reply
     (conversation-id text target-event key-events callback &key errback owner)
@@ -1490,7 +1495,9 @@ older target.  CALLBACK, ERRBACK, and OWNER follow
        (lambda ()
          (chirp-xchat-native-prepare-reply
           conversation-id text target-event key-events))
-       callback :errback errback :owner owner)))))
+       callback
+       :errback errback
+       :owner owner)))))
 
 (cl-defun chirp-backend-dm-send-attachments
     (conversation-id text attachments callback &key target-event
@@ -1541,8 +1548,8 @@ older target.  CALLBACK, ERRBACK, and OWNER follow
                                                     (funcall callback
                                                              event
                                                              envelope)))
-                                                :errback #'fail :owner
-                                                owner))))
+                                                :errback #'fail
+                                                :owner owner))))
          (upload-next (remaining uploaded index)
            (unless settled-p
              (if (null remaining) (finish-send (nreverse uploaded))
@@ -1588,8 +1595,9 @@ older target.  CALLBACK, ERRBACK, and OWNER follow
                                                                  :media-type))
                                                 uploaded)
                                                (1+ index)))
-                                            :errback #'fail :owner
-                                            owner :progress
+                                            :errback #'fail
+                                            :owner owner
+                                            :progress
                                             (and progress
                                                  (lambda (event)
                                                    (funcall progress
@@ -1705,7 +1713,9 @@ REMOVE-P selects removal.  CALLBACK, ERRBACK, and OWNER follow
        (lambda ()
          (chirp-xchat-native-prepare-reaction
           conversation-id target-event emoji remove-p))
-       callback :errback errback :owner owner)))))
+       callback
+       :errback errback
+       :owner owner)))))
 
 (cl-defun chirp-backend-dm-inbox
     (callback &key cursor (max-results 20) errback owner)
@@ -2010,7 +2020,10 @@ pagination, and OWNER optionally owns the transport lifecycle."
              (when cursor
                `(("cursor" . ,cursor))))
      '(("data" "home" "home_timeline_urt"))
-     limit callback :errback errback :label "a home timeline" :owner owner)))
+     limit callback
+     :errback errback
+     :label "a home timeline"
+     :owner owner)))
 
 ;;; Notifications
 
@@ -2095,7 +2108,9 @@ ERRBACK handles failures and MAX-RESULTS limits the response."
        ("requestContext" . "launch"))
      '(("data" "bookmark_timeline" "timeline")
        ("data" "bookmark_timeline_v2" "timeline"))
-     limit callback :errback errback :label "the bookmarks timeline")))
+     limit callback
+     :errback errback
+     :label "the bookmarks timeline")))
 
 (defun chirp-backend-search (query callback &optional errback)
   "Search for QUERY and call CALLBACK, or ERRBACK on failure."
@@ -2107,7 +2122,9 @@ ERRBACK handles failures and MAX-RESULTS limits the response."
        ("querySource" . "typed_query")
        ("product" . "Top"))
      '(("data" "search_by_raw_query" "search_timeline" "timeline"))
-     limit callback :errback errback :label "the search timeline")))
+     limit callback
+     :errback errback
+     :label "the search timeline")))
 
 (defun chirp-backend-search-users
     (query callback &optional errback max-results)
@@ -2227,7 +2244,8 @@ ERRBACK receives request failures."
                 (dolist (tweet tweets)
                   (plist-put tweet :liked-p t))
                 (funcall callback tweets envelope))
-              :errback error-fn :label "the likes timeline"))
+              :errback error-fn
+              :label "the likes timeline"))
          (funcall error-fn "X profile did not include a user ID")))
      error-fn)))
 
@@ -2354,7 +2372,9 @@ CURSOR, PAGE, and ACCUMULATED carry private pagination state."
      `(("listId" . ,list-id)
        ("count" . ,limit))
      '(("data" "list" "tweets_timeline" "timeline"))
-     limit callback :errback errback :label "the list timeline")))
+     limit callback
+     :errback errback
+     :label "the list timeline")))
 
 ;;; Tweet Reads
 
@@ -2398,7 +2418,8 @@ CURSOR, PAGE, and ACCUMULATED carry private pagination state."
             (funcall error
                      (format "X did not return tweet %s in its thread"
                              tweet-id))))
-        :errback error :label "the tweet conversation"))
+        :errback error
+        :label "the tweet conversation"))
      callback
      errback)))
 
@@ -2535,7 +2556,9 @@ MAX-RESULTS limits the response, and CURSOR bypasses the initial-page cache."
                          (when cursor `(("cursor" . ,cursor))))
                  '(("data" "search_by_raw_query"
                     "search_timeline" "timeline"))
-                 limit success :errback error :label "the replies timeline")
+                 limit success
+                 :errback error
+                 :label "the replies timeline")
               (chirp-backend-user
                clean-handle
                (lambda (user _envelope)
@@ -2545,7 +2568,8 @@ MAX-RESULTS limits the response, and CURSOR bypasses the initial-page cache."
                       (chirp-backend--profile-timeline-variables
                        timeline-kind user-id limit cursor)
                       chirp-backend--user-timeline-paths limit success
-                      :errback error :label "the profile timeline")
+                      :errback error
+                      :label "the profile timeline")
                    (funcall error "X profile did not include a user ID")))
                error)))))
     (if cursor

@@ -1059,7 +1059,9 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                    '("data" "create_tweet" "tweet_results" "result")
                    '(("rest_id" . "123")))))))
       (chirp-backend-compose
-       :kind 'post :text "hello" :attachments nil
+       :kind 'post
+       :text "hello"
+       :attachments nil
        :callback (lambda (created-tweet-id raw-envelope)
                    (setq result created-tweet-id
                          envelope raw-envelope))
@@ -1104,7 +1106,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                          '("data" "create_tweet" "tweet_results" "result")
                          '(("rest_id" . "123")))))))
             (chirp-backend-compose
-             :kind 'post :text "hello"
+             :kind 'post
+             :text "hello"
              :attachments (list (list :path file :description "a cat"))
              :callback #'ignore))
           (should uploaded)
@@ -1124,7 +1127,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                      '("data" "create_tweet" "tweet_results" "result")
                      '(("rest_id" . "123")))))))
         (chirp-backend-compose
-         :kind kind :text "hello"
+         :kind kind
+         :text "hello"
          :target-id (and (eq kind 'quote) "99")
          :reply-audience 'community
          :attachments nil
@@ -1147,8 +1151,11 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                    '("data" "create_tweet" "tweet_results" "result")
                    '(("rest_id" . "456")))))))
       (chirp-backend-compose
-       :kind 'reply :text "hello" :target-id "99"
-       :reply-audience 'community :attachments nil
+       :kind 'reply
+       :text "hello"
+       :target-id "99"
+       :reply-audience 'community
+       :attachments nil
        :callback #'ignore))
     (should-not (assoc-string "conversation_control" variables t))
     (should (equal (chirp-get-in variables '("reply" "in_reply_to_tweet_id"))
@@ -1158,7 +1165,9 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
   "Unknown reply-audience symbols should fail before CreateTweet."
   (let (success failure)
     (chirp-backend-compose
-     :kind 'post :text "hello" :reply-audience 'nobody
+     :kind 'post
+     :text "hello"
+     :reply-audience 'nobody
      :attachments nil
      :callback (lambda (&rest _args)
                  (setq success t))
@@ -1188,7 +1197,9 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                            '("data" "create_tweet" "tweet_results" "result")
                            '(("rest_id" . "456")))))))
               (chirp-backend-compose
-               :kind kind :text "hello" :target-id "99"
+               :kind kind
+               :text "hello"
+               :target-id "99"
                :attachments (list file)
                :callback (lambda (created-tweet-id _envelope)
                            (setq result created-tweet-id))))
@@ -1227,7 +1238,9 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                    '("data" "notetweet_create" "tweet_results" "result")
                    '(("rest_id" . "789")))))))
       (chirp-backend-compose
-       :kind 'post :text (make-string 141 ?你) :attachments nil
+       :kind 'post
+       :text (make-string 141 ?你)
+       :attachments nil
        :callback (lambda (created-tweet-id _envelope)
                    (setq result created-tweet-id))))
     (should (equal (plist-get operation :name) "CreateNoteTweet"))
@@ -1246,7 +1259,10 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                  (setq request-count (1+ request-count))
                  (funcall (plist-get options :errback) "Connection reset"))))
       (chirp-backend-compose
-       :kind 'post :text "hello" :attachments nil :callback #'ignore
+       :kind 'post
+       :text "hello"
+       :attachments nil
+       :callback #'ignore
        :errback (lambda (message)
                   (setq failure message))))
     (should (= request-count 1))
@@ -1259,7 +1275,9 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                (lambda (_operation _variables callback &rest _options)
                  (funcall callback '(("data" . (("create_tweet" . nil))))))))
       (chirp-backend-compose
-       :kind 'post :text "hello" :attachments nil
+       :kind 'post
+       :text "hello"
+       :attachments nil
        :callback (lambda (&rest _args)
                    (setq success t))
        :errback (lambda (message)

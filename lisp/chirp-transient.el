@@ -14,7 +14,6 @@
 (require 'chirp-unsent)
 (require 'chirp-edit-history)
 
-
 ;;;###autoload(autoload 'chirp-transient-tweet-operate "chirp" nil t)
 (transient-define-prefix chirp-transient-tweet-operate ()
   "Operate on the tweet at point."

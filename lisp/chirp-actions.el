@@ -579,9 +579,10 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
                 (unless (derived-mode-p 'appkit-chat-compose-mode)
                   (error "Chirp compose Surface requires an initialized composer")))
         :init (lambda (_context _input)
-                (appkit-next :model (list :type 'compose :media-intent nil
-                                          :media-phase 'idle :media-error nil)
-                             :render appkit-render-none))
+                (appkit-next
+                 :model (list :type 'compose :media-intent nil
+                              :media-phase 'idle :media-error nil)
+                 :render appkit-render-none))
         :update #'chirp--surface-update
         :renderer-factory
         (lambda (_surface)
@@ -593,7 +594,8 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
            :recover (lambda (_surface _app _model _condition)
                       (appkit-chat-compose-refresh) nil)
            :unmount (lambda (_surface) (appkit-compose-cancel-operation)))))
-       :app (chirp-app) :identity (list 'compose (current-buffer))
+       :app (chirp-app)
+       :identity (list 'compose (current-buffer))
        :buffer (current-buffer))))
 
 (defun chirp-compose--operation-current-p (buffer owner)
@@ -630,7 +632,8 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
   (let* ((buffer (current-buffer))
          (owner (appkit-compose-operation-begin kind :label label :generation generation)))
     (appkit-compose-operation-update
-     owner :cancel-function (lambda () (chirp-compose--abort-operation buffer owner)))
+     owner
+     :cancel-function (lambda () (chirp-compose--abort-operation buffer owner)))
     (setq-local buffer-read-only t)
     (appkit-chat-compose-refresh)
     owner))
@@ -666,7 +669,9 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
                 ('publish (chirp-compose--publish-label))
                 (_ "Uploading..."))))
         (appkit-compose-operation-update
-         owner :label label :progress (plist-get event :progress))
+         owner
+         :label label
+         :progress (plist-get event :progress))
         (when-let* ((text (appkit-compose-status-text)))
           (message "%s" text))
         (appkit-chat-compose-refresh)))))

@@ -1447,8 +1447,7 @@ request is retried automatically."
                         :owner upload-owner
                         :cookie-only t
                         :settle-on-cancel t
-                        :cancel-message
-                        "XChat media upload was canceled"))))
+                        :cancel-message "XChat media upload was canceled"))))
                  (initialize-result
                    (payload)
                    (let* ((result
@@ -1575,7 +1574,9 @@ reconnection and must close the returned websocket."
   (websocket-send
    websocket
    (make-websocket-frame
-    :opcode 'binary :payload bytes :completep t)))
+    :opcode 'binary
+    :payload bytes
+    :completep t)))
 
 (defun chirp-x-chat-live-close (websocket)
   "Close XChat live WEBSOCKET without allowing transport errors to escape."
@@ -1676,7 +1677,9 @@ URL retrieval buffer when the request starts, or nil when setup fails."
     (unless (functionp error-fn)
       (error "X GraphQL error callback is not callable"))
     (chirp-x--graphql-request-attempt
-     operation variables callback :errback error-fn :owner owner)))
+     operation variables callback
+     :errback error-fn
+     :owner owner)))
 
 ;;; Media Upload
 

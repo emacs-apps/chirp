@@ -283,11 +283,13 @@ rendered media list and item are already active."
              (plist-get model :media-phase) 'acquiring
              (plist-get model :media-error) nil)
        (appkit-next
-        :model model :render (appkit-projection-change-create :frame-p t)
+        :model model
+        :render (appkit-projection-change-create :frame-p t)
         :commands
         (list (appkit-command-start-effect
                (appkit-effect-create
-                :key 'chirp-media-acquire :input intent
+                :key 'chirp-media-acquire
+                :input intent
                 :start #'chirp-media-view--acquire-start
                 :success (lambda (input file) (list 'chirp-media 'acquired input file))
                 :failure #'chirp-media-view--failed
@@ -296,11 +298,13 @@ rendered media list and item are already active."
      (let ((intent (nth 2 message)) (file (nth 3 message)))
        (setf (plist-get model :media-phase) 'presenting)
        (appkit-next
-        :model model :render (appkit-projection-change-create :frame-p t)
+        :model model
+        :render (appkit-projection-change-create :frame-p t)
         :commands
         (list (appkit-command-start-effect
                (appkit-effect-create
-                :key 'chirp-media-present :input (list :intent intent :file file)
+                :key 'chirp-media-present
+                :input (list :intent intent :file file)
                 :start #'chirp-media-view--present-start
                 :success (lambda (_input _result) '(chirp-media closed))
                 :failure #'chirp-media-view--failed))))))
@@ -310,7 +314,8 @@ rendered media list and item are already active."
              (plist-get model :media-phase) 'presenting
              (plist-get model :media-error) nil)
        (appkit-next
-        :model model :render appkit-render-none
+        :model model
+        :render appkit-render-none
         :commands
         (list (appkit-command-cancel-effect 'chirp-media-acquire)
               (appkit-command-start-effect
@@ -319,7 +324,8 @@ rendered media list and item are already active."
                 :input (if (eq kind 'video)
                            (appkit-media-video-presentation-create
                             (appkit-media-resource-create :file file)
-                            :label "Chirp XChat" :start t)
+                            :label "Chirp XChat"
+                            :start t)
                          file)
                 :start (if (eq kind 'video) #'appkit-media-video-presentation-start
                          #'appkit-media-file-presentation-start)
@@ -335,9 +341,11 @@ rendered media list and item are already active."
     ('cancel
      (setf (plist-get model :media-intent) nil
            (plist-get model :media-phase) 'idle)
-     (appkit-next :model model :render (appkit-projection-change-create :frame-p t)
-                  :commands (list (appkit-command-cancel-effect 'chirp-media-acquire)
-                                  (appkit-command-cancel-effect 'chirp-media-present))))
+     (appkit-next
+      :model model
+      :render (appkit-projection-change-create :frame-p t)
+      :commands (list (appkit-command-cancel-effect 'chirp-media-acquire)
+                      (appkit-command-cancel-effect 'chirp-media-present))))
     (_ (error "Unsupported Chirp media message: %S" message))))
 
 (defun chirp-media-open-local (surface file kind)

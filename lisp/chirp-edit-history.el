@@ -72,17 +72,18 @@
           (plist-get (plist-get state :status) :phase) 'idle
           (plist-get (plist-get state :status) :message) nil)
     (appkit-surface-post view
-                         (appkit-projection-change-create :position
-                                                          (plist-get
-                                                           (list
-                                                            :position
-                                                            'first)
-                                                           :position)))
+                         (appkit-projection-change-create
+                          :position
+                          (plist-get
+                           (list
+                            :position
+                            'first)
+                           :position)))
     (appkit-surface-post view
-                         (appkit-projection-change-create :full-p t
-                                                          :frame-p t
-                                                          :position
-                                                          'preserve))
+                         (appkit-projection-change-create
+                          :full-p t
+                          :frame-p t
+                          :position 'preserve))
     nil (chirp-clear-status buffer)
     (chirp-media-prefetch-tweets tweets buffer)))
 
@@ -137,24 +138,24 @@
         (lambda () (chirp-backend-invalidate-edit-history tweet-id)
           (chirp-edit-history--open tweet-id initial-id)))
        (view
-        (chirp-open-projection-view :id
-                                    (list 'edit-history initial-id)
-                                    :title title :state
-                                    (list :type 'edit-history :query
-                                          (list :tweet-id tweet-id
-                                                :initial-id initial-id)
-                                          :items nil :title title
-                                          :refresh refresh :status
-                                          (list :phase 'initial
-                                                :message nil)
-                                          :expanded-tweet-ids
-                                          (make-hash-table :test
-                                                           #'equal))
-                                    :render-function
-                                    #'chirp-edit-history--sync
-                                    :printer
-                                    #'chirp-edit-history--print-row
-                                    :select t)))
+        (chirp-open-projection-view
+         :id
+         (list 'edit-history initial-id)
+         :title title
+         :state
+         (list :type 'edit-history :query
+               (list :tweet-id tweet-id
+                     :initial-id initial-id)
+               :items nil :title title
+               :refresh refresh :status
+               (list :phase 'initial
+                     :message nil)
+               :expanded-tweet-ids
+               (make-hash-table :test
+                                #'equal))
+         :render-function #'chirp-edit-history--sync
+         :printer #'chirp-edit-history--print-row
+         :select t)))
     (chirp-edit-history--request view)))
 
 ;;;###autoload

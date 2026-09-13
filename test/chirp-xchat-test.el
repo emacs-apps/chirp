@@ -122,9 +122,13 @@
   "Inbox adaptation should decode plaintext events and preserve its cursor."
   (let* ((encoded
           (chirp-dm-test--event
-           :sequence "20" :message-id "message-20" :sender-id "42"
-           :conversation-id "conversation-1" :text "hello from XChat"
-           :attachment-count 1 :message-request-p t))
+           :sequence "20"
+           :message-id "message-20"
+           :sender-id "42"
+           :conversation-id "conversation-1"
+           :text "hello from XChat"
+           :attachment-count 1
+           :message-request-p t))
          (cursor
           '(("__typename" . "XChatGetInboxPageContinueCursor")
             ("cursor_id" . "cursor-next")
@@ -141,13 +145,15 @@
                   callback
                   (chirp-dm-test--inbox-payload
                    (list (chirp-dm-test--conversation-item
-                          :events (list encoded) :has-more t))
+                          :events (list encoded)
+                          :has-more t))
                    cursor)))))
       (chirp-backend-dm-inbox
        (lambda (items response-envelope)
          (setq conversations items
                envelope response-envelope))
-       :max-results 20 :owner 'test-owner))
+       :max-results 20
+       :owner 'test-owner))
     (should (equal (plist-get operation :name) "GetInitialXChatPageQuery"))
     (should (equal (plist-get operation :query-id)
                    "8ryvCvaARbYYM1zXie8Q9g"))
@@ -265,8 +271,11 @@
   "Keyed XChat content should become a visible unavailable placeholder."
   (let* ((encoded
           (chirp-dm-test--event
-           :sequence "20" :message-id "message-20" :sender-id "42"
-           :conversation-id "conversation-1" :text "must not decode"
+           :sequence "20"
+           :message-id "message-20"
+           :sender-id "42"
+           :conversation-id "conversation-1"
+           :text "must not decode"
            :key-version "7"))
          (event (chirp-xchat-decode-event encoded)))
     (should (plist-get event :encrypted-p))
@@ -283,8 +292,11 @@
   "XChat decoding should accept only the two Thrift BOOL encodings."
   (let* ((encoded
           (chirp-dm-test--event
-           :sequence "20" :message-id "message-20" :sender-id "42"
-           :conversation-id "conversation-1" :text "hello"))
+           :sequence "20"
+           :message-id "message-20"
+           :sender-id "42"
+           :conversation-id "conversation-1"
+           :text "hello"))
          (bytes (base64-decode-string encoded)))
     (aset bytes (- (length bytes) 2) 2)
     (should
@@ -299,8 +311,11 @@
   (let ((event
          (chirp-xchat-decode-event
           (chirp-dm-test--event
-           :sequence "15" :message-id "target-message" :sender-id "42"
-           :conversation-id "conversation-1" :detail-field 7))))
+           :sequence "15"
+           :message-id "target-message"
+           :sender-id "42"
+           :conversation-id "conversation-1"
+           :detail-field 7))))
     (should (equal (plist-get event :id) "15"))
     (should (equal (plist-get event :message-id) "target-message"))
     (should (eq (plist-get event :kind) 'message-delete))))
@@ -388,12 +403,16 @@
   "Inbox adaptation should reject events from another conversation."
   (let* ((event
           (chirp-dm-test--event
-           :sequence "20" :message-id "message-20" :sender-id "42"
-           :conversation-id "conversation-2" :key-version "7"))
+           :sequence "20"
+           :message-id "message-20"
+           :sender-id "42"
+           :conversation-id "conversation-2"
+           :key-version "7"))
          (payload
           (chirp-dm-test--inbox-payload
            (list (chirp-dm-test--conversation-item
-                  :id "conversation-1" :events (list event)))))
+                  :id "conversation-1"
+                  :events (list event)))))
          success failure)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
@@ -408,8 +427,11 @@
   "History adaptation should send the exact cursor and return older events."
   (let* ((older
           (chirp-dm-test--event
-           :sequence "10" :message-id "message-10" :sender-id "42"
-           :conversation-id "conversation-1" :text "older"))
+           :sequence "10"
+           :message-id "message-10"
+           :sender-id "42"
+           :conversation-id "conversation-1"
+           :text "older"))
          (payload
           `(("data" .
              (("get_conversation_page" .
@@ -428,7 +450,8 @@
        "conversation-1" '(:sequence-id "20" :key-version "0")
        (lambda (items response-envelope)
          (setq events items envelope response-envelope))
-       :max-results 50 :owner 'history-owner))
+       :max-results 50
+       :owner 'history-owner))
     (should (equal (plist-get operation :name) "GetConversationPageQuery"))
     (should (eq owner 'history-owner))
     (should (equal (alist-get "min_local_sequence_id"
@@ -451,12 +474,18 @@
   "History adaptation should retain bounded key changes outside display events."
   (let* ((message
           (chirp-dm-test--event
-           :sequence "10" :message-id "message-10" :sender-id "42"
-           :conversation-id "conversation-1" :key-version "7"))
+           :sequence "10"
+           :message-id "message-10"
+           :sender-id "42"
+           :conversation-id "conversation-1"
+           :key-version "7"))
          (key-event
           (chirp-dm-test--event
-           :sequence "9" :message-id "key-9" :sender-id "42"
-           :conversation-id "conversation-1" :detail-field 3))
+           :sequence "9"
+           :message-id "key-9"
+           :sender-id "42"
+           :conversation-id "conversation-1"
+           :detail-field 3))
          (payload
           `(("data" .
              (("get_conversation_page" .
@@ -486,8 +515,11 @@
   "History adaptation should reject message events in the recovery-key field."
   (let* ((message
           (chirp-dm-test--event
-           :sequence "10" :message-id "message-10" :sender-id "42"
-           :conversation-id "conversation-1" :text "not a key"))
+           :sequence "10"
+           :message-id "message-10"
+           :sender-id "42"
+           :conversation-id "conversation-1"
+           :text "not a key"))
          (payload
           `(("data" .
              (("get_conversation_page" .
@@ -530,8 +562,12 @@
          (message-id "01234567-89ab-cdef-0123-456789abcdef")
          (encoded
           (chirp-dm-test--event
-           :sequence "30" :message-id message-id :sender-id "42"
-           :conversation-id "42:99" :text "sent" :key-version "1"))
+           :sequence "30"
+           :message-id message-id
+           :sender-id "42"
+           :conversation-id "42:99"
+           :text "sent"
+           :key-version "1"))
          calls sent failure)
     (unwind-protect
         (progn
@@ -938,8 +974,12 @@
   (let* ((message-id "01234567-89ab-cdef-0123-456789abcdef")
          (encoded
           (chirp-dm-test--event
-           :sequence "30" :message-id message-id :sender-id "42"
-           :conversation-id "42:99" :text "sent" :key-version "1"))
+           :sequence "30"
+           :message-id message-id
+           :sender-id "42"
+           :conversation-id "42:99"
+           :text "sent"
+           :key-version "1"))
          (payload
           `(("data" .
              (("xchat_send_create_message_event" .
@@ -970,8 +1010,11 @@
   "Binary live frames should expose events and classify control instructions."
   (let* ((encoded
           (chirp-dm-test--event
-           :sequence "31" :message-id "message-31" :sender-id "42"
-           :conversation-id "conversation-1" :text "live"))
+           :sequence "31"
+           :message-id "message-31"
+           :sender-id "42"
+           :conversation-id "conversation-1"
+           :text "live"))
          (event-frame
           (concat (unibyte-string 12 0 1)
                   (base64-decode-string encoded)
@@ -997,7 +1040,8 @@
   "Identity-free typing frames should not enter persistent conversation state."
   (let* ((encoded
           (chirp-dm-test--event
-           :sender-id "42" :conversation-id "conversation-1"
+           :sender-id "42"
+           :conversation-id "conversation-1"
            :detail-field 6))
          (frame
           (concat (unibyte-string 12 0 1)

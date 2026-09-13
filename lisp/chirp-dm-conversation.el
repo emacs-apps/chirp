@@ -49,7 +49,7 @@
 Set this to nil to disable automatic pagination.  Manual loading with
 `chirp-dm-load-older-messages' remains available."
   :type '(choice (const :tag "Disable automatic pagination" nil)
-          integer)
+                 integer)
   :group 'chirp)
 
 (defcustom chirp-dm-attach-commands
@@ -658,7 +658,8 @@ CONVERSATION-ID and MESSAGE-ID identify their owning message."
                 (if interest
                     (push (plist-get event :id) (appkit-resource-interest-row-keys interest))
                   (push (appkit-resource-interest-create
-                         :key key :row-keys (list (plist-get event :id))) interests)))))))
+                         :key key
+                         :row-keys (list (plist-get event :id))) interests)))))))
       (appkit-render-result-create
        :resource-demands (cl-delete-duplicates demands :key #'appkit-resource-demand-key
                                                :test #'equal)
@@ -771,8 +772,8 @@ CONVERSATION-ID and MESSAGE-ID identify their owning message."
       (setf (plist-get conversation :title)
             (chirp-dm-conversation--title conversation
                                           (plist-get canonical :title)))
-      (chirp-dm-state-merge-snapshot canonical conversation :events
-                                     merged)
+      (chirp-dm-state-merge-snapshot canonical conversation
+                                     :events merged)
       (setf (plist-get state :recovery-key-events)
             (chirp-dm-conversation--append-unique-events
              (plist-get state :recovery-key-events)
@@ -826,10 +827,10 @@ CONVERSATION-ID and MESSAGE-ID identify their owning message."
       (setf (plist-get status :phase) 'error
             (plist-get status :message) message)
       (appkit-surface-post view
-                           (appkit-projection-change-create :full-p t
-                                                            :frame-p t
-                                                            :position
-                                                            'preserve))
+                           (appkit-projection-change-create
+                            :full-p t
+                            :frame-p t
+                            :position 'preserve))
       (message "%s" (replace-regexp-in-string "[\n]+" "  " message))
       (when
           (and (eq phase 'refresh)
@@ -914,7 +915,8 @@ Disjoint focused fragments are bridged through older history before merging."
                      current refreshed)))
           (if-let* ((cursor (plist-get conversation :older-cursor)))
               (chirp-dm-conversation--request-refresh-bridge
-               view state owner conversation :cursor cursor)
+               view state owner conversation
+               :cursor cursor)
             (chirp-dm-conversation--settle-error
              view state owner 'refresh
              "XChat refresh has no cursor to bridge the visible timeline"))
@@ -979,10 +981,10 @@ Disjoint focused fragments are bridged through older history before merging."
                      message)
                t)))
     (appkit-surface-post view
-                         (appkit-projection-change-create :full-p t
-                                                          :frame-p t
-                                                          :position
-                                                          'preserve))
+                         (appkit-projection-change-create
+                          :full-p t
+                          :frame-p t
+                          :position 'preserve))
     (message "%s" (replace-regexp-in-string "[\n]+" "  " message))))
 
 (defun chirp-dm-conversation--settle-send-success
@@ -1009,10 +1011,10 @@ Disjoint focused fragments are bridged through older history before merging."
                  (appkit-chatbuf-aux-reset))
                t)))
     (appkit-surface-post view
-                         (appkit-projection-change-create :full-p t
-                                                          :frame-p t
-                                                          :position
-                                                          'preserve))
+                         (appkit-projection-change-create
+                          :full-p t
+                          :frame-p t
+                          :position 'preserve))
     (chirp-dm-conversation--request view 'refresh)
     (message "%s sent"
              (if reply-p "Direct-message reply" "Direct message"))))
@@ -1215,7 +1217,8 @@ Disjoint focused fragments are bridged through older history before merging."
           (user-error "Direct message is empty"))
         (setq owner
               (appkit-compose-operation-begin
-               (if reply-p 'dm-reply 'dm-send) :generation
+               (if reply-p 'dm-reply 'dm-send)
+               :generation
                (appkit-markup-compose-capture-generation capture)
                :label
                (cond
@@ -1239,12 +1242,10 @@ Disjoint focused fragments are bridged through older history before merging."
         (setf (plist-get state :send-error) nil)
         (setq buffer-read-only t)
         (appkit-surface-post view
-                             (appkit-projection-change-create :full-p
-                                                              t
-                                                              :frame-p
-                                                              t
-                                                              :position
-                                                              'preserve))
+                             (appkit-projection-change-create
+                              :full-p t
+                              :frame-p t
+                              :position 'preserve))
         (let
             ((success
               (lambda (_event _envelope)
@@ -1266,26 +1267,30 @@ Disjoint focused fragments are bridged through older history before merging."
                      (attachments
                       (chirp-backend-dm-send-attachments
                        (chirp-dm-conversation--id state) text
-                       attachments success :target-event
+                       attachments success
+                       :target-event
                        (and reply-p
                             (plist-get reply-target :encoded-event))
                        :key-events
                        (and reply-p
                             (chirp-dm-conversation--reply-key-events
                              state reply-target))
-                       :errback failure :owner transport-operation))
+                       :errback failure
+                       :owner transport-operation))
                      (reply-p
                       (chirp-backend-dm-send-reply
                        (chirp-dm-conversation--id state) text
                        (plist-get reply-target :encoded-event)
                        (chirp-dm-conversation--reply-key-events state
                                                                 reply-target)
-                       success :errback failure :owner
-                       transport-operation))
+                       success
+                       :errback failure
+                       :owner transport-operation))
                      (t
                       (chirp-backend-dm-send-text
                        (chirp-dm-conversation--id state) text success
-                       :errback failure :owner transport-operation))))
+                       :errback failure
+                       :owner transport-operation))))
             ((error quit)
              (when (appkit-surface-live-p transport-operation)
                (chirp-dm-conversation--settle-send-error view state
@@ -1346,12 +1351,10 @@ Disjoint focused fragments are bridged through older history before merging."
         (appkit-chatbuf-aux-set
          (list :aux-type 'reply :aux-msg event :message-id message-id))
         (appkit-surface-post view
-                             (appkit-projection-change-create :full-p
-                                                              t
-                                                              :frame-p
-                                                              t
-                                                              :position
-                                                              'preserve))
+                             (appkit-projection-change-create
+                              :full-p t
+                              :frame-p t
+                              :position 'preserve))
         (appkit-chatbuf-focus-input)
         (message "Next direct message will reply to %s" message-id))
     (user-error "Current view is not a direct-message conversation")))
@@ -1367,8 +1370,9 @@ Disjoint focused fragments are bridged through older history before merging."
               (appkit-chatbuf-aux-reset)
               (appkit-surface-post view
                                    (appkit-projection-change-create
-                                    :full-p t :frame-p t :position
-                                    'preserve))
+                                    :full-p t
+                                    :frame-p t
+                                    :position 'preserve))
               (message "Direct-message reply cancelled"))
           (message "No direct-message reply is active")))
     (user-error "Current view is not a direct-message conversation")))
@@ -1608,24 +1612,23 @@ Disjoint focused fragments are bridged through older history before merging."
         (chirp-dm-conversation--one-line
          (plist-get conversation :title)))
        (view
-        (chirp-open-projection-view :id
-                                    (list 'dm-conversation instance)
-                                    :mode 'chirp-dm-conversation--mode
-                                    :title
-                                    (format "DM: %s"
-                                            (if (string-empty-p title)
-                                                "Conversation"
-                                              title))
-                                    :state
-                                    (chirp-dm-conversation--make-state
-                                     instance conversation)
-                                    :render-function
-                                    #'chirp-dm-conversation--sync
-                                    :anchor-property
-                                    'chirp-dm-message-id :setup
-                                    #'chirp-dm-conversation--setup
-                                    :select t :ready
-                                    #'chirp-dm-conversation--surface-ready)))
+        (chirp-open-projection-view
+         :id
+         (list 'dm-conversation instance)
+         :mode 'chirp-dm-conversation--mode
+         :title
+         (format "DM: %s"
+                 (if (string-empty-p title)
+                     "Conversation"
+                   title))
+         :state
+         (chirp-dm-conversation--make-state
+          instance conversation)
+         :render-function #'chirp-dm-conversation--sync
+         :anchor-property 'chirp-dm-message-id
+         :setup #'chirp-dm-conversation--setup
+         :select t
+         :ready #'chirp-dm-conversation--surface-ready)))
     (if refresh-p (chirp-dm-conversation--request view 'refresh)
       (when
           (chirp-dm-conversation--decryption-needed-p
@@ -1638,7 +1641,8 @@ Disjoint focused fragments are bridged through older history before merging."
   (appkit-surface-post surface
                        (appkit-projection-change-create :full-p t :frame-p t))
   (appkit-chat-timeline-install-history-observer
-   surface :start-function
+   surface
+   :start-function
    (lambda (window position start)
      (chirp-dm-conversation--maybe-auto-load-older surface window position start))))
 

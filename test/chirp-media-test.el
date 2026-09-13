@@ -180,10 +180,12 @@ rerender and creates a CPU loop."
                        (let ((url (alist-get 'url (appkit-media-image-acquisition-resource input))))
                          (push (list url resolve reject) callbacks)
                          (appkit-cancellation-create
-                          :kind 'transport :cancel (lambda () (push url canceled)))))))
+                          :kind 'transport
+                          :cancel (lambda () (push url canceled)))))))
             (setq view
                   (chirp-open-projection-view
-                   :id (make-symbol "image-resource-test") :title "Image resource"
+                   :id (make-symbol "image-resource-test")
+                   :title "Image resource"
                    :state '(:type test :source "https://pbs.twimg.com/media/one.jpg")
                    :setup #'ignore
                    :render-function
@@ -194,9 +196,11 @@ rerender and creates a CPU loop."
                         :resource-demands (and demand (list demand))
                         :resource-interest-update
                         (appkit-resource-interest-update-create
-                         :mode 'replace :entries
+                         :mode 'replace
+                         :entries
                          (and demand (list (appkit-resource-interest-create
-                                            :key 'photo :row-keys '(photo))))))))))
+                                            :key 'photo
+                                            :row-keys '(photo))))))))))
             (source "https://pbs.twimg.com/media/two.jpg")
             (should (= (length callbacks) 2))
             (should (member "https://pbs.twimg.com/media/one.jpg" canceled))
@@ -791,7 +795,8 @@ rerender and creates a CPU loop."
           (progn
             (setq surface
                   (chirp-open-projection-view
-                   :id (make-symbol "geometry-return") :title "Geometry return"
+                   :id (make-symbol "geometry-return")
+                   :title "Geometry return"
                    :state '(:type test)
                    :printer (lambda (_row)
                               (insert (propertize
@@ -801,7 +806,8 @@ rerender and creates a CPU loop."
                    (lambda (owner _app _model change)
                      (chirp-render-projection owner change
                        (list (appkit-projection-row-create
-                              :key 'media :payload 'unchanged))))))
+                              :key 'media
+                              :payload 'unchanged))))))
             (switch-to-buffer (appkit-surface-buffer surface))
             (appkit-surface-refresh-responsive-geometry surface)
             (appkit-loop-run-pass (appkit-surface-loop surface))
@@ -846,9 +852,12 @@ rerender and creates a CPU loop."
 
 (defun chirp-media-test--source (&optional identity)
   "Open a real generated source Surface without multimedia dependencies."
-  (chirp-open-projection-view :id (or identity (make-symbol "media-test"))
-                              :title "Media test" :state (list :type 'test)
-                              :setup #'ignore :render-function #'ignore))
+  (chirp-open-projection-view
+   :id (or identity (make-symbol "media-test"))
+   :title "Media test"
+   :state (list :type 'test)
+   :setup #'ignore
+   :render-function #'ignore))
 
 (ert-deftest chirp-media-replaced-source-rejects-late-acquisition ()
   "Replacing a source model revokes the old acquisition's viewer authority."

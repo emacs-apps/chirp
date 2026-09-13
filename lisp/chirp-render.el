@@ -51,7 +51,7 @@
 
 Set this to nil or an empty string to disable tweet separators."
   :type '(choice (const :tag "No separator" nil)
-          (string :tag "Separator text"))
+                 (string :tag "Separator text"))
   :group 'chirp)
 
 (defcustom chirp-tweet-separator-indent 6
@@ -757,7 +757,8 @@ and PROPERTIES apply to the finished card."
         (add-text-properties start (point) properties))
       (when action
         (chirp-render--add-fallback-action
-         start (max start (1- (point))) action :help-echo help-echo))
+         start (max start (1- (point))) action
+         :help-echo help-echo))
       (cons start (point)))))
 
 (defun chirp-render--insert-link-card-image (url card-prefix)
@@ -788,7 +789,8 @@ PREFIX supplies the card's outer nesting indentation."
            (lambda (card-prefix)
              (when domain
                (appkit-ui-insert-prefixed-lines
-                card-prefix domain :face 'chirp-meta-face))
+                card-prefix domain
+                :face 'chirp-meta-face))
              (when title
                (appkit-ui-insert-prefixed-lines
                 card-prefix
@@ -831,7 +833,9 @@ The card opens TWEET's Chirp thread while retaining its nested link actions."
    (lambda (card-prefix)
      (let ((body-start (point)))
        (chirp-render--insert-tweet
-        tweet :show-reply-context t :write-actions-p write-actions-p)
+        tweet
+        :show-reply-context t
+        :write-actions-p write-actions-p)
        (appkit-ui-apply-line-prefix body-start (point) card-prefix)))
    :action (lambda () (chirp-thread-open-tweet tweet))
    :help-echo "Open tweet"
@@ -853,7 +857,9 @@ controls mutation actions.  Nested quoted tweets are omitted after one level."
                (let ((chirp-render--quoted-tweet-depth
                       (1+ chirp-render--quoted-tweet-depth)))
                  (chirp-render-insert-tweet-card
-                  quoted :prefix prefix :write-actions-p write-actions-p))))
+                  quoted
+                  :prefix prefix
+                  :write-actions-p write-actions-p))))
     (put-text-property (car span) (1+ (car span))
                        'chirp-entry-start nil)))
 
@@ -1782,12 +1788,20 @@ layout.  WRITE-ACTIONS-P controls mutation actions, while TIME-FORMAT selects
 `compact' or `full' timestamps."
   (let ((start (point)))
     (chirp-render--insert-tweet-context
-     tweet :prefix prefix :prefix-face prefix-face :reply-parent reply-parent)
+     tweet
+     :prefix prefix
+     :prefix-face prefix-face
+     :reply-parent reply-parent)
     (chirp-render--insert-tweet-heading
-     tweet :prefix prefix :prefix-face prefix-face :avatar-p t
+     tweet
+     :prefix prefix
+     :prefix-face prefix-face
+     :avatar-p t
      :time-format time-format)
     (chirp-render--insert-tweet-body
-     tweet :prefix prefix :prefix-face prefix-face
+     tweet
+     :prefix prefix
+     :prefix-face prefix-face
      :show-reply-context show-reply-context
      :article-mode article-mode
      :media-presentation media-presentation
@@ -1847,11 +1861,15 @@ tweet content and actions."
             :context-inserter
             (lambda ()
               (chirp-render--insert-tweet-context
-               tweet :trailing-newline-p nil))
+               tweet
+               :trailing-newline-p nil))
             :heading-inserter
             (lambda ()
               (chirp-render--insert-tweet-heading
-               tweet :avatar-p t :time-p nil :newline-p nil))
+               tweet
+               :avatar-p t
+               :time-p nil
+               :newline-p nil))
             :time (if focus-p
                       (chirp-time-format-full
                        (plist-get tweet :created-at))
@@ -1861,7 +1879,8 @@ tweet content and actions."
             (lambda (body-prefix _properties)
               (let ((body-start (point)))
                 (chirp-render--insert-tweet-body
-                 tweet :prefix nil
+                 tweet
+                 :prefix nil
                  :reply-context-prefix nil
                  :show-reply-context show-reply-context
                  :article-mode (and focus-p 'full)

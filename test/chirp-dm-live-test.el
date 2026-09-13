@@ -64,18 +64,21 @@
              (conversation
               (chirp-dm-test--normalized-conversation old))
              (encoded
-              (chirp-dm-test--event :sequence "31" :message-id
-                                    "message-31" :sender-id "42"
-                                    :conversation-id "conversation-1"
-                                    :text "live message"))
+              (chirp-dm-test--event
+               :sequence "31"
+               :message-id "message-31"
+               :sender-id "42"
+               :conversation-id "conversation-1"
+               :text "live message"))
              (event (chirp-xchat-decode-event encoded)))
           (setq buffer (chirp-dm-conversation-open conversation))
           (let
               ((service
-                (chirp-dm-live--service-create :app (chirp-app)
-                                               :pending-conversations
-                                               (make-hash-table :test
-                                                                #'equal))))
+                (chirp-dm-live--service-create
+                 :app (chirp-app)
+                 :pending-conversations
+                 (make-hash-table :test
+                                  #'equal))))
             (chirp-dm-live--accept-event service event))
           (with-current-buffer buffer
             (let ((view (appkit-current-surface)))
@@ -131,10 +134,11 @@
             (setq buffer (chirp-dm-conversation-open conversation))
             (let
                 ((service
-                  (chirp-dm-live--service-create :app (chirp-app)
-                                                 :pending-conversations
-                                                 (make-hash-table
-                                                  :test #'equal))))
+                  (chirp-dm-live--service-create
+                   :app (chirp-app)
+                   :pending-conversations
+                   (make-hash-table
+                    :test #'equal))))
               (chirp-dm-live--accept-event service live))
             (should (equal decrypted-inputs '(("encoded-new"))))
             (should

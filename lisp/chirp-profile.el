@@ -164,31 +164,33 @@
 
 (defun chirp-profile--ensure-view (handle title refresh mode)
   "Open or reuse HANDLE's profile view titled TITLE.\nREFRESH reloads the selected MODE."
-  (chirp-open-projection-view :id (list 'profile handle) :title title
-                              :state
-                              (list :type 'profile :query
-                                    (list :handle handle :mode mode)
-                                    :user nil :items nil :mode mode
-                                    :modes chirp-profile--base-modes
-                                    :title title :refresh refresh
-                                    :page (list :next-cursor nil)
-                                    :status
-                                    (list :phase 'initial :message nil)
-                                    :timeline-ready nil :loading-more
-                                    nil :expanded-tweet-ids
-                                    (make-hash-table :test #'equal))
-                              :render-function #'chirp-profile--sync
-                              :printer #'chirp-render-print-tweet-row
-                              :select t))
+  (chirp-open-projection-view
+   :id (list 'profile handle)
+   :title title
+   :state
+   (list :type 'profile :query
+         (list :handle handle :mode mode)
+         :user nil :items nil :mode mode
+         :modes chirp-profile--base-modes
+         :title title :refresh refresh
+         :page (list :next-cursor nil)
+         :status
+         (list :phase 'initial :message nil)
+         :timeline-ready nil :loading-more
+         nil :expanded-tweet-ids
+         (make-hash-table :test #'equal))
+   :render-function #'chirp-profile--sync
+   :printer #'chirp-render-print-tweet-row
+   :select t))
 
 (defun chirp-profile--present (view)
   "Request a projection update for profile VIEW."
   (chirp-profile--bind-locals view)
   (appkit-surface-post view
-                       (appkit-projection-change-create :full-p t
-                                                        :frame-p t
-                                                        :position
-                                                        'preserve))
+                       (appkit-projection-change-create
+                        :full-p t
+                        :frame-p t
+                        :position 'preserve))
   nil)
 
 (defun chirp-profile--open-user-list (kind handle)
@@ -200,22 +202,22 @@
         (lambda () (chirp-backend-invalidate-user clean-handle)
           (chirp-profile--open-user-list kind clean-handle)))
        (view
-        (chirp-open-projection-view :id
-                                    (list 'users kind clean-handle)
-                                    :title title :state
-                                    (list :type 'users :query
-                                          (list :kind kind :handle
-                                                clean-handle)
-                                          :items nil :title title
-                                          :refresh refresh :status
-                                          (list :phase 'initial
-                                                :message nil)
-                                          :wrap-navigation nil)
-                                    :render-function
-                                    #'chirp-profile--users-sync
-                                    :printer
-                                    #'chirp-profile--print-user-row
-                                    :select t))
+        (chirp-open-projection-view
+         :id
+         (list 'users kind clean-handle)
+         :title title
+         :state
+         (list :type 'users :query
+               (list :kind kind :handle
+                     clean-handle)
+               :items nil :title title
+               :refresh refresh :status
+               (list :phase 'initial
+                     :message nil)
+               :wrap-navigation nil)
+         :render-function #'chirp-profile--users-sync
+         :printer #'chirp-profile--print-user-row
+         :select t))
        (buffer (appkit-surface-buffer view))
        (fetch-fn
         (pcase kind
@@ -232,7 +234,8 @@
                          'idle)
                    (appkit-surface-post view
                                         (appkit-projection-change-create
-                                         :full-p t :frame-p t
+                                         :full-p t
+                                         :frame-p t
                                          :position 'preserve))
                    nil (chirp-clear-status buffer)
                    (dolist (user users)

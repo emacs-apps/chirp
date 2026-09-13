@@ -165,7 +165,7 @@ When non-nil and `chirp-video-player-command' points to `mpv', Chirp adds
 `--geometry=WIDTHxHEIGHT' when launching external playback.  Other players
 ignore this setting."
   :type '(choice (const :tag "Player default" nil)
-          (cons :tag "Width x Height" integer integer))
+                 (cons :tag "Width x Height" integer integer))
   :group 'chirp)
 
 (defcustom chirp-video-playback-max-bitrate 2176000
@@ -507,7 +507,8 @@ Use FALLBACK-EXT when URL has no recognizable extension."
              (chirp-media-cache-base source "media"))
      :loader #'chirp-media--load-image-resource
      :acquisition-identity (list 'chirp-image source)
-     :sharing-policy 'shared :cache-policy 'while-interested)))
+     :sharing-policy 'shared
+     :cache-policy 'while-interested)))
 
 (defun chirp-media--xchat-attachment-extension (attachment)
   "Return a safe cache extension hint for verified ATTACHMENT."
@@ -606,7 +607,8 @@ Use FALLBACK-EXT when URL has no recognizable extension."
          :acquisition-identity (list 'chirp-xchat
                                      (appkit-loop-incarnation (appkit-app-loop app))
                                      epoch source)
-         :sharing-policy 'shared :cache-policy 'while-interested)))))
+         :sharing-policy 'shared
+         :cache-policy 'while-interested)))))
 
 (defun chirp-media-xchat-resource-status (view resource-key)
   "Return RESOURCE-KEY's coordinated status in VIEW, or nil."
@@ -644,7 +646,8 @@ Use FALLBACK-EXT when URL has no recognizable extension."
   "Return VIEW's allowlisted image demand for RESOURCE-KEY, SOURCE and NAME."
   (when (chirp-media--trusted-xchat-media-url-p source)
     (chirp-media-image-demand
-     view resource-key source :name name)))
+     view resource-key source
+     :name name)))
 
 (cl-defun chirp-media-insert-image-resource
     (view resource-key &key alternate-text help-echo)
@@ -1337,7 +1340,8 @@ When ANIMATED-GIF-P is non-nil, add a subtle GIF label to the badge."
   (when-let* ((resource-key
                (chirp-media-xchat-avatar-resource-key identity url)))
     (chirp-media-image-demand
-     view resource-key url :name "avatar.jpg")))
+     view resource-key url
+     :name "avatar.jpg")))
 
 (defun chirp-media-avatar-resource-image
     (view resource-key &optional pixel-size)
@@ -1697,7 +1701,8 @@ overrides item widths; FIT may be `cover' to crop into those boxes."
   (when-let* ((url (chirp-media-playback-url media)))
     (appkit-media-video-session-create
      (appkit-media-resource-create
-      :url url :name (appkit-media-url-filename url))
+      :url url
+      :name (appkit-media-url-filename url))
      "Chirp"
      :cache-key (chirp-media--video-cache-key media)
      :muted muted)))

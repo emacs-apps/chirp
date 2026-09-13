@@ -353,10 +353,11 @@ the short-lived token-bearing constructor URL."
         (and (chirp-dm-live--service-p service)
              (not (chirp-dm-live--service-stopped-p service)))
       (setq service
-            (chirp-dm-live--service-create :app app
-                                           :pending-conversations
-                                           (make-hash-table :test
-                                                            #'equal)))
+            (chirp-dm-live--service-create
+             :app app
+             :pending-conversations
+             (make-hash-table :test
+                              #'equal)))
       (setf (chirp--session-dm-live state) service)
       (appkit-register-handle app 'dm-live service
                               #'chirp-dm-live-stop)

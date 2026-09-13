@@ -34,7 +34,7 @@
 Set this to nil to disable automatic checks.  Manual refreshes with `g' still
 check for new posts without immediately moving the current timeline."
   :type '(choice (const :tag "Disable automatic checks" nil)
-          number)
+                 number)
   :group 'chirp)
 
 (defcustom chirp-timeline-auto-load-threshold 2000
@@ -43,7 +43,7 @@ check for new posts without immediately moving the current timeline."
 Set this to nil to disable automatic pagination.  Manual loading with
 `chirp-load-more' remains available."
   :type '(choice (const :tag "Disable automatic pagination" nil)
-          integer)
+                 integer)
   :group 'chirp)
 
 (defun chirp-timeline--title (kind)
@@ -204,9 +204,9 @@ Set this to nil to disable automatic pagination.  Manual loading with
     (let ((state (chirp-timeline--view-state view)))
       (when (plist-get state :items)
         (setf (plist-get state :position)
-              (appkit-position-capture :anchor-property
-                                       'chirp-entry-id
-                                       :preserve-window-start t)))
+              (appkit-position-capture
+               :anchor-property 'chirp-entry-id
+               :preserve-window-start t)))
       (dolist (feed-state (chirp--primary-feed-state-values state))
         (when-let* ((position (plist-get feed-state :position)))
           (setf (appkit-position-snapshot-window-snapshots position)
@@ -334,17 +334,18 @@ Set this to nil to disable automatic pagination.  Manual loading with
           nil (plist-get state :generation) nil
           (plist-get state :loaded-p) t)
     (appkit-surface-post view
-                         (appkit-projection-change-create :position
-                                                          (plist-get
-                                                           (list
-                                                            :position
-                                                            position-intent)
-                                                           :position)))
+                         (appkit-projection-change-create
+                          :position
+                          (plist-get
+                           (list
+                            :position
+                            position-intent)
+                           :position)))
     (appkit-surface-post view
-                         (appkit-projection-change-create :full-p t
-                                                          :frame-p t
-                                                          :position
-                                                          'preserve))
+                         (appkit-projection-change-create
+                          :full-p t
+                          :frame-p t
+                          :position 'preserve))
     (chirp-media-prefetch-tweets tweets (appkit-surface-buffer view))
     (chirp-enrich-quoted-tweets tweets (appkit-surface-buffer view))
     (when (and new-count (eq phase 'refresh))
@@ -364,10 +365,10 @@ Set this to nil to disable automatic pagination.  Manual loading with
     (when (and quiet (eq phase 'older))
       (setf (plist-get page :auto-load-paused-p) t))
     (appkit-surface-post view
-                         (appkit-projection-change-create :full-p t
-                                                          :frame-p t
-                                                          :position
-                                                          'preserve))
+                         (appkit-projection-change-create
+                          :full-p t
+                          :frame-p t
+                          :position 'preserve))
     (unless silent
       (message "%s" (replace-regexp-in-string "[\n]+" "  " message)))))
 
@@ -396,10 +397,10 @@ Set this to nil to disable automatic pagination.  Manual loading with
           (plist-get status :phase) phase (plist-get status :message)
           nil)
     (appkit-surface-post view
-                         (appkit-projection-change-create :full-p t
-                                                          :frame-p t
-                                                          :position
-                                                          'preserve))
+                         (appkit-projection-change-create
+                          :full-p t
+                          :frame-p t
+                          :position 'preserve))
     (setf (plist-get state :request)
           (chirp-backend-feed
            (lambda (tweets envelope)
@@ -469,19 +470,17 @@ Set this to nil to disable automatic pagination.  Manual loading with
         (chirp-timeline--interrupt-state-request state)
         (let*
             ((view
-              (chirp-open-projection-view :id
-                                          chirp-timeline--primary-view-id
-                                          :mode 'chirp-timeline--mode
-                                          :title
-                                          (chirp-timeline--title kind)
-                                          :state state
-                                          :render-function
-                                          #'chirp-timeline--sync
-                                          :anchor-property
-                                          'chirp-entry-id :setup
-                                          #'chirp-timeline--setup-view
-                                          :select t :ready
-                                          #'chirp-timeline--surface-ready))
+              (chirp-open-projection-view
+               :id chirp-timeline--primary-view-id
+               :mode 'chirp-timeline--mode
+               :title
+               (chirp-timeline--title kind)
+               :state state
+               :render-function #'chirp-timeline--sync
+               :anchor-property 'chirp-entry-id
+               :setup #'chirp-timeline--setup-view
+               :select t
+               :ready #'chirp-timeline--surface-ready))
              (buffer (appkit-surface-buffer view)))
           (when-let* ((position (plist-get state :position)))
             (with-current-buffer buffer
@@ -498,8 +497,9 @@ Set this to nil to disable automatic pagination.  Manual loading with
         (when (plist-get state :items)
           (with-current-buffer buffer
             (setf (plist-get state :position)
-                  (appkit-position-capture :anchor-property 'chirp-entry-id
-                                           :preserve-window-start t))))
+                  (appkit-position-capture
+                   :anchor-property 'chirp-entry-id
+                   :preserve-window-start t))))
         (chirp-timeline--interrupt-state-request state)
         (chirp-timeline--interrupt-state-request target)
         (with-current-buffer buffer
@@ -537,12 +537,10 @@ Set this to nil to disable automatic pagination.  Manual loading with
                               (plist-get (list :position 'first)
                                          :position)))
         (appkit-surface-post view
-                             (appkit-projection-change-create :full-p
-                                                              t
-                                                              :frame-p
-                                                              t
-                                                              :position
-                                                              'preserve))
+                             (appkit-projection-change-create
+                              :full-p t
+                              :frame-p t
+                              :position 'preserve))
         (message "Showing %d new post%s." count
                  (if (= count 1) "" "s")))
     (user-error "No new posts are waiting")))
@@ -687,14 +685,16 @@ REFRESH reloads the collection."
 
 (defun chirp-timeline--ensure-collection (kind title refresh)
   "Open or reuse collection KIND titled TITLE with REFRESH."
-  (chirp-open-projection-view :id (list 'collection kind title) :title
-                              title :state
-                              (chirp-timeline--collection-state kind
-                                                                title
-                                                                refresh)
-                              :render-function #'chirp-timeline--sync
-                              :printer #'chirp-render-print-tweet-row
-                              :select t))
+  (chirp-open-projection-view
+   :id (list 'collection kind title)
+   :title title
+   :state
+   (chirp-timeline--collection-state kind
+                                     title
+                                     refresh)
+   :render-function #'chirp-timeline--sync
+   :printer #'chirp-render-print-tweet-row
+   :select t))
 
 (defun chirp-timeline--install-tweets (view tweets)
   "Install TWEETS into collection VIEW and request a projection sync."
@@ -705,17 +705,18 @@ REFRESH reloads the collection."
           t (plist-get (plist-get state :status) :phase) 'idle
           (plist-get (plist-get state :status) :message) nil)
     (appkit-surface-post view
-                         (appkit-projection-change-create :position
-                                                          (plist-get
-                                                           (list
-                                                            :position
-                                                            'first)
-                                                           :position)))
+                         (appkit-projection-change-create
+                          :position
+                          (plist-get
+                           (list
+                            :position
+                            'first)
+                           :position)))
     (appkit-surface-post view
-                         (appkit-projection-change-create :full-p t
-                                                          :frame-p t
-                                                          :position
-                                                          'preserve))
+                         (appkit-projection-change-create
+                          :full-p t
+                          :frame-p t
+                          :position 'preserve))
     nil (chirp-clear-status buffer)
     (chirp-media-prefetch-tweets tweets buffer)
     (chirp-enrich-quoted-tweets tweets buffer)))

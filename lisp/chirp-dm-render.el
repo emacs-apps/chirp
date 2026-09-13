@@ -188,10 +188,12 @@
               ((appkit-surface-p view))
               (app (appkit-surface-app view)))
     (appkit-resource-demand-create
-     :key key :input (list :app app :tweet-id (cadr key))
+     :key key
+     :input (list :app app :tweet-id (cadr key))
      :loader #'chirp-dm-render--load-post-resource
      :acquisition-identity (list (appkit-loop-incarnation (appkit-app-loop app)) key)
-     :sharing-policy 'shared :cache-policy 'while-interested)))
+     :sharing-policy 'shared
+     :cache-policy 'while-interested)))
 
 (defun chirp-dm-render--attachment-block (attachment)
   "Return ATTACHMENT as one semantic provider-object block."
@@ -275,8 +277,9 @@
        (resource
         (if resource-key
             (chirp-media-xchat-resource view resource-key attachment)
-          (appkit-media-resource-create :name
-                                        (plist-get attachment :name))))
+          (appkit-media-resource-create
+           :name
+           (plist-get attachment :name))))
        (file (alist-get 'file resource))
        (status
         (and resource-key
@@ -289,13 +292,15 @@
                  (require 'chirp-media-view)
                  (chirp-media-open-local view file open-kind)))))
        (context
-        (appkit-media-card-context-create :payload attachment :kind
-                                          (chirp-dm-render--attachment-card-kind
-                                           attachment)
-                                          :title
-                                          (chirp-dm-render--attachment-title
-                                           attachment)
-                                          :open-action open-action))
+        (appkit-media-card-context-create
+         :payload attachment
+         :kind
+         (chirp-dm-render--attachment-card-kind
+          attachment)
+         :title
+         (chirp-dm-render--attachment-title
+          attachment)
+         :open-action open-action))
        (status-text
         (pcase status
           ('pending
@@ -304,29 +309,30 @@
           ('failed
            (appkit-chat-ins-media-transfer-status-text
             '(:status error))))))
-    (appkit-chat-ins-insert-media-card :kind (plist-get context :kind)
-                                       :title
-                                       (plist-get context :title)
-                                       :details
-                                       (chirp-dm-render--attachment-details
-                                        attachment)
-                                       :status status-text :title-face
-                                       'bold :meta-face 'shadow
-                                       :context context
-                                       :open-help-echo
-                                       "Open decrypted attachment"
-                                       :body-inserter
-                                       (and resource-key
-                                            (eq
-                                             (plist-get context :kind)
-                                             'image)
-                                            (eq status 'ready)
-                                            (lambda (prefix-state)
-                                              (chirp-dm-render--insert-image-preview
-                                               view resource-key
-                                               (plist-get context
-                                                          :title)
-                                               prefix-state))))))
+    (appkit-chat-ins-insert-media-card
+     :kind (plist-get context :kind)
+     :title
+     (plist-get context :title)
+     :details
+     (chirp-dm-render--attachment-details
+      attachment)
+     :status status-text
+     :title-face 'bold
+     :meta-face 'shadow
+     :context context
+     :open-help-echo "Open decrypted attachment"
+     :body-inserter
+     (and resource-key
+          (eq
+           (plist-get context :kind)
+           'image)
+          (eq status 'ready)
+          (lambda (prefix-state)
+            (chirp-dm-render--insert-image-preview
+             view resource-key
+             (plist-get context
+                        :title)
+             prefix-state))))))
 
 (defun chirp-dm-render--insert-attachment-object
     (view node prefix-state)
@@ -352,13 +358,17 @@
            (if (eq (and entry (appkit-resource-state-status entry)) 'pending)
                "Attached post · loading…"
              (chirp-dm-render--attachment-title attachment))
-           :prefix prefix-state :face 'shadow :action
-           (chirp-dm-render--link-action url) :help-echo url))))
+           :prefix prefix-state
+           :face 'shadow
+           :action
+           (chirp-dm-render--link-action url)
+           :help-echo url))))
      ((and (chirp-dm-render--safe-attachment-url-p url)
            (not (memq kind '(image gif video audio file svg))))
       (appkit-chat-ins-insert-prefixed-line
-       (chirp-dm-render--attachment-title attachment) :prefix
-       prefix-state :action (chirp-dm-render--link-action url)
+       (chirp-dm-render--attachment-title attachment)
+       :prefix prefix-state
+       :action (chirp-dm-render--link-action url)
        :help-echo url))
      (t (chirp-dm-render--insert-media-card view attachment)))))
 
@@ -440,7 +450,9 @@
                 view resource-key pixel-size)))
          (prefixes
           (appkit-chat-avatar-prefixes
-           image "@" :pixel-size pixel-size :resize t))
+           image "@"
+           :pixel-size pixel-size
+           :resize t))
          (properties
           (list 'help-echo "Participant avatar"
                 'chirp-dm-avatar-sender-id
@@ -569,12 +581,14 @@
                (chirp-dm-render--post-demand view attachment))
               ((plist-get attachment :media-hash)
                (chirp-media-xchat-attachment-demand
-                view key attachment :conversation-id (plist-get event :conversation-id)
+                view key attachment
+                :conversation-id (plist-get event :conversation-id)
                 :key-version (or (plist-get event :key-version)
                                  (plist-get event :conversation-key-version))))
               ((memq (plist-get attachment :kind) '(image gif svg media))
                (chirp-media-xchat-image-demand
-                view key source :name (plist-get attachment :name))))))
+                view key source
+                :name (plist-get attachment :name))))))
          (plist-get event :attachments))))
 
 (defun chirp-dm-render--event-resource-keys (view state event)

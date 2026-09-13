@@ -883,7 +883,8 @@
                    (chirp-x-test--response status "{}" callback))))
         (chirp-x-graphql-request
          '(:query-id "query-id" :name "WriteMutation" :method post)
-         nil #'ignore :errback (lambda (message) (setq failure message))))
+         nil #'ignore
+         :errback (lambda (message) (setq failure message))))
       (should (string-prefix-p "X write outcome is unknown" failure)))))
 
 (ert-deftest chirp-x-graphql-request-marks-partial-mutation-errors-unknown ()
@@ -1020,27 +1021,28 @@
             (chirp-view-mode)
             (setq view
                   (appkit-open-generated-surface
-                   (appkit-surface-type-create :name 'test :mode
-                                               'chirp-view-mode :init
-                                               (lambda
-                                                 (_context input)
-                                                 (appkit-next :model
-                                                              input
-                                                              :render
-                                                              appkit-render-none))
-                                               :update
-                                               #'chirp--surface-update
-                                               :renderer-factory
-                                               (lambda (_surface)
-                                                 (appkit-generated-renderer-create
-                                                  :mount #'ignore
-                                                  :render #'ignore
-                                                  :recover #'ignore
-                                                  :merge
-                                                  #'appkit-projection-change-merge
-                                                  :unmount #'ignore)))
-                   :app (chirp-app) :identity '(test transport-owner)
-                   :input '(:type test) :buffer (current-buffer))))
+                   (appkit-surface-type-create
+                    :name 'test
+                    :mode 'chirp-view-mode
+                    :init
+                    (lambda
+                      (_context input)
+                      (appkit-next
+                       :model input
+                       :render appkit-render-none))
+                    :update #'chirp--surface-update
+                    :renderer-factory
+                    (lambda (_surface)
+                      (appkit-generated-renderer-create
+                       :mount #'ignore
+                       :render #'ignore
+                       :recover #'ignore
+                       :merge #'appkit-projection-change-merge
+                       :unmount #'ignore)))
+                   :app (chirp-app)
+                   :identity '(test transport-owner)
+                   :input '(:type test)
+                   :buffer (current-buffer))))
           (cl-letf
               (((symbol-function 'chirp-x-credentials)
                 (lambda ()
@@ -1053,8 +1055,8 @@
             (chirp-x-graphql-request
              '(:query-id "query-id" :name "HomeTimeline")
              '(("count" . 1)) (lambda (_payload) (setq success t))
-             :errback (lambda (message) (setq failure message)) :owner
-             view))
+             :errback (lambda (message) (setq failure message))
+             :owner view))
           (should (= (length (appkit-surface-handles view)) 1))
           (should-not (appkit-app-handles (chirp-app)))
           (kill-buffer (appkit-surface-buffer view))

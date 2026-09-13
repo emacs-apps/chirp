@@ -339,7 +339,8 @@
               (should
                (eq
                 (chirp-backend-dm-send-text "group-1" "hello group"
-                                            #'ignore :errback
+                                            #'ignore
+                                            :errback
                                             (lambda (message)
                                               (setq send-error message)))
                 'send-request))

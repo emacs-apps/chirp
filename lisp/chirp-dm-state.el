@@ -205,14 +205,16 @@ Otherwise preserve canonical events while adding events from SNAPSHOT."
                (when (eq (plist-get state :conversation) conversation)
                  (appkit-surface-post view
                                       (appkit-projection-change-create
-                                       :full-p t :frame-p t :position
-                                       'preserve))))
+                                       :full-p t
+                                       :frame-p t
+                                       :position 'preserve))))
               ('dm-inbox
                (when (memq conversation (plist-get state :items))
                  (appkit-surface-post view
                                       (appkit-projection-change-create
-                                       :full-p t :frame-p t :position
-                                       'preserve)))))))))))
+                                       :full-p t
+                                       :frame-p t
+                                       :position 'preserve)))))))))))
 
 (provide 'chirp-dm-state)
 

@@ -128,13 +128,17 @@ delete operation and is left for X to expire."
     (unwind-protect
         (let* ((root
                 (chirp-write-smoke--publish
-                 :kind 'post :text marker :attachments nil))
+                 :kind 'post
+                 :text marker
+                 :attachments nil))
                (_ (push root created-ids))
                (root-tweet (chirp-write-smoke--verify-text root marker))
                (reply-marker (concat marker " reply"))
                (reply
                 (chirp-write-smoke--publish
-                 :kind 'reply :text reply-marker :target-id root
+                 :kind 'reply
+                 :text reply-marker
+                 :target-id root
                  :attachments nil))
                (_ (push reply created-ids))
                (reply-tweet
@@ -142,7 +146,9 @@ delete operation and is left for X to expire."
                (quote-marker (concat marker " quote"))
                (quote
                 (chirp-write-smoke--publish
-                 :kind 'quote :text quote-marker :target-id root
+                 :kind 'quote
+                 :text quote-marker
+                 :target-id root
                  :attachments nil))
                (_ (push quote created-ids))
                (quote-tweet
@@ -150,14 +156,17 @@ delete operation and is left for X to expire."
                (long-marker (concat marker " " (make-string 281 ?x)))
                (long
                 (chirp-write-smoke--publish
-                 :kind 'post :text long-marker :attachments nil))
+                 :kind 'post
+                 :text long-marker
+                 :attachments nil))
                (_ (push long created-ids))
                (long-tweet
                 (chirp-write-smoke--verify-text long marker))
                (image-marker (concat marker " image"))
                (image
                 (chirp-write-smoke--publish
-                 :kind 'post :text image-marker
+                 :kind 'post
+                 :text image-marker
                  :attachments (list image-file)))
                (_ (push image created-ids))
                (image-tweet

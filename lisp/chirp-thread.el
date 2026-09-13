@@ -429,19 +429,21 @@ protected."
 
 (defun chirp-thread--ensure-view (title refresh focus-id &optional id)
   "Open or reuse a thread view titled TITLE focused on FOCUS-ID.\nREFRESH reloads the thread; optional ID overrides its Appkit identity."
-  (chirp-open-projection-view :id
-                              (or id (list 'thread title focus-id))
-                              :title title :state
-                              (list :type 'thread :query
-                                    (list :focus-id focus-id) :items
-                                    nil :title title :refresh refresh
-                                    :status
-                                    (list :phase 'initial :message nil)
-                                    :expanded-tweet-ids
-                                    (make-hash-table :test #'equal))
-                              :render-function #'chirp-thread--sync
-                              :printer #'chirp-thread--print-row
-                              :select t))
+  (chirp-open-projection-view
+   :id
+   (or id (list 'thread title focus-id))
+   :title title
+   :state
+   (list :type 'thread :query
+         (list :focus-id focus-id) :items
+         nil :title title :refresh refresh
+         :status
+         (list :phase 'initial :message nil)
+         :expanded-tweet-ids
+         (make-hash-table :test #'equal))
+   :render-function #'chirp-thread--sync
+   :printer #'chirp-thread--print-row
+   :select t))
 
 (defun chirp-thread--present (view tweets &optional position)
   "Install TWEETS into thread VIEW and request a projection sync."
@@ -452,19 +454,20 @@ protected."
           (plist-get (plist-get state :status) :phase) 'idle
           (plist-get (plist-get state :status) :message) nil)
     (appkit-surface-post view
-                         (appkit-projection-change-create :position
-                                                          (plist-get
-                                                           (list
-                                                            :position
-                                                            (or
-                                                             position
-                                                             'first))
-                                                           :position)))
+                         (appkit-projection-change-create
+                          :position
+                          (plist-get
+                           (list
+                            :position
+                            (or
+                             position
+                             'first))
+                           :position)))
     (appkit-surface-post view
-                         (appkit-projection-change-create :full-p t
-                                                          :frame-p t
-                                                          :position
-                                                          'preserve))
+                         (appkit-projection-change-create
+                          :full-p t
+                          :frame-p t
+                          :position 'preserve))
     nil (chirp-media-prefetch-tweets tweets buffer)
     (chirp-enrich-quoted-tweets tweets buffer)))
 

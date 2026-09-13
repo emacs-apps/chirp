@@ -272,43 +272,46 @@
       ((conversation (appkit-directory-entry-payload entry))
        (view (appkit-current-surface)))
     (appkit-presentation-insert-one-line-row
-     (appkit-presentation-one-line-row-create :icon-inserter
-                                              (lambda ()
-                                                (chirp-dm-inbox--insert-avatar
-                                                 view conversation))
-                                              :context
-                                              (appkit-directory-entry-label
-                                               entry)
-                                              :context-trail
-                                              (chirp-dm-inbox--context-trail
-                                               conversation)
-                                              :preview
-                                              (chirp-dm-inbox--preview-model
-                                               view conversation)
-                                              :time
-                                              (chirp-dm-inbox--format-time
-                                               (plist-get conversation
-                                                          :updated-at-msec))
-                                              :time-face 'shadow
-                                              :time-tail-face nil
-                                              :line-properties
-                                              (list
-                                               'chirp-dm-conversation-id
-                                               (plist-get conversation
-                                                          :id)
-                                               'chirp-dm-message-request-p
-                                               (and
-                                                (plist-get
-                                                 conversation
-                                                 :message-request-p)
-                                                t)
-                                               'chirp-dm-muted-p
-                                               (and
-                                                (plist-get
-                                                 conversation :muted-p)
-                                                t)))
-     :indent 2 :width (chirp--view-width) :icon-slot-width
-     chirp-dm-inbox--icon-slot-width :context-width-spec '(0.34 18 36))))
+     (appkit-presentation-one-line-row-create
+      :icon-inserter
+      (lambda ()
+        (chirp-dm-inbox--insert-avatar
+         view conversation))
+      :context
+      (appkit-directory-entry-label
+       entry)
+      :context-trail
+      (chirp-dm-inbox--context-trail
+       conversation)
+      :preview
+      (chirp-dm-inbox--preview-model
+       view conversation)
+      :time
+      (chirp-dm-inbox--format-time
+       (plist-get conversation
+                  :updated-at-msec))
+      :time-face 'shadow
+      :time-tail-face nil
+      :line-properties
+      (list
+       'chirp-dm-conversation-id
+       (plist-get conversation
+                  :id)
+       'chirp-dm-message-request-p
+       (and
+        (plist-get
+         conversation
+         :message-request-p)
+        t)
+       'chirp-dm-muted-p
+       (and
+        (plist-get
+         conversation :muted-p)
+        t)))
+     :indent 2
+     :width (chirp--view-width)
+     :icon-slot-width chirp-dm-inbox--icon-slot-width
+     :context-width-spec '(0.34 18 36))))
 
 (defun chirp-dm-inbox--activate-item (_surface entry)
   "Open the conversation carried by inbox directory ENTRY."
@@ -371,10 +374,8 @@
   (setq-local chirp--view-title "Direct Messages")
   (setq-local header-line-format nil)
   (appkit-directory-configure (appkit-directory-surface)
-                              :item-inserter
-                              #'chirp-dm-inbox--insert-item
-                              :activate-function
-                              #'chirp-dm-inbox--activate-item
+                              :item-inserter #'chirp-dm-inbox--insert-item
+                              :activate-function #'chirp-dm-inbox--activate-item
                               :action-rows-p t)
   nil nil)
 
@@ -413,10 +414,10 @@
           (plist-get status :phase) 'idle (plist-get status :message)
           nil (plist-get state :loading-p) nil)
     (appkit-surface-post view
-                         (appkit-projection-change-create :full-p t
-                                                          :frame-p t
-                                                          :position
-                                                          'preserve))
+                         (appkit-projection-change-create
+                          :full-p t
+                          :frame-p t
+                          :position 'preserve))
     (dolist (conversation canonical)
       (chirp-dm-state-publish conversation))))
 
@@ -426,10 +427,10 @@
     (setf (plist-get status :phase) 'error (plist-get status :message)
           message (plist-get state :loading-p) nil)
     (appkit-surface-post view
-                         (appkit-projection-change-create :full-p t
-                                                          :frame-p t
-                                                          :position
-                                                          'preserve))
+                         (appkit-projection-change-create
+                          :full-p t
+                          :frame-p t
+                          :position 'preserve))
     (message "%s" (replace-regexp-in-string "[\n]+" "  " message))))
 
 (defun chirp-dm-inbox--request (view phase)
@@ -441,17 +442,18 @@
     (setf (plist-get state :loading-p) t (plist-get status :phase)
           phase (plist-get status :message) nil)
     (appkit-surface-post view
-                         (appkit-projection-change-create :full-p t
-                                                          :frame-p t
-                                                          :position
-                                                          'preserve))
+                         (appkit-projection-change-create
+                          :full-p t
+                          :frame-p t
+                          :position 'preserve))
     (chirp-backend-dm-inbox
      (lambda (conversations envelope)
        (when (appkit-surface-live-p operation)
          (chirp-dm-inbox--settle-success view state phase
                                          conversations envelope)))
      :cursor (and (eq phase 'older) (plist-get page :next-cursor))
-     :max-results chirp-dm-inbox-page-size :errback
+     :max-results chirp-dm-inbox-page-size
+     :errback
      (lambda (text)
        (when (appkit-surface-live-p operation)
          (chirp-dm-inbox--settle-error view state text)))
@@ -509,17 +511,17 @@
   (let*
       ((instance (cl-incf chirp-dm-inbox--next-instance))
        (view
-        (chirp-open-projection-view :id (list 'dm-inbox instance)
-                                    :mode 'chirp-dm-inbox--mode :title
-                                    "Direct Messages" :state
-                                    (chirp-dm-inbox--make-state
-                                     instance)
-                                    :render-function
-                                    #'chirp-dm-inbox--sync
-                                    :anchor-property
-                                    appkit-directory-key-property
-                                    :setup #'chirp-dm-inbox--setup
-                                    :select t)))
+        (chirp-open-projection-view
+         :id (list 'dm-inbox instance)
+         :mode 'chirp-dm-inbox--mode
+         :title "Direct Messages"
+         :state
+         (chirp-dm-inbox--make-state
+          instance)
+         :render-function #'chirp-dm-inbox--sync
+         :anchor-property appkit-directory-key-property
+         :setup #'chirp-dm-inbox--setup
+         :select t)))
     (chirp-dm-inbox--request view 'initial)
     (appkit-surface-buffer view)))
 

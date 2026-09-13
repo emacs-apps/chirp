@@ -773,7 +773,8 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
                     (mapcar
                      (lambda (item)
                        (chirp-xchat--decode-conversation
-                        item :require-deletion-flag-p t))
+                        item
+                        :require-deletion-flag-p t))
                      items))
               `(("pagination" .
                  (,@(when cursor `(("nextCursor" . ,cursor)))

@@ -50,14 +50,16 @@
   "A direct-conversation row should display its ready participant avatar."
   (let
       ((entry
-        (appkit-directory-entry-create :key "conversation-1" :label
-                                       "Alice" :payload
-                                       '(:id "conversation-1" :type
-                                         direct :title "Alice"
-                                         :participants
-                                         ((:id "42" :name "Alice"
-                                           :avatar-url
-                                           "https://example.invalid/alice.jpg")))))
+        (appkit-directory-entry-create
+         :key "conversation-1"
+         :label "Alice"
+         :payload
+         '(:id "conversation-1" :type
+           direct :title "Alice"
+           :participants
+           ((:id "42" :name "Alice"
+             :avatar-url
+             "https://example.invalid/alice.jpg")))))
        seen)
     (with-temp-buffer
       (cl-letf
@@ -232,11 +234,12 @@
                  (conversation
                   (chirp-dm-test--normalized-conversation old-event))
                  (entry
-                  (appkit-directory-entry-create :key
-                                                 '(dm-conversation
-                                                   "conversation-1")
-                                                 :role 'item :payload
-                                                 conversation)))
+                  (appkit-directory-entry-create
+                   :key
+                   '(dm-conversation
+                     "conversation-1")
+                   :role 'item
+                   :payload conversation)))
               (setq buffer (chirp-dm-inbox--activate-item nil entry))
               (let*
                   ((view

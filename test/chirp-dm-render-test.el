@@ -24,7 +24,9 @@
           (chirp-dm-test--normalized-event "20" "20" "Hello"))
          (row
           (appkit-chat-timeline-row-create
-           :key "20" :payload event :context '(:sender-label "Alice"))))
+           :key "20"
+           :payload event
+           :context '(:sender-label "Alice"))))
     (setf (plist-get event :created-at-msec)
           (number-to-string
            (* 1000
@@ -49,7 +51,9 @@
           (chirp-dm-test--normalized-event "20" "20" ""))
          (row
           (appkit-chat-timeline-row-create
-           :key "20" :payload event :context nil)))
+           :key "20"
+           :payload event
+           :context nil)))
     (setf (plist-get event :kind) 'conversation-key-change
           (plist-get event :created-at-msec) nil)
     (with-temp-buffer
