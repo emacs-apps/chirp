@@ -19,6 +19,7 @@
 (require 'chirp-core)
 (require 'chirp-backend)
 (require 'chirp-media)
+(require 'chirp-translate)
 
 ;;; Options
 
@@ -29,11 +30,6 @@
 Files created here are owned by the compose buffer and removed when the draft is
 cancelled, the attachment is removed, or the send completes."
   :type 'directory
-  :group 'chirp)
-
-(defcustom chirp-translation-language "zh"
-  "Language code used by `chirp-translate-at-point'."
-  :type 'string
   :group 'chirp)
 
 ;;; Constants
@@ -630,7 +626,9 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
   "Begin a compose operation of KIND with LABEL at source GENERATION."
   (chirp-compose--owner)
   (let* ((buffer (current-buffer))
-         (owner (appkit-compose-operation-begin kind :label label :generation generation)))
+         (owner (appkit-compose-operation-begin kind
+                                                :label label
+                                                :generation generation)))
     (appkit-compose-operation-update
      owner
      :cancel-function (lambda () (chirp-compose--abort-operation buffer owner)))
@@ -1668,39 +1666,14 @@ target."
     (user-error "Current tweet has no canonical URL")))
 
 (defun chirp-translate-at-point ()
-  "Translate the tweet at point and show the result below its text."
+  "Translate the tweet at point using the selected backend and shared language."
   (interactive)
-  (let* ((tweet-id (chirp-actions--tweet-id-at-point))
-         (buffer (current-buffer))
-         (language (string-trim chirp-translation-language)))
-    (when (string-empty-p language)
-      (user-error "Translation language must not be empty"))
-    (message "Translating to %s..." language)
-    (chirp-backend-translate
-     tweet-id
-     language
-     (lambda (data _envelope)
-       (if-let* ((translation (chirp-first-nonblank
-                               (chirp-get data "translation"))))
-           (let ((destination
-                  (or (chirp-first-nonblank
-                       (chirp-get data "destinationLanguage"))
-                      language)))
-             (chirp-set-tweet-state-override
-              tweet-id :translation translation)
-             (chirp-set-tweet-state-override
-              tweet-id :translation-language destination)
-             (chirp-update-tweet-by-id
-              buffer
-              tweet-id
-              (lambda (tweet)
-                (plist-put tweet :translation translation)
-                (plist-put tweet :translation-language destination))
-              t)
-             (message "Translated to %s." destination))
-         (chirp-actions-show-error
-          "No translated text returned by X")))
-     #'chirp-actions-show-error)))
+  (let ((source (chirp-translate-source (chirp-actions--tweet-at-point))))
+    (unless source
+      (user-error "Current tweet has no id"))
+    (appkit-translate-request
+     (chirp-translate--ensure-context) source
+     (funcall chirp-translation-backend-function))))
 
 (provide 'chirp-actions)
 

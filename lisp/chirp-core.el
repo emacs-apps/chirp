@@ -205,7 +205,9 @@ commands still work, and displays alt text when the backend provides it."
            (appkit-app-type-create
             :name 'chirp
             :init (lambda (_context _input)
-                    (appkit-next :model (chirp--make-session) :render appkit-render-none))
+                    (appkit-next
+                     :model (chirp--make-session)
+                     :render appkit-render-none))
             :update (lambda (_context _model message)
                       (error "Unsupported Chirp App message: %S" message))
             :shutdown #'chirp--shutdown-app)
@@ -599,14 +601,17 @@ revisited later."
                              (chirp--setup-projection-view surface title printer anchor-property)))
                   :merge #'appkit-projection-change-merge
                   :resource-request (lambda (keys)
-                                      (appkit-projection-change-create :resources keys))
+                                      (appkit-projection-change-create
+                                       :resources keys))
                   :render render-function
                   :recover (lambda (surface app model _condition)
                              (let ((inhibit-read-only t)) (erase-buffer))
                              (if setup (funcall setup surface)
                                (chirp--setup-projection-view surface title printer anchor-property))
                              (funcall render-function surface app model
-                                      (appkit-projection-change-create :full-p t :frame-p t)))
+                                      (appkit-projection-change-create
+                                       :full-p t
+                                       :frame-p t)))
                   :unmount (lambda (_surface) (setq chirp--projection nil)))))
               :app app
               :identity id
@@ -2736,8 +2741,6 @@ over the card's `t.co` permalink."
             :retweeted-p retweeted-p
             :liked-p liked-p
             :bookmarked-p bookmarked-p
-            :translation nil
-            :translation-language nil
             :reply-count (chirp--count-value
                           (chirp-get object "reply_count")
                           (chirp-get metrics "replies")
@@ -2803,7 +2806,9 @@ over the card's `t.co` permalink."
   "Accept projection work or media intent on the exact initiating Surface."
   (cond
    ((appkit-projection-change-p message)
-    (appkit-next :model model :render message))
+    (appkit-next
+     :model model
+     :render message))
    ((eq (car-safe message) 'chirp-model)
     (let ((state (cadr message)))
       (dolist (pair '((:media-intent) (:media-phase . idle) (:media-error)))
@@ -2811,7 +2816,9 @@ over the card's `t.co` permalink."
           (nconc state (list (car pair) (cdr pair)))))
       (appkit-next
        :model state
-       :render (appkit-projection-change-create :full-p t :frame-p t)
+       :render (appkit-projection-change-create
+                :full-p t
+                :frame-p t)
        :commands (list (appkit-command-cancel-effect 'chirp-media-acquire)
                        (appkit-command-cancel-effect 'chirp-media-present)))))
    ((eq (car-safe message) 'chirp-media)
@@ -2821,7 +2828,8 @@ over the card's `t.co` permalink."
 (defun chirp--geometry-changed (surface _width)
   "Request a layout update after SURFACE's canonical geometry changes."
   (appkit-surface-post surface
-                       (appkit-projection-change-create :geometry-p t)))
+                       (appkit-projection-change-create
+                        :geometry-p t)))
 
 (with-eval-after-load 'evil-snipe
   (dolist (mode '(chirp-view-mode chirp-compose-mode chirp-dm-conversation--mode

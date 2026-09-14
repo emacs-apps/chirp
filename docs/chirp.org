@@ -163,12 +163,27 @@ exceed the standard 280 weighted-character limit.
 (chirp-notifications-mode 1)
 (setq chirp-notifications-interval 300
       chirp-notifications-max-results 20
-      chirp-translation-language "zh")
+      appkit-translate-target-language "zh")
 #+end_src
 
 The first check establishes a baseline.  Later checks run every five
 minutes by default.  Linux uses freedesktop notifications; macOS uses
 AppleScript.
+
+Press ~o T~ on a tweet or quoted tweet to translate it on demand.  The
+original stays unchanged; the translation region shows pending work or an
+error and provides hide, show, and retranslate actions.  Results belong to
+the current view and are discarded when it closes.
+
+Chirp defaults to X's Google translation endpoint.  To explicitly use
+Respond instead, make the optional ~respond~ package available and set:
+
+#+begin_src emacs-lisp
+(setq chirp-translation-backend-function #'appkit-translate-respond-backend)
+#+end_src
+
+There is no automatic fallback between backends.  The target language is
+shared with other AppKit translation clients.
 
 * Thread reply filtering
 

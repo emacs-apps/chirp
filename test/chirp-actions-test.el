@@ -601,7 +601,8 @@ Return a list of (compose source foreign)."
                        nil)))
             (with-current-buffer compose
               (setq-local chirp-compose-write-outcome 'unknown)
-              (should-error (chirp-compose-send) :type 'user-error)
+              (should-error (chirp-compose-send)
+                            :type 'user-error)
               (should confirmed)
               (should (= request-count 0))
               (setq confirmed nil)
@@ -708,7 +709,8 @@ Return a list of (compose source foreign)."
                          (setq request-count (1+ request-count)))))
               (with-current-buffer compose
                 (chirp-compose-send)
-                (should-error (chirp-compose-send) :type 'user-error)))
+                (should-error (chirp-compose-send)
+                              :type 'user-error)))
             (should (= request-count 1)))
         (when (buffer-live-p compose)
           (kill-buffer compose))
@@ -950,7 +952,8 @@ Return a list of (compose source foreign)."
   (chirp-test--with-tweet-buffer
    '(:kind tweet :id "123" :author-handle "alice" :reply-limited-p t)
    (lambda (_buffer)
-     (let ((err (should-error (chirp-reply-at-point) :type 'user-error)))
+     (let ((err (should-error (chirp-reply-at-point)
+                              :type 'user-error)))
        (should (string-match-p "cannot reply" (error-message-string err)))))))
 
 (ert-deftest chirp-reply-at-point-opens-compose-for-allowed-tweets ()
@@ -1174,13 +1177,15 @@ Return a list of (compose source foreign)."
 (ert-deftest chirp-translate-at-point-renders-thread-result ()
   "An asynchronous translation must appear without refreshing the thread."
   (let ((chirp--app nil)
-        (chirp-translation-language "zh")
+        (appkit-translate-target-language "zh")
+        (chirp-translation-backend-function #'chirp-translate-x-backend)
         buffer callback)
     (unwind-protect
         (save-window-excursion
           (cl-letf (((symbol-function 'chirp-backend-translate)
                      (lambda (_id _language success &optional _errback)
-                       (setq callback success)))
+                       (setq callback success)
+                       nil))
                     ((symbol-function 'chirp-media-prefetch-tweets) #'ignore)
                     ((symbol-function 'chirp-enrich-quoted-tweets) #'ignore))
             (let ((surface (chirp-thread--ensure-view
@@ -1188,22 +1193,85 @@ Return a list of (compose source foreign)."
               (setq buffer (appkit-surface-buffer surface))
               (chirp-thread--present
                surface
-               (list (list :kind 'tweet :id "123" :text "Hello"
-                           :translation nil :translation-language nil)))
+               (list (list :kind 'tweet :id "123" :text "Hello")))
               (appkit-loop-run-pass (appkit-surface-loop surface))
               (with-current-buffer buffer
                 (goto-char (point-min))
                 (search-forward "Hello")
                 (chirp-translate-at-point)
                 (should-not (string-match-p "你好" (buffer-string))))
+              (appkit-loop-run-pass (appkit-surface-loop surface))
               ;; Network completion runs outside the originating view.
               (with-temp-buffer
                 (funcall callback '(("translation" . "你好")
                                     ("destinationLanguage" . "zh")) nil))
               (appkit-loop-run-pass (appkit-surface-loop surface))
               (with-current-buffer buffer
-                (should (string-match-p "Hello\nTranslation · zh\n你好"
-                                        (buffer-string)))))))
+                (goto-char (point-min))
+                (should (search-forward "Hello" nil t))
+                (should (search-forward "你好" nil t))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer))
+      (when (appkit-app-live-p chirp--app)
+        (appkit-app-close chirp--app)))))
+
+(ert-deftest chirp-translate-quoted-tweet-rejects-edited-source-result ()
+  "Quoted translations redraw their parent row and reject replaced sources."
+  (let ((chirp--app nil)
+        (appkit-translate-target-language "zh")
+        (chirp-translation-backend-function #'chirp-translate-x-backend)
+        buffer requests)
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'chirp-backend-translate)
+                     (lambda (id _language success &optional _errback)
+                       (push (cons id success) requests)
+                       nil))
+                    ((symbol-function 'chirp-media-prefetch-tweets) #'ignore)
+                    ((symbol-function 'chirp-enrich-quoted-tweets) #'ignore))
+            (let ((surface (chirp-thread--ensure-view
+                            "Quoted translation test" #'ignore "123")))
+              (setq buffer (appkit-surface-buffer surface))
+              (chirp-thread--present
+               surface
+               (list (list :kind 'tweet :id "123" :text "Root original"
+                           :quoted-tweet
+                           (list :kind 'tweet :id "456"
+                                 :text "Quoted original"))))
+              (appkit-loop-run-pass (appkit-surface-loop surface))
+              (with-current-buffer buffer
+                (goto-char (point-min))
+                (search-forward "Quoted original")
+                (chirp-translate-at-point))
+              (appkit-loop-run-pass (appkit-surface-loop surface))
+              (should (equal (caar requests) "456"))
+              (let ((old-callback (cdar requests)))
+                (chirp-update-tweet-by-id
+                 buffer "456"
+                 (lambda (tweet) (plist-put tweet :text "Quoted edited")) t)
+                (appkit-loop-run-pass (appkit-surface-loop surface))
+                (with-current-buffer buffer
+                  (goto-char (point-min))
+                  (search-forward "Quoted edited")
+                  (chirp-translate-at-point))
+                (appkit-loop-run-pass (appkit-surface-loop surface))
+                (should (equal (caar requests) "456"))
+                (with-temp-buffer
+                  (funcall old-callback
+                           '(("translation" . "Obsolete translation")) nil))
+                (appkit-loop-run-pass (appkit-surface-loop surface))
+                (with-current-buffer buffer
+                  (should-not (string-match-p "Obsolete translation"
+                                              (buffer-string))))
+                (with-temp-buffer
+                  (funcall (cdar requests)
+                           '(("translation" . "Current translation")) nil))
+                (appkit-loop-run-pass (appkit-surface-loop surface))
+                (with-current-buffer buffer
+                  (goto-char (point-min))
+                  (should (search-forward "Root original" nil t))
+                  (should (search-forward "Quoted edited" nil t))
+                  (should (search-forward "Current translation" nil t)))))))
       (when (buffer-live-p buffer)
         (kill-buffer buffer))
       (when (appkit-app-live-p chirp--app)

@@ -31,6 +31,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'chirp-translate)
 (require 'appkit-chat-ins)
 (require 'appkit-projection)
 (require 'appkit-discussion)
@@ -88,11 +89,6 @@ Set this to nil or an empty string to disable tweet separators."
 (defface chirp-meta-face
   '((t :inherit shadow))
   "Face used for metadata."
-  :group 'chirp)
-
-(defface chirp-translation-face
-  '((t :inherit font-lock-doc-face))
-  "Face used for translated tweet text."
   :group 'chirp)
 
 (defface chirp-link-face
@@ -263,7 +259,9 @@ stored on the same span.  FACE is appended when non-nil."
              (< start end))
     (when properties
       (add-text-properties start end properties))
-    (appkit-ui-add-action start end action :help-echo help-echo :face face)))
+    (appkit-ui-add-action start end action
+                          :help-echo help-echo
+                          :face face)))
 
 (cl-defun chirp-render--add-fallback-action (start end action &key help-echo)
   "Add ACTION on START..END only where no Appkit action exists yet.
@@ -278,7 +276,8 @@ already installed."
                          pos appkit-ui-action-property nil end)
                         end)))
           (unless (get-text-property pos appkit-ui-action-property)
-            (chirp-render--add-action pos next action :help-echo help-echo))
+            (chirp-render--add-action pos next action
+                                      :help-echo help-echo))
           (setq pos next))))))
 
 (defun chirp-render--mark-entry (start end entry)
@@ -587,25 +586,6 @@ Apply PREFIX-FACE to that prefix when provided."
         (insert (propertize line 'face face)))
       (insert "\n")
       (chirp-render--apply-wrap-prefix start (point) prefix prefix-face))))
-
-(defun chirp-render--insert-translation (tweet &optional prefix prefix-face)
-  "Insert the cached translation for TWEET when present.
-
-Precede each line with PREFIX using PREFIX-FACE when provided."
-  (when-let* ((translation (plist-get tweet :translation))
-              ((not (string-empty-p translation))))
-    (chirp-render--insert-prefix prefix prefix-face)
-    (let ((start (point))
-          (language (plist-get tweet :translation-language)))
-      (insert (propertize
-               (if language
-                   (format "Translation · %s" language)
-                 "Translation")
-               'face 'chirp-meta-face))
-      (insert "\n")
-      (chirp-render--apply-wrap-prefix start (point) prefix prefix-face))
-    (chirp-render--insert-face-text
-     translation 'chirp-translation-face prefix prefix-face)))
 
 (defun chirp-render--trailing-urls (tweet)
   "Return TWEET URLs that were not already inlined as text entities."
@@ -1720,7 +1700,7 @@ newlines after the metrics row."
         (chirp-render--insert-filled-text
          text prefix prefix-face
          (plist-get tweet :text-entities))))
-    (chirp-render--insert-translation tweet prefix prefix-face)
+    (chirp-translate-insert tweet prefix prefix-face)
     (pcase article-mode
       ('full
        (chirp-render--insert-article-body tweet prefix prefix-face))
@@ -1810,7 +1790,8 @@ layout.  WRITE-ACTIONS-P controls mutation actions, while TIME-FORMAT selects
 
 (defun chirp-render-insert-tweet (tweet)
   "Insert TWEET at point."
-  (chirp-render--insert-tweet tweet :media-presentation 'carousel))
+  (chirp-render--insert-tweet tweet
+                              :media-presentation 'carousel))
 
 (defun chirp-render-insert-edit-history-row (row)
   "Insert one normalized edit-history ROW."

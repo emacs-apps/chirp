@@ -321,26 +321,6 @@
                     "![Cover](https://pbs.twimg.com/media/cover.jpg)\n\n"
                     "![Detail](https://pbs.twimg.com/media/detail.jpg)")))))
 
-(ert-deftest chirp-render-insert-tweet-shows-cached-translation ()
-  "A cached translation should render directly below the original text."
-  (clrhash (chirp--session-tweet-state-overrides (chirp--session)))
-  (unwind-protect
-      (progn
-        (chirp-set-tweet-state-override "123" :translation "你好")
-        (chirp-set-tweet-state-override "123" :translation-language "zh")
-        (let ((tweet
-               (chirp-apply-tweet-state-overrides
-                (chirp--tweet-from-x
-                 '(("id" . "123")
-                   ("text" . "Hello")
-                   ("author" . (("screenName" . "alice")
-                                ("name" . "Alice"))))))))
-          (with-temp-buffer
-            (chirp-render-insert-tweet tweet)
-            (should (string-match-p "Hello\nTranslation · zh\n你好"
-                                    (buffer-string))))))
-    (clrhash (chirp--session-tweet-state-overrides (chirp--session)))))
-
 (ert-deftest chirp-article-segments-split-inline-images-out-of-body-text ()
   "Article helpers should split Markdown image paragraphs into media items."
   (let* ((tweet (chirp-test--sample-article-tweet-with-image))
@@ -1148,7 +1128,8 @@
                    (lambda (tweet-id)
                      (setq opened-thread tweet-id))))
           (let ((inhibit-read-only t))
-            (chirp-render--insert-tweet reply :reply-parent parent))
+            (chirp-render--insert-tweet reply
+                                        :reply-parent parent))
           (goto-char (point-min))
           (search-forward "↳ replying to @dingyi above")
           (goto-char (match-beginning 0))
@@ -2487,11 +2468,13 @@
       (goto-char (point-min))
       (search-forward "Second")
       (goto-char (match-beginning 0))
-      (should-error (chirp-next-entry) :type 'user-error)
+      (should-error (chirp-next-entry)
+                    :type 'user-error)
       (goto-char (point-min))
       (search-forward "First")
       (goto-char (match-beginning 0))
-      (should-error (chirp-previous-entry) :type 'user-error))))
+      (should-error (chirp-previous-entry)
+                    :type 'user-error))))
 
 (ert-deftest chirp-enrich-quoted-tweets-upgrades-preview-and-prefetches-media ()
   "Quoted tweet enrichment should replace the preview and kick media prefetch."
