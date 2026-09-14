@@ -6,7 +6,6 @@
 ;;; Commentary:
 
 ;; Literal rule storage and matching, independent of conversation visibility.
-;; Keep existing chirp-thread customization names for compatibility.
 
 ;;; Code:
 
@@ -14,12 +13,13 @@
 (require 'subr-x)
 (require 'chirp-spam-rules)
 
-(defcustom chirp-thread-spam-keywords
+(defcustom chirp-spam-rules
   (copy-tree chirp-spam-rules-default)
   "Keywords used to hide replies in thread views.
 
 Each nonempty string is matched literally and case-insensitively against reply
-text, expanded URLs, the author's display name, and the author's handle.  A
+text, expanded URLs, the author's display name, and the author's handle.
+Whitespace is collapsed in both rules and fields; phrases do not cross fields.  A
 nested list matches only when all of its strings are nonempty and occur, which
 lets specific split templates avoid broad single-keyword matches.  The
 conservative defaults come from repeated spam in real public replies, with
@@ -29,13 +29,13 @@ replace and extend the list with local patterns."
   :type '(repeat (choice string (repeat string)))
   :group 'chirp)
 
-(defcustom chirp-thread-spam-rules-file
+(defcustom chirp-spam-rules-file
   (locate-user-emacs-file "chirp/spam-rules.txt")
   "File containing persistent user spam phrases and keywords.
 
 Store one literal rule per line.  Empty lines and lines beginning with `#' are
 ignored.  These rules share the same case-insensitive match scope as
-`chirp-thread-spam-keywords': reply text, expanded URLs, author display names,
+`chirp-spam-rules': reply text, expanded URLs, author display names,
 and author handles."
   :type 'file
   :group 'chirp)
@@ -49,7 +49,7 @@ and author handles."
       (unless (string-empty-p normalized)
         normalized))))
 
-(defun chirp-spam-rule-present-p (rule rules)
+(defun chirp-spam--rule-present-p (rule rules)
   "Return non-nil when literal RULE already occurs in RULES ignoring case."
   (when-let* ((key (chirp-spam-normalize rule)))
     (setq key (downcase key))
@@ -61,13 +61,13 @@ and author handles."
                     (or (chirp-spam-normalize candidate) "")))))
      rules)))
 
-(defun chirp-spam-read-user-rules ()
-  "Return literal spam rules read from `chirp-thread-spam-rules-file'."
-  (when (and (stringp chirp-thread-spam-rules-file)
-             (file-readable-p chirp-thread-spam-rules-file)
-             (not (file-directory-p chirp-thread-spam-rules-file)))
+(defun chirp-spam--read-user-rules ()
+  "Return literal spam rules read from `chirp-spam-rules-file'."
+  (when (and (stringp chirp-spam-rules-file)
+             (file-readable-p chirp-spam-rules-file)
+             (not (file-directory-p chirp-spam-rules-file)))
     (with-temp-buffer
-      (insert-file-contents chirp-thread-spam-rules-file)
+      (insert-file-contents chirp-spam-rules-file)
       (let ((seen (make-hash-table :test #'equal))
             rules)
         (dolist (line (split-string (buffer-string) "\n"))
@@ -81,14 +81,27 @@ and author handles."
 
 (defun chirp-spam-effective-rules ()
   "Return built-in, customized, and persistent literal spam rules."
-  (let ((rules (copy-tree chirp-thread-spam-keywords)))
-    (dolist (rule (chirp-spam-read-user-rules) rules)
-      (unless (chirp-spam-rule-present-p rule rules)
+  (let ((rules (copy-tree chirp-spam-rules)))
+    (dolist (rule (chirp-spam--read-user-rules) rules)
+      (unless (chirp-spam--rule-present-p rule rules)
         (setq rules (append rules (list rule)))))))
 
-(defun chirp-spam-append-user-rule (rule)
-  "Append literal RULE to `chirp-thread-spam-rules-file'."
-  (let* ((file (expand-file-name chirp-thread-spam-rules-file))
+(defun chirp-spam-add-rule (input)
+  "Persist normalized INPUT, returning the rule if added or nil if duplicate."
+  (let ((rule (chirp-spam-normalize input)))
+    (unless rule (user-error "Spam rule cannot be empty"))
+    (when (string-prefix-p "#" rule)
+      (user-error "Spam rule cannot begin with #"))
+    (unless (and (stringp chirp-spam-rules-file)
+                 (not (string-empty-p chirp-spam-rules-file)))
+      (user-error "No user spam rules file is configured"))
+    (unless (chirp-spam--rule-present-p rule (chirp-spam-effective-rules))
+      (chirp-spam--append-user-rule rule)
+      rule)))
+
+(defun chirp-spam--append-user-rule (rule)
+  "Append literal RULE to `chirp-spam-rules-file'."
+  (let* ((file (expand-file-name chirp-spam-rules-file))
          (directory (file-name-directory file))
          (needs-newline
           (and (file-readable-p file)
@@ -106,30 +119,26 @@ and author handles."
 
 (defun chirp-spam-match-p (tweet rules)
   "Return non-nil when TWEET content or author matches explicit RULES.
-An empty rule list never matches; conversation visibility is the caller's policy."
+Normalize whitespace in both fields and rules.  A phrase stays within one
+field, while grouped fragments may match different fields.  Empty RULES
+never match; conversation visibility is the caller's policy."
   (let ((case-fold-search t)
-        (content
-         (string-join
-          (cl-remove-if-not
-           #'stringp
-           (append (list (plist-get tweet :text)
-                         (plist-get tweet :author-name)
-                         (plist-get tweet :author-handle))
-                   (plist-get tweet :urls)))
-          "\n")))
-    (cl-labels
-        ((matches
-           (keyword)
-           (when (stringp keyword)
-             (let ((trimmed (string-trim keyword)))
-               (and (not (string-empty-p trimmed))
-                    (string-match-p (regexp-quote trimmed) content))))))
-      (cl-some
-       (lambda (rule)
-         (if (listp rule)
-             (and rule (cl-every #'matches rule))
-           (matches rule)))
-       rules))))
+        (fields (delq nil
+                      (mapcar #'chirp-spam-normalize
+                              (append (list (plist-get tweet :text)
+                                            (plist-get tweet :author-name)
+                                            (plist-get tweet :author-handle))
+                                      (plist-get tweet :urls))))))
+    (cl-labels ((matches (keyword)
+                  (when-let* ((normalized (chirp-spam-normalize keyword)))
+                    (let ((pattern (regexp-quote normalized)))
+                      (cl-some (lambda (field) (string-match-p pattern field))
+                               fields)))))
+      (cl-some (lambda (rule)
+                 (if (listp rule)
+                     (and rule (cl-every #'matches rule))
+                   (matches rule)))
+               rules))))
 
 (provide 'chirp-spam)
 ;;; chirp-spam.el ends here

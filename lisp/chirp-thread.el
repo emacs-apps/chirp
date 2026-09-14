@@ -22,6 +22,9 @@
 
 ;;; Spam Rules
 
+(defvar-local chirp-thread--refilter-function nil
+  "Reapply spam rules to this thread's retained data without fetching.")
+
 (defun chirp-thread--spam-rule-suggestion (authorp)
   "Return a spam-rule suggestion from point.
 
@@ -39,34 +42,26 @@ Otherwise prefer the active region and then the current reply text."
        (plist-get entry :text))))))
 
 (defun chirp-thread-add-spam-rule (&optional authorp)
-  "Persist one literal spam phrase or keyword and refresh the current view.
-
-Use the active region as the initial input, or the current reply text when no
-region is active.  With prefix argument AUTHORP, use the current author's
-display name or handle instead."
+  "Persist one literal spam rule and locally refilter the current thread.
+Use the active region, or current reply text, as initial input.
+With prefix argument AUTHORP, suggest the author's display name or handle."
   (interactive "P")
-  (let* ((suggestion (chirp-thread--spam-rule-suggestion authorp))
-         (rule (chirp-spam-normalize
-                (read-string "Spam phrase or keyword: " suggestion))))
-    (unless rule
-      (user-error "Spam rule cannot be empty"))
-    (when (string-prefix-p "#" rule)
-      (user-error "Spam rule cannot begin with #"))
-    (if (chirp-spam-rule-present-p
-         rule (chirp-spam-effective-rules))
-        (message "Spam rule already exists: %s" rule)
-      (chirp-spam-append-user-rule rule)
-      (when (functionp chirp--refresh-function)
-        (chirp-refresh))
-      (message "Added spam rule: %s" rule))))
+  (let ((input (read-string "Spam phrase or keyword: "
+                            (chirp-thread--spam-rule-suggestion authorp))))
+    (if-let* ((rule (chirp-spam-add-rule input)))
+        (progn
+          (when chirp-thread--refilter-function
+            (funcall chirp-thread--refilter-function))
+          (message "Added spam rule: %s" rule))
+      (message "Spam rule already exists: %s" (chirp-spam-normalize input)))))
 
 (defun chirp-thread-edit-spam-rules ()
-  "Open `chirp-thread-spam-rules-file' for manual editing."
+  "Open `chirp-spam-rules-file' for manual editing."
   (interactive)
-  (unless (and (stringp chirp-thread-spam-rules-file)
-               (not (string-empty-p chirp-thread-spam-rules-file)))
+  (unless (and (stringp chirp-spam-rules-file)
+               (not (string-empty-p chirp-spam-rules-file)))
     (user-error "No user spam rules file is configured"))
-  (let ((file (expand-file-name chirp-thread-spam-rules-file)))
+  (let ((file (expand-file-name chirp-spam-rules-file)))
     (make-directory (file-name-directory file) t)
     (find-file file)))
 
@@ -217,11 +212,6 @@ The ancestor chain comes first, followed by the focus and remaining replies."
                    (gethash (chirp-thread--key tweet) skip))
                  tweets))))))
 
-(defun chirp-thread--spam-reply-p (tweet &optional rules)
-  "Return non-nil when TWEET matches and is not related context."
-  (and (not (eq (plist-get tweet :timeline-context) 'related))
-       (chirp-spam-match-p tweet (or rules chirp-thread-spam-keywords))))
-
 (defun chirp-thread--filter-spam-replies (tweets &optional focus-id)
   "Hide keyword-matching replies from TWEETS.
 
@@ -229,7 +219,7 @@ The focus tweet and its ancestor chain are kept even when they match.
 FOCUS-ID selects the focus tweet; when it is nil, the first tweet is
 protected."
   (if (or (null tweets)
-          (null chirp-thread-spam-keywords))
+          (null chirp-spam-rules))
       tweets
     (let* ((rules (chirp-spam-effective-rules))
            (by-id (chirp-thread--index-tweets tweets))
@@ -243,7 +233,8 @@ protected."
       (cl-remove-if
        (lambda (tweet)
          (and (not (gethash (chirp-thread--key tweet) protected))
-              (chirp-thread--spam-reply-p tweet rules)))
+              (not (eq (plist-get tweet :timeline-context) 'related))
+              (chirp-spam-match-p tweet rules)))
        tweets))))
 
 ;;; Article Enrichment
@@ -384,7 +375,9 @@ protected."
        (prefetched-article nil) (article-requested-p nil) (token nil))
     (cl-labels
         ((present-current (&optional position)
-           (chirp-thread--present view saved-ordered position))
+           (chirp-thread--present
+            view (chirp-thread--filter-spam-replies saved-ordered tweet-id)
+            position))
          (apply-prefetched-article nil
            (setq saved-ordered
                  (chirp-thread--maybe-apply-article saved-ordered
@@ -410,6 +403,12 @@ protected."
                                            buffer token)
                                         (chirp-clear-status buffer)))))))
       (setq token (chirp-begin-background-request buffer title))
+      (with-current-buffer buffer
+        (setq-local chirp-thread--refilter-function
+                    (lambda ()
+                      (when (and saved-ordered
+                                 (chirp-request-current-p buffer token))
+                        (present-current 'preserve)))))
       (when-let* ((seed (chirp-thread--seed-tweets seed-tweet)))
         (setq saved-ordered seed)
         (present-current (list 'tweet tweet-id)))
@@ -420,10 +419,7 @@ protected."
                                   (chirp-request-current-p buffer
                                                            token)
                                 (setq saved-ordered
-                                      (chirp-thread--filter-spam-replies
-                                       (chirp-thread--reorder tweets
-                                                              tweet-id)
-                                       tweet-id))
+                                      (chirp-thread--reorder tweets tweet-id))
                                 (apply-prefetched-article)
                                 (present-current
                                  (list 'tweet tweet-id))

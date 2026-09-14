@@ -179,7 +179,7 @@ ancestor chain.  Press ~S~ on a reply to save a literal phrase.
 ~user-emacs-directory~.
 
 #+begin_src emacs-lisp
-(setq chirp-thread-spam-keywords nil) ; disable filtering
+(setq chirp-spam-rules nil) ; disable filtering
 #+end_src
 
 To propose rules for everyone, use the
