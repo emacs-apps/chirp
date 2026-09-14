@@ -662,34 +662,6 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
     (should (equal (mapcar (lambda (user) (plist-get user :handle)) users)
                    '("emacs" "emacslife")))))
 
-(ert-deftest chirp-backend-translate-uses-direct-strato-response ()
-  "Tweet translation should adapt the authenticated X Strato response."
-  (let (service path result failure)
-    (cl-letf (((symbol-function 'chirp-x-api-request)
-               (lambda (request-service request-path callback &rest _options)
-                 (setq service request-service
-                       path request-path)
-                 (funcall callback
-                          '(("id_str" . "123")
-                            ("translation" . "你好")
-                            ("destinationLanguage" . "zh")
-                            ("translationState" . "Success"))))))
-      (chirp-backend-translate
-       "123" "zh"
-       (lambda (data _envelope)
-         (setq result data))
-       (lambda (message)
-         (setq failure message))))
-    (should-not failure)
-    (should (eq service 'legacy))
-    (should (string-match-p
-             (concat "tweetId=123,destinationLanguage=Some(zh),"
-                     "translationSource=Some(Google)")
-             path))
-    (should (equal (chirp-get result "id") "123"))
-    (should (equal (chirp-get result "translation") "你好"))
-    (should (equal (chirp-get result "destinationLanguage") "zh"))))
-
 (ert-deftest chirp-backend-whoami-cache-reuses-fresh-results ()
   "Fresh cached whoami results should avoid a second backend request."
   (let ((chirp-backend-read-cache-ttl 15)

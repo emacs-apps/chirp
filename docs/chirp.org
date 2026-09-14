@@ -175,7 +175,7 @@ original stays unchanged; the translation region shows pending work or an
 error and provides hide, show, and retranslate actions.  Results belong to
 the current view and are discarded when it closes.
 
-Chirp defaults to X's Google translation endpoint.  To explicitly use
+Chirp defaults to X's Grok translation endpoint.  To explicitly use
 Respond instead, make the optional ~respond~ package available and set:
 
 #+begin_src emacs-lisp

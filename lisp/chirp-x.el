@@ -1223,13 +1223,14 @@ TIMEOUT-MESSAGE describes that terminal failure."
 ;;; REST and GraphQL Requests
 
 (cl-defun chirp-x-api-request
-    (service path callback &key (method 'get) query form errback owner)
+    (service path callback &key (method 'get) query form json errback owner)
   "Request an authenticated X API PATH from SERVICE asynchronously.
 
 SERVICE is `web' for x.com/i/api or `legacy' for api.x.com/1.1.  METHOD may be
-`get' or `post'.  QUERY and FORM are string-keyed alists; FORM is valid only
-for POST requests.  CALLBACK receives decoded JSON, and ERRBACK receives one
-readable error string.  OWNER optionally owns the transport lifecycle."
+`get' or `post'.  QUERY and FORM are string-keyed alists.  FORM and JSON are
+mutually exclusive POST bodies; JSON is encoded as application/json.
+CALLBACK receives decoded JSON, and ERRBACK receives one readable error
+string.  OWNER optionally owns the transport lifecycle."
   (unless (functionp callback)
     (error "X API callback is not callable"))
   (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
@@ -1239,13 +1240,17 @@ readable error string.  OWNER optionally owns the transport lifecycle."
         (progn
           (unless (memq method '(get post))
             (error "X API method is invalid: %S" method))
-          (when (and form (not (eq method 'post)))
-            (error "X API form data requires POST"))
+          (when (and (or form json) (not (eq method 'post)))
+            (error "X API request data requires POST"))
+          (when (and form json)
+            (error "X API request cannot combine form and JSON data"))
           (let ((request-url (chirp-x--rest-url service path query)))
             (chirp-x--request
              request-url method callback
-             :data (and form (chirp-x--urlencode form))
-             :content-type (and form "application/x-www-form-urlencoded")
+             :data (cond (json (chirp-x--json-encode json))
+                         (form (chirp-x--urlencode form)))
+             :content-type (cond (json "application/json")
+                                 (form "application/x-www-form-urlencoded"))
              :errback error-fn
              :owner owner)))
       (chirp-x--callback-error

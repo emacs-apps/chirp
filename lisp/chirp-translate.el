@@ -11,10 +11,10 @@
 
 (defcustom chirp-translation-backend-function #'chirp-translate-x-backend
   "Zero-argument factory for the tweet translation backend.
-The default uses X's Google translation endpoint.  Select
+The default uses X's Grok translation endpoint.  Select
 `appkit-translate-respond-backend' explicitly to use optional Respond.
 The target language is shared through `appkit-translate-target-language'."
-  :type '(choice (const :tag "X / Google" chirp-translate-x-backend)
+  :type '(choice (const :tag "X / Grok" chirp-translate-x-backend)
                  (const :tag "Respond" appkit-translate-respond-backend)
                  function)
   :group 'chirp)
@@ -26,8 +26,8 @@ The target language is shared through `appkit-translate-target-language'."
   "Surface that owns `chirp-translate--context'.")
 
 (defun chirp-translate-x-backend ()
-  "Return a backend descriptor for one authenticated X translation request."
-  (list :id 'chirp-x :label "X / Google" :start #'chirp-translate--x-start))
+  "Return a backend descriptor for one authenticated X Grok translation."
+  (list :id 'chirp-x-grok :label "X / Grok" :start #'chirp-translate--x-start))
 
 (defun chirp-translate--x-start (source language resolve reject)
   "Translate SOURCE through X into LANGUAGE, calling RESOLVE or REJECT."

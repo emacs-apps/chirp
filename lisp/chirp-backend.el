@@ -2162,7 +2162,7 @@ ERRBACK receives request failures."
        :errback error-fn)))))
 
 (defun chirp-backend-translate (tweet-id language callback &optional errback)
-  "Translate TWEET-ID into LANGUAGE and call CALLBACK, or ERRBACK on failure."
+  "Translate TWEET-ID with Grok into LANGUAGE, calling CALLBACK or ERRBACK."
   (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
     (if (not (and (stringp language)
                   (string-match-p
@@ -2170,37 +2170,19 @@ ERRBACK receives request failures."
                    language)))
         (funcall error-fn "Tweet translation requires an ISO language code")
       (chirp-x-api-request
-       'legacy
-       (format
-        (concat
-         "strato/column/None/tweetId=%s,destinationLanguage=Some(%s),"
-         "translationSource=Some(Google),feature=None,timeout=None,"
-         "onlyCached=None/translation/service/translateTweet")
-        tweet-id language)
+       'web "2/grok/translation.json"
        (lambda (payload)
          (if-let* ((translation
                     (chirp-first-nonblank
-                     (chirp-get payload "translation"))))
-             (funcall
-              callback
-              (append
-               `(("id" . ,(or (chirp-first-nonblank
-                               (chirp-get payload "id_str" "id"))
-                              tweet-id))
-                 ("translation" . ,translation))
-               (cl-loop for key in '("sourceLanguage"
-                                     "localizedSourceLanguage"
-                                     "destinationLanguage"
-                                     "translationSource"
-                                     "translationState")
-                        for value = (chirp-get payload key)
-                        when value collect (cons key value)))
-              nil)
-           (let ((state (chirp-get payload "translationState")))
-             (funcall error-fn
-                      (if state
-                          (format "X did not return a translation (%s)" state)
-                        "X did not return a translation")))))
+                     (chirp-get (chirp-get payload "result") "text"))))
+             (funcall callback
+                      `(("id" . ,tweet-id) ("translation" . ,translation))
+                      nil)
+           (funcall error-fn "X did not return a translation")))
+       :method 'post
+       :json `(("content_type" . "POST")
+               ("id" . ,tweet-id)
+               ("dst_lang" . ,language))
        :errback error-fn))))
 
 ;;; Profiles and Lists
