@@ -29,6 +29,7 @@
     ("Gate" "Visa卡")
     ("催情" "听话")
     ("只入身体" "不入生活")
+    ("只进入身体" "不进入生活")
     "check my bio asappp"
     "be brave and check my bio"
     "talk to me pleaseee check my bio"
