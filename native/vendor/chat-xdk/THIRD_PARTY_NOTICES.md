@@ -194,8 +194,7 @@ in addition to the native Rust library.
 | Java Native Access (JNA) | 5.14.0 | LGPL-2.1-or-later **OR** Apache-2.0 | **Used under Apache-2.0** |
 | jackson-databind | 2.17.2 | Apache-2.0 | Transitive Jackson modules same family |
 
-JNA: https://github.com/java-native-access/jna
-
+JNA: https://github.com/java-native-access/jna  
 Jackson: https://github.com/FasterXML/jackson-databind
 
 ---

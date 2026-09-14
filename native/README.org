@@ -9,11 +9,9 @@ Direct messages require it; other Chirp features do not.
 Run from the Chirp root:
 
 #+begin_src sh
-native/bootstrap-deps.sh
-(
-  cd native/chirp-xchat-module
-  cargo build --release --locked
-)
+cargo build \
+  --manifest-path native/chirp-xchat-module/Cargo.toml \
+  --release --locked
 native/check-release.sh
 #+end_src
 
@@ -24,11 +22,11 @@ use the platform's ~.dylib~ or ~.dll~ equivalent elsewhere.
 Chirp does not search source trees, build directories, or ~load-path~
 for this security-sensitive module.
 
-[[file:bootstrap-deps.sh][bootstrap-deps.sh]] pins and verifies upstream revisions; the crate pins
-Rust 1.91.1.  Existing exact checkouts can be supplied through
-~CHIRP_CHAT_XDK_SOURCE~, ~CHIRP_JUICEBOX_SDK_SOURCE~, and
-~CHIRP_THRIFT_SOURCE~.  Dependencies stay in ignored ~native/.deps/~;
-build products stay in the crate's ignored ~target/~.
+The crate pins Rust 1.91.1.  Trimmed source snapshots of ~chat-xdk~ and the
+Juicebox SDK are included under ~native/vendor/~ because their upstream Cargo
+workspaces require a sibling source layout.  Their exact upstream versions and
+revisions are recorded in [[file:THIRD_PARTY_NOTICES.md][the third-party notices]].  Apache Thrift is resolved
+from crates.io.  Build products stay in the crate's ignored ~target/~.
 
 * Security and ownership
 
@@ -76,8 +74,8 @@ Use the platform's library suffix for the ERT command.
 
 * Redistribution
 
-~chat-xdk~ and Juicebox SDK are MIT-licensed; Apache Thrift is
-Apache-2.0-licensed.  Their source stays in the ignored build cache,
-not Chirp releases.  Only local source builds are supported.
+The vendored ~chat-xdk~ and Juicebox SDK source snapshots are MIT-licensed;
+Apache Thrift is Apache-2.0-licensed.  Source releases include only the
+production crate closure needed by the native module.
 Do not redistribute a compiled module without the complete generated
 attribution bundle specified in [[file:THIRD_PARTY_NOTICES.md][third-party notices]].

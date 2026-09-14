@@ -59,7 +59,7 @@ set this option explicitly, and then unlock encrypted XChat support on demand."
 
 ;;; Constants
 
-(defconst chirp-xchat-native--expected-version "0.2.5/chat-xdk-0.4.3"
+(defconst chirp-xchat-native--expected-version "0.2.5/chat-xdk-0.5.0"
   "Native adapter and official XChat SDK version required by Chirp.")
 
 ;;; Variables

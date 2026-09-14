@@ -39,7 +39,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 emacs::plugin_is_GPL_compatible!();
 
-const MODULE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/chat-xdk-0.4.3");
+const MODULE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/chat-xdk-0.5.0");
 const MAX_JOB_ID: i64 = (1 << 28) - 1;
 const MAX_RECOVERY_INPUT_BYTES: usize = 1024 * 1024;
 const MAX_REGISTERED_KEYS: usize = 32;

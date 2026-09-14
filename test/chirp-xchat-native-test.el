@@ -296,7 +296,7 @@ When BUSY is non-nil, abandon it with one pending synthetic recovery."
   (skip-unless (chirp-xchat-native-test--load))
   (should (module-function-p (symbol-function 'chirp-xchat-native-version)))
   (should (equal (chirp-xchat-native-version)
-                 "0.2.5/chat-xdk-0.4.3"))
+                 "0.2.5/chat-xdk-0.5.0"))
   (dolist (function '(chirp-xchat-native-encrypt-text
                       chirp-xchat-native-encrypt-reply
                       chirp-xchat-native-encrypt-reaction
