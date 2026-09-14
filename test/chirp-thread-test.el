@@ -387,7 +387,7 @@
         (let ((chirp-thread-spam-rules-file file))
           (with-temp-file file
             (insert "# Local rules\n\n  Promo Name  \nspam_handle\nSPAM_HANDLE\n"))
-          (should (equal (chirp-thread--read-user-spam-rules)
+          (should (equal (chirp-spam-read-user-rules)
                          '("Promo Name" "spam_handle"))))
       (delete-file file))))
 
@@ -454,11 +454,11 @@
                 (chirp-thread-add-spam-rule)
                 (should (equal initial-input "Selected phrase"))
                 (should (= refresh-count 1))
-                (should (equal (chirp-thread--read-user-spam-rules)
+                (should (equal (chirp-spam-read-user-rules)
                                '("Selected phrase")))
                 (chirp-thread-add-spam-rule)
                 (should (= refresh-count 1))
-                (should (equal (chirp-thread--read-user-spam-rules)
+                (should (equal (chirp-spam-read-user-rules)
                                '("Selected phrase")))))))
       (delete-file file))))
 

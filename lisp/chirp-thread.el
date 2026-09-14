@@ -18,99 +18,9 @@
 (require 'chirp-backend)
 (require 'chirp-media)
 (require 'chirp-render)
-(require 'chirp-spam-rules)
+(require 'chirp-spam)
 
 ;;; Spam Rules
-
-(defcustom chirp-thread-spam-keywords
-  (copy-tree chirp-spam-rules-default)
-  "Keywords used to hide replies in thread views.
-
-Each nonempty string is matched literally and case-insensitively against reply
-text, expanded URLs, the author's display name, and the author's handle.  A
-nested list matches only when all of its strings are nonempty and occur, which
-lets specific split templates avoid broad single-keyword matches.  The
-conservative defaults come from repeated spam in real public replies, with
-Chinese patterns prioritized over English ones.  The thread's focus tweet is
-never filtered.  Set this option to nil to disable keyword filtering, or
-replace and extend the list with local patterns."
-  :type '(repeat (choice string (repeat string)))
-  :group 'chirp)
-
-(defcustom chirp-thread-spam-rules-file
-  (locate-user-emacs-file "chirp/spam-rules.txt")
-  "File containing persistent user spam phrases and keywords.
-
-Store one literal rule per line.  Empty lines and lines beginning with `#' are
-ignored.  These rules share the same case-insensitive match scope as
-`chirp-thread-spam-keywords': reply text, expanded URLs, author display names,
-and author handles."
-  :type 'file
-  :group 'chirp)
-
-(defun chirp-thread--normalize-spam-rule (rule)
-  "Return RULE as one trimmed line, or nil when it is empty."
-  (when (stringp rule)
-    (let ((normalized
-           (string-trim
-            (replace-regexp-in-string "[[:space:]]+" " " rule))))
-      (unless (string-empty-p normalized)
-        normalized))))
-
-(defun chirp-thread--literal-rule-present-p (rule rules)
-  "Return non-nil when literal RULE already occurs in RULES ignoring case."
-  (when-let* ((key (chirp-thread--normalize-spam-rule rule)))
-    (setq key (downcase key))
-    (cl-some
-     (lambda (candidate)
-       (and (stringp candidate)
-            (equal key
-                   (downcase
-                    (or (chirp-thread--normalize-spam-rule candidate) "")))))
-     rules)))
-
-(defun chirp-thread--read-user-spam-rules ()
-  "Return literal spam rules read from `chirp-thread-spam-rules-file'."
-  (when (and (stringp chirp-thread-spam-rules-file)
-             (file-readable-p chirp-thread-spam-rules-file)
-             (not (file-directory-p chirp-thread-spam-rules-file)))
-    (with-temp-buffer
-      (insert-file-contents chirp-thread-spam-rules-file)
-      (let ((seen (make-hash-table :test #'equal))
-            rules)
-        (dolist (line (split-string (buffer-string) "\n"))
-          (when-let* ((rule (chirp-thread--normalize-spam-rule line))
-                      ((not (string-prefix-p "#" rule)))
-                      (key (downcase rule))
-                      ((not (gethash key seen))))
-            (puthash key t seen)
-            (push rule rules)))
-        (nreverse rules)))))
-
-(defun chirp-thread--effective-spam-rules ()
-  "Return built-in, customized, and persistent literal spam rules."
-  (let ((rules (copy-tree chirp-thread-spam-keywords)))
-    (dolist (rule (chirp-thread--read-user-spam-rules) rules)
-      (unless (chirp-thread--literal-rule-present-p rule rules)
-        (setq rules (append rules (list rule)))))))
-
-(defun chirp-thread--append-user-spam-rule (rule)
-  "Append literal RULE to `chirp-thread-spam-rules-file'."
-  (let* ((file (expand-file-name chirp-thread-spam-rules-file))
-         (directory (file-name-directory file))
-         (needs-newline
-          (and (file-readable-p file)
-               (> (file-attribute-size (file-attributes file)) 0)
-               (with-temp-buffer
-                 (insert-file-contents file)
-                 (not (eq (char-before (point-max)) ?\n))))))
-    (make-directory directory t)
-    (with-temp-buffer
-      (set-buffer-file-coding-system 'utf-8-unix)
-      (when needs-newline
-        (insert "\n"))
-      (insert rule "\n")
-      (write-region (point-min) (point-max) file t 'silent))))
 
 (defun chirp-thread--spam-rule-suggestion (authorp)
   "Return a spam-rule suggestion from point.
@@ -118,7 +28,7 @@ and author handles."
 When AUTHORP is non-nil, prefer the current author's display name or handle.
 Otherwise prefer the active region and then the current reply text."
   (let ((entry (chirp-entry-at-point)))
-    (chirp-thread--normalize-spam-rule
+    (chirp-spam-normalize
      (cond
       (authorp
        (or (plist-get entry :author-name)
@@ -136,16 +46,16 @@ region is active.  With prefix argument AUTHORP, use the current author's
 display name or handle instead."
   (interactive "P")
   (let* ((suggestion (chirp-thread--spam-rule-suggestion authorp))
-         (rule (chirp-thread--normalize-spam-rule
+         (rule (chirp-spam-normalize
                 (read-string "Spam phrase or keyword: " suggestion))))
     (unless rule
       (user-error "Spam rule cannot be empty"))
     (when (string-prefix-p "#" rule)
       (user-error "Spam rule cannot begin with #"))
-    (if (chirp-thread--literal-rule-present-p
-         rule (chirp-thread--effective-spam-rules))
+    (if (chirp-spam-rule-present-p
+         rule (chirp-spam-effective-rules))
         (message "Spam rule already exists: %s" rule)
-      (chirp-thread--append-user-spam-rule rule)
+      (chirp-spam-append-user-rule rule)
       (when (functionp chirp--refresh-function)
         (chirp-refresh))
       (message "Added spam rule: %s" rule))))
@@ -308,33 +218,9 @@ The ancestor chain comes first, followed by the focus and remaining replies."
                  tweets))))))
 
 (defun chirp-thread--spam-reply-p (tweet &optional rules)
-  "Return non-nil when reply TWEET or its author matches a spam keyword.
-
-Use RULES instead of `chirp-thread-spam-keywords' when it is non-nil."
+  "Return non-nil when TWEET matches and is not related context."
   (and (not (eq (plist-get tweet :timeline-context) 'related))
-       (let ((case-fold-search t)
-             (content
-              (string-join
-               (cl-remove-if-not
-                #'stringp
-                (append (list (plist-get tweet :text)
-                              (plist-get tweet :author-name)
-                              (plist-get tweet :author-handle))
-                        (plist-get tweet :urls)))
-               "\n")))
-         (cl-labels
-             ((matches
-                (keyword)
-                (when (stringp keyword)
-                  (let ((trimmed (string-trim keyword)))
-                    (and (not (string-empty-p trimmed))
-                         (string-match-p (regexp-quote trimmed) content))))))
-           (cl-some
-            (lambda (rule)
-              (if (listp rule)
-                  (and rule (cl-every #'matches rule))
-                (matches rule)))
-            (or rules chirp-thread-spam-keywords))))))
+       (chirp-spam-match-p tweet (or rules chirp-thread-spam-keywords))))
 
 (defun chirp-thread--filter-spam-replies (tweets &optional focus-id)
   "Hide keyword-matching replies from TWEETS.
@@ -345,7 +231,7 @@ protected."
   (if (or (null tweets)
           (null chirp-thread-spam-keywords))
       tweets
-    (let* ((rules (chirp-thread--effective-spam-rules))
+    (let* ((rules (chirp-spam-effective-rules))
            (by-id (chirp-thread--index-tweets tweets))
            (focus (or (chirp-thread--find-tweet tweets focus-id)
                       (car tweets)))
