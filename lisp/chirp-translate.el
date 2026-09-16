@@ -22,9 +22,6 @@ The target language is shared through `appkit-translate-target-language'."
 (defvar-local chirp-translate--context nil
   "Translation context for this buffer's exact Surface.")
 
-(defvar-local chirp-translate--owner nil
-  "Surface that owns `chirp-translate--context'.")
-
 (defun chirp-translate-x-backend ()
   "Return a backend descriptor for one authenticated X Grok translation."
   (list :id 'chirp-x-grok :label "X / Grok" :start #'chirp-translate--x-start))
@@ -81,21 +78,17 @@ The X ID is the actual revision, not the initial edit-history or repost ID."
 
 (defun chirp-translate--ensure-context ()
   "Return a live context owned by the current Surface, creating it lazily."
-  (let ((surface (appkit-current-surface)))
-    (unless (appkit-surface-live-p surface)
-      (user-error "Tweet translation requires a live Chirp view"))
-    (unless (and (eq surface chirp-translate--owner)
-                 (appkit-translate-context-live-p chirp-translate--context))
-      (setq chirp-translate--owner surface
-            chirp-translate--context
-            (appkit-translate-context-create
-             surface (lambda (key) (chirp-translate--notify surface key)))))
-    chirp-translate--context))
+  (or chirp-translate--context
+      (setq-local chirp-translate--context
+                  (appkit-translate-context-create
+                   (appkit-current-surface)
+                   (lambda (key) (chirp-translate--notify
+                                  (appkit-current-surface) key))))))
 
 (defun chirp-translate-insert (tweet &optional prefix prefix-face)
   "Insert existing translation state for TWEET using PREFIX and PREFIX-FACE.
 Rendering never creates a context or starts translation work."
-  (when (and (eq chirp-translate--owner (appkit-current-surface))
+  (when (and chirp-translate--context
              (appkit-translate-context-live-p chirp-translate--context))
     (when-let* ((source (chirp-translate-source tweet)))
       (appkit-translate-insert chirp-translate--context source
