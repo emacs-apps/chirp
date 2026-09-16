@@ -1668,12 +1668,13 @@ target."
 (defun chirp-translate-at-point ()
   "Translate the tweet at point using the selected backend and shared language."
   (interactive)
-  (let ((source (chirp-translate-source (chirp-actions--tweet-at-point))))
+  (let ((source (chirp-translate-source (chirp-actions--tweet-at-point)))
+        (surface (appkit-current-surface)))
     (unless source
       (user-error "Current tweet has no id"))
+    (chirp-translate-enable surface)
     (appkit-translate-request
-     (chirp-translate--ensure-context) source
-     (funcall chirp-translation-backend-function))))
+     source (funcall chirp-translation-backend-function))))
 
 (provide 'chirp-actions)
 
