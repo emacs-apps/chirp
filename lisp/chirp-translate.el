@@ -19,9 +19,6 @@ The target language is shared through `appkit-translate-target-language'."
                  function)
   :group 'chirp)
 
-(defvar-local chirp-translate--context nil
-  "Translation context for this buffer's exact Surface.")
-
 (defun chirp-translate-x-backend ()
   "Return a backend descriptor for one authenticated X Grok translation."
   (list :id 'chirp-x-grok :label "X / Grok" :start #'chirp-translate--x-start))
@@ -75,24 +72,18 @@ The X ID is the actual revision, not the initial edit-history or repost ID."
               :frame-p t
               :position 'preserve
               :resources resources))))))))
-
-(defun chirp-translate--ensure-context ()
-  "Return a live context owned by the current Surface, creating it lazily."
-  (or chirp-translate--context
-      (setq-local chirp-translate--context
-                  (appkit-translate-context-create
-                   (appkit-current-surface)
-                   (lambda (key) (chirp-translate--notify
-                                  (appkit-current-surface) key))))))
+(defun chirp-translate-enable (&optional surface)
+  "Enable tweet translation for Chirp SURFACE."
+  (let ((surf (or surface (appkit-current-surface))))
+    (when (appkit-surface-live-p surf)
+      (appkit-translate-enable
+       surf (lambda (key) (chirp-translate--notify surf key))))))
 
 (defun chirp-translate-insert (tweet &optional prefix prefix-face)
   "Insert existing translation state for TWEET using PREFIX and PREFIX-FACE.
 Rendering never creates a context or starts translation work."
-  (when (and chirp-translate--context
-             (appkit-translate-context-live-p chirp-translate--context))
-    (when-let* ((source (chirp-translate-source tweet)))
-      (appkit-translate-insert chirp-translate--context source
-                               prefix prefix-face))))
+  (when-let* ((source (chirp-translate-source tweet)))
+    (appkit-translate-insert source prefix prefix-face)))
 
 (provide 'chirp-translate)
 
