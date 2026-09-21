@@ -18,7 +18,7 @@
 (transient-define-prefix chirp-transient-tweet-operate ()
   "Operate on the tweet at point."
   [["Tweet"
-    ("t" "Open context" chirp-open-entry-at-point)
+    ("T" "Open context" chirp-open-entry-at-point)
     ("r" "Reply" chirp-reply-at-point)
     ("Q" "Quote" chirp-quote-at-point)
     ("R" "Retweet" chirp-toggle-retweet-at-point)
@@ -28,7 +28,7 @@
     ("B" "Bookmark" chirp-toggle-bookmark-at-point)]
    ["Other"
     ("d" "Delete" chirp-delete-at-point)
-    ("T" "Translate" chirp-translate-at-point)
+    ("t" "Translate" chirp-translate-at-point)
     ("y" "Copy fixupx" chirp-copy-fixupx-url-at-point)
     ("o" "Browser" chirp-browse-at-point)]])
 
