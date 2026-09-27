@@ -2162,7 +2162,7 @@ ERRBACK receives request failures."
        :errback error-fn)))))
 
 (defun chirp-backend-translate (tweet-id language callback &optional errback)
-  "Translate TWEET-ID with Grok into LANGUAGE, calling CALLBACK or ERRBACK."
+  "Translate TWEET-ID with Grok into LANGUAGE within 120 seconds."
   (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
     (if (not (and (stringp language)
                   (string-match-p
@@ -2183,7 +2183,9 @@ ERRBACK receives request failures."
        :json `(("content_type" . "POST")
                ("id" . ,tweet-id)
                ("dst_lang" . ,language))
-       :errback error-fn))))
+       :errback error-fn
+       :timeout 120
+       :timeout-message "Tweet translation timed out"))))
 
 ;;; Profiles and Lists
 

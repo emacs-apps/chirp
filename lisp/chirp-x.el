@@ -1223,14 +1223,16 @@ TIMEOUT-MESSAGE describes that terminal failure."
 ;;; REST and GraphQL Requests
 
 (cl-defun chirp-x-api-request
-    (service path callback &key (method 'get) query form json errback owner)
+    (service path callback &key (method 'get) query form json errback owner
+             timeout timeout-message)
   "Request an authenticated X API PATH from SERVICE asynchronously.
 
 SERVICE is `web' for x.com/i/api or `legacy' for api.x.com/1.1.  METHOD may be
 `get' or `post'.  QUERY and FORM are string-keyed alists.  FORM and JSON are
 mutually exclusive POST bodies; JSON is encoded as application/json.
 CALLBACK receives decoded JSON, and ERRBACK receives one readable error
-string.  OWNER optionally owns the transport lifecycle."
+string.  OWNER optionally owns the transport lifecycle.  TIMEOUT bounds the
+request in seconds; TIMEOUT-MESSAGE describes that terminal failure."
   (unless (functionp callback)
     (error "X API callback is not callable"))
   (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
@@ -1252,7 +1254,7 @@ string.  OWNER optionally owns the transport lifecycle."
              :content-type (cond (json "application/json")
                                  (form "application/x-www-form-urlencoded"))
              :errback error-fn
-             :owner owner)))
+             :owner owner :timeout timeout :timeout-message timeout-message)))
       (chirp-x--callback-error
        (chirp-x--resignal-callback-error err))
       (error
