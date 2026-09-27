@@ -367,7 +367,7 @@ commands still work, and displays alt text when the backend provides it."
       "g d" #'chirp-media-download-at-point
       "g u" #'chirp-open-author-at-point
       "g S" #'chirp-thread-add-spam-rule
-      "?" #'chirp-dispatch
+      "g a" #'chirp-dispatch
       "o" #'chirp-transient-tweet-operate
       "g x" #'chirp-browse-at-point
       "g s" #'chirp-search
