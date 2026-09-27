@@ -1277,6 +1277,52 @@ Return a list of (compose source foreign)."
       (when (appkit-app-live-p chirp--app)
         (appkit-app-close chirp--app)))))
 
+(ert-deftest chirp-translate-timeout-releases-owner-queue ()
+  "A stalled X translation must fail and release its slot for waiting work."
+  (let ((chirp--app nil)
+        requests)
+    (unwind-protect
+        (cl-letf (((symbol-function 'chirp-x-credentials)
+                   (lambda ()
+                     '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
+                  ((symbol-function 'chirp-x--retrieve)
+                   (lambda (_url callback &rest _arguments)
+                     (let ((buffer (generate-new-buffer " *chirp-translation*")))
+                       (push (cons buffer callback) requests)
+                       buffer))))
+          (let* ((owner (chirp-app))
+                 (sources
+                  (mapcar #'chirp-translate-source
+                          '((:id "1" :text "First")
+                            (:id "2" :text "Second")
+                            (:id "3" :text "Third"))))
+                 (states (appkit-translate-request-many
+                          sources (chirp-translate-x-backend) "zh"
+                          nil #'ignore owner))
+                 (queue (appkit-translate-context-queue
+                         (gethash owner appkit-translate--contexts)))
+                 (first-buffer (car (cadr requests)))
+                 (deadline (buffer-local-value
+                            'chirp-x--request-timeout-timer first-buffer)))
+            (should (equal (mapcar (lambda (state) (plist-get state :status)) states)
+                           '(running running queued)))
+            (should (timerp deadline))
+            ;; Fire the installed deadline without relying on wall-clock sleeps.
+            (apply (timer--function deadline) (timer--args deadline))
+            (should-not (buffer-live-p first-buffer))
+            (should (equal (mapcar (lambda (state) (plist-get state :status)) states)
+                           '(failed running running)))
+            (should (= (appkit-task-queue-active-count queue) 2))
+            (should (= (appkit-task-queue-queued-count queue) 0))
+            (chirp-stop)
+            (should (= (appkit-task-queue-total-count queue) 0))
+            (dolist (request requests)
+              (should-not (buffer-live-p (car request))))))
+      (chirp-stop)
+      (dolist (request requests)
+        (when (buffer-live-p (car request))
+          (kill-buffer (car request)))))))
+
 (ert-deftest chirp-copy-fixupx-url-at-point-copies-rewritten-url ()
   "Copy action should rewrite tweet URLs from x.com to fixupx.com."
   (let (captured-url last-message)

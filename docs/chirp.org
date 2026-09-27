@@ -127,7 +127,7 @@ Direct-message reads never send read acknowledgments.  Text, replies, reactions,
 | ~x~ | application menu (~chirp-dispatch~).  Evil: ~?~ |
 | ~o~ | tweet operations (~chirp-transient-tweet-operate~), also under ~x o~.  Evil: ~o~ |
 | ~o r~ | reply, or refuse when X limits replies |
-| ~o T~ | translate the tweet |
+| ~o t~ | translate the tweet |
 | ~o o~ | open in a browser.  Evil: also ~g x~ |
 
 
@@ -170,20 +170,16 @@ The first check establishes a baseline.  Later checks run every five
 minutes by default.  Linux uses freedesktop notifications; macOS uses
 AppleScript.
 
-Press ~o T~ on a tweet or quoted tweet to translate it on demand.  The
-original stays unchanged; the translation region shows pending work or an
-error and provides hide, show, and retranslate actions.  Results belong to
-the current view and are discarded when it closes.
-
-Chirp defaults to X's Grok translation endpoint.  To explicitly use
-Respond instead, make the optional ~respond~ package available and set:
+~o t~ translates the selected tweet or quote below its unchanged original.
+Chirp uses X's translation endpoint with a 120-second deadline.  To use the
+optional, separately authenticated Respond backend instead:
 
 #+begin_src emacs-lisp
 (setq chirp-translation-backend-function #'appkit-translate-respond-backend)
 #+end_src
 
-There is no automatic fallback between backends.  The target language is
-shared with other AppKit translation clients.
+The target language is shared through ~appkit-translate-target-language~;
+there is no automatic backend fallback.
 
 * Thread reply filtering
 
