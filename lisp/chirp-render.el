@@ -1287,7 +1287,8 @@ track; HEIGHT, GAP, WIDTHS, and FIT retain its presentation geometry."
          (height (plist-get plan :height))
          (offset (plist-get plan :offset))
          (poster (aref state 10))
-         (canvas (video-canvas-create width height)))
+         (background (video-background-color nil (car (aref state 4))))
+         (canvas (video-canvas-create width height background)))
     (dolist (cell (plist-get plan :items))
       (let ((item (plist-get cell :item)))
         (when-let* ((file (plist-get item :file)))
@@ -1295,7 +1296,7 @@ track; HEIGHT, GAP, WIDTHS, and FIT retain its presentation geometry."
            canvas width height file
            (- (plist-get cell :x) offset) 0
            (plist-get cell :width) height
-           (or (plist-get item :fit) 'contain)))))
+           (or (plist-get item :fit) 'contain) background))))
     (dolist (property '(:appkit-media-nslices :map
                         :appkit-media-strip-widths
                         :appkit-media-strip-offset))
@@ -1349,6 +1350,9 @@ track; HEIGHT, GAP, WIDTHS, and FIT retain its presentation geometry."
                     :canvas-height (aref state 6)
                     :destination-x target-x
                     :destination-y 0
+                    :background-function
+                    (lambda (_inline)
+                      (video-background-color buffer (car markers)))
                     :visible-function
                     (lambda (_inline)
                       (chirp-render--media-track-markers-visible-p buffer markers))
