@@ -2253,15 +2253,19 @@ ERRBACK receives request failures."
         (funcall error-fn "Tweet translation requires an ISO language code")
       (chirp-x-api-request
        'web "2/grok/translation.json"
-       (lambda (payload)
-         (if-let* ((translation
-                    (chirp-first-nonblank
-                     (chirp-get (chirp-get payload "result") "text"))))
-             (funcall callback
-                      `(("id" . ,tweet-id) ("translation" . ,translation))
-                      nil)
-           (funcall error-fn "X did not return a translation")))
+       (lambda (payloads)
+         (let ((chunks
+                (mapcar (lambda (payload)
+                          (chirp-get (chirp-get payload "result") "text"))
+                        payloads)))
+           (if-let* (((cl-every #'stringp chunks))
+                     (translation (chirp-first-nonblank (apply #'concat chunks))))
+               (funcall callback
+                        `(("id" . ,tweet-id) ("translation" . ,translation))
+                        nil)
+             (funcall error-fn "X did not return a translation"))))
        :method 'post
+       :response-type 'json-stream
        :json `(("content_type" . "POST")
                ("id" . ,tweet-id)
                ("dst_lang" . ,language))

@@ -567,6 +567,58 @@
                            "user_id=42&count=20")))
     (should (assoc-string "users" received t))))
 
+(ert-deftest chirp-x-translation-joins-streamed-and-cached-results ()
+  "Translation accepts cached JSON and concatenates every streamed text chunk."
+  (require 'chirp-backend)
+  (dolist (body '("{\"result\":{\"text\":\"译文 的\\n第二行\"}}"
+                  "{\"result\":{\"text\":\"译文\"}}\n{\"result\":{\"text\":\" \"}}\n{\"result\":{\"text\":\"的\\n第二行\"}}\n"))
+    (let (received)
+      (cl-letf (((symbol-function 'chirp-x-credentials)
+                 (lambda () '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
+                ((symbol-function 'chirp-x--retrieve)
+                 (lambda (_url callback &rest _options)
+                   (chirp-x-test--response 200 body callback))))
+        (chirp-backend-translate
+         "123" "zh" (lambda (data _envelope)
+                      (setq received (chirp-get data "translation")))
+         (lambda (message) (ert-fail message))))
+      (should (equal received "译文 的\n第二行")))))
+
+(ert-deftest chirp-x-translation-rejects-incomplete-or-failed-streams ()
+  "A valid prefix must not turn truncated, errored, or failed HTTP data into success."
+  (require 'chirp-backend)
+  (dolist (response
+           '((200 "{\"result\":{\"text\":\"partial\"}}\n{\"result\":")
+             (200 "{\"result\":{\"text\":\"partial\"}}\n{\"errors\":[{\"message\":\"rejected\"}]}")
+             (503 "{\"result\":{\"text\":\"partial\"}}")))
+    (let (outcome)
+      (cl-letf (((symbol-function 'chirp-x-credentials)
+                 (lambda () '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
+                ((symbol-function 'chirp-x--retrieve)
+                 (lambda (_url callback &rest _options)
+                   (chirp-x-test--response (car response) (cadr response) callback))))
+        (chirp-backend-translate
+         "123" "zh" (lambda (&rest _) (setq outcome 'success))
+         (lambda (_message) (setq outcome 'failure))))
+      (should (eq outcome 'failure)))))
+
+(ert-deftest chirp-x-post-rejects-extra-json-records ()
+  "Opting translation into streams must not relax ordinary mutation responses."
+  (let ((requests 0) outcome)
+    (cl-letf (((symbol-function 'chirp-x-credentials)
+               (lambda () '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
+              ((symbol-function 'chirp-x--retrieve)
+               (lambda (_url callback &rest _options)
+                 (cl-incf requests)
+                 (chirp-x-test--response 200 "{\"ok\":true}\n{\"ok\":true}" callback))))
+      (chirp-x-api-request
+       'web "1.1/friendships/create.json"
+       (lambda (_payload) (setq outcome 'success))
+       :method 'post :form '(("user_id" . "42"))
+       :errback (lambda (_message) (setq outcome 'failure))))
+    (should (eq outcome 'failure))
+    (should (= requests 1))))
+
 (ert-deftest chirp-x-chat-media-get-uses-cookie-authenticated-ton-route ()
   "XChat media GETs should preserve bytes without sending the web bearer."
   (let ((ciphertext (unibyte-string 0 1 127 128 255))
@@ -959,17 +1011,13 @@
     (should (string-prefix-p "X write outcome is unknown" failure))
     (should (string-match-p "GraphQL returned an error (5001)" failure))))
 
-(ert-deftest chirp-x-write-rejects-oversized-acknowledgements-before-parsing ()
-  "A write acknowledgement over the bound should fail safely before JSON."
+(ert-deftest chirp-x-write-rejects-oversized-acknowledgements ()
+  "A write acknowledgement over the configured byte bound must not succeed."
   (let ((chirp-x--write-response-limit 32)
-        parsed success failure)
+        success failure)
     (cl-letf (((symbol-function 'chirp-x-credentials)
                (lambda ()
                  '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
-              ((symbol-function 'json-parse-string)
-               (lambda (&rest _args)
-                 (setq parsed t)
-                 (error "oversized acknowledgement was parsed")))
               ((symbol-function 'chirp-x--retrieve)
                (lambda (_url callback _callback-args _silent
                              _inhibit-cookies)
@@ -980,7 +1028,6 @@
        '(:query-id "query-id" :name "WriteMutation" :method post)
        nil (lambda (_payload) (setq success t))
        :errback (lambda (message) (setq failure message))))
-    (should-not parsed)
     (should-not success)
     (should (string-prefix-p "X write outcome is unknown" failure))
     (should (string-match-p "exceeds 32 bytes" failure))))

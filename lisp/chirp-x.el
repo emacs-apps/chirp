@@ -591,8 +591,8 @@ client headers for a cookie-authenticated CDN request."
     (when content-type
       `(("Content-Type" . ,content-type))))))
 
-(defun chirp-x--response-body (limit)
-  "Return the current HTTP response body when no larger than LIMIT bytes."
+(defun chirp-x--response-body-start (limit)
+  "Return the current response body start, enforcing LIMIT bytes."
   (let* ((header-end (and (boundp 'url-http-end-of-headers)
                           url-http-end-of-headers))
          (header-position
@@ -612,7 +612,7 @@ client headers for a cookie-authenticated CDN request."
          (bytes (- (position-bytes end) (position-bytes start))))
     (when (> bytes limit)
       (error "X response body exceeds %d bytes" limit))
-    (buffer-substring-no-properties start end)))
+    start))
 
 (defun chirp-x--response-status (request-status)
   "Return HTTP status from REQUEST-STATUS in the current retrieval buffer."
@@ -840,70 +840,70 @@ client headers for a cookie-authenticated CDN request."
    "X write outcome is unknown; the request may have succeeded. "
    "Check X before trying again. " message))
 
-(defun chirp-x--decode-response (request-status &optional allow-empty method)
-  "Decode the current X response buffer for REQUEST-STATUS.
-
-When ALLOW-EMPTY is non-nil, accept an empty successful response as an empty
-object.  METHOD identifies writes whose transport outcome can be uncertain.
+(cl-defun chirp-x--decode-response
+    (request-status &optional allow-empty method (response-type 'json))
+  "Decode the bounded X response according to RESPONSE-TYPE.
+`json' requires one value, `json-stream' returns successive values in order,
+and `binary' preserves the response bytes.  ALLOW-EMPTY accepts an empty JSON
+response as an empty object.  METHOD identifies uncertain write outcomes.
 Return either `(:success PAYLOAD)' or `(:error MESSAGE)'."
-  (let* ((http-status (chirp-x--response-status request-status))
-         (body (chirp-x--response-body
+  (let ((http-status (chirp-x--response-status request-status))
+        (start (chirp-x--response-body-start
                 (if (eq method 'post)
                     chirp-x--write-response-limit
                   chirp-x--read-response-limit)))
-         (empty-p (string-empty-p (string-trim body)))
-         (payload
-          (unless empty-p
-            (condition-case nil
-                (json-parse-string body
-                                   :object-type 'alist
-                                   :array-type 'list
-                                   :null-object nil
-                                   :false-object nil)
-              (error nil)))))
-    (cond
-     ((or (not http-status)
-          (< http-status 200)
-          (>= http-status 300))
-      (let ((message
-             (chirp-x--failure-message
-              http-status payload request-status)))
-        (list :error
-              (if (eq method 'post)
-                  (chirp-x-unknown-write-outcome message)
-                message))))
-     ((and empty-p allow-empty)
-      (list :success (make-hash-table :test #'equal)))
-     ((not payload)
-      (list :error
-            (if (eq method 'post)
-                (chirp-x-unknown-write-outcome "X returned invalid JSON")
-              "X returned invalid JSON")))
-     ((chirp-x--graphql-error-message payload)
-      (let ((message (chirp-x--failure-message nil payload request-status)))
-        (list :error
-              (if (eq method 'post)
-                  (chirp-x-unknown-write-outcome message)
-                message))))
-     (t (list :success payload)))))
-
-(defun chirp-x--decode-binary-response
-    (request-status &optional _allow-empty _method)
-  "Decode a bounded binary X response for REQUEST-STATUS."
-  (let* ((http-status (chirp-x--response-status request-status))
-         (raw (chirp-x--response-body chirp-x--read-response-limit))
-         (body (if (multibyte-string-p raw)
-                   (encode-coding-string raw 'binary)
-                 raw)))
-    (cond
-     ((or (not http-status)
-          (< http-status 200)
-          (>= http-status 300))
-      (list :error
-            (chirp-x--failure-message http-status nil request-status)))
-     ((string-empty-p body)
-      (list :error "X returned an empty media response"))
-     (t (list :success body)))))
+        payload empty-p invalid-p)
+    (save-excursion
+      (goto-char start)
+      (if (eq response-type 'binary)
+          (let ((raw (buffer-substring-no-properties start (point-max))))
+            (setq empty-p (string-empty-p raw)
+                  payload (if (multibyte-string-p raw)
+                              (encode-coding-string raw 'binary)
+                            raw)))
+        (skip-chars-forward " \t\r\n")
+        (setq empty-p (eobp))
+        (unless empty-p
+          (condition-case nil
+              (let ((first
+                     (json-parse-buffer :object-type 'alist :array-type 'list
+                                        :null-object nil :false-object nil)))
+                (skip-chars-forward " \t\r\n")
+                (if (eq response-type 'json-stream)
+                    (let ((records (list first)))
+                      (while (not (eobp))
+                        (push (json-parse-buffer
+                               :object-type 'alist :array-type 'list
+                               :null-object nil :false-object nil)
+                              records)
+                        (skip-chars-forward " \t\r\n"))
+                      (setq payload (nreverse records)))
+                  (if (eobp)
+                      (setq payload first)
+                    (setq invalid-p t))))
+            (json-error (setq invalid-p t))))))
+    (let* ((error-payload
+            (pcase response-type
+              ('json payload)
+              ('json-stream
+               (cl-find-if #'chirp-x--graphql-error-message payload))))
+           (failure
+            (cond
+             ((or (not http-status) (< http-status 200) (>= http-status 300))
+              (chirp-x--failure-message http-status error-payload request-status))
+             ((and empty-p allow-empty (eq response-type 'json))
+              (setq payload (make-hash-table :test #'equal))
+              nil)
+             ((eq response-type 'binary)
+              (when empty-p "X returned an empty media response"))
+             ((or invalid-p (null payload)) "X returned invalid JSON")
+             ((chirp-x--graphql-error-message error-payload)
+              (chirp-x--failure-message nil error-payload request-status)))))
+      (if failure
+          (list :error (if (eq method 'post)
+                           (chirp-x-unknown-write-outcome failure)
+                         failure))
+        (list :success payload)))))
 
 ;;; Request Lifecycle
 
@@ -1055,18 +1055,18 @@ preallocated `url-http' buffer so url.el cannot replay or orphan the write."
 
 (cl-defun chirp-x--request
     (request-url method callback
-                 &key data content-type errback allow-empty owner decoder
+                 &key data content-type errback allow-empty owner
                  settle-on-cancel cancel-message cookie-only timeout
-                 timeout-message)
+                 timeout-message (response-type 'json))
   "Request trusted REQUEST-URL with METHOD and call CALLBACK.
 
 DATA is encoded as UTF-8 when needed.  CONTENT-TYPE adds its corresponding
 header.  When ALLOW-EMPTY is non-nil, a successful empty body reaches CALLBACK
 as an empty object.  ERRBACK receives setup, transport, HTTP, or response
 errors.  OWNER is the Appkit app or view whose lifecycle owns the retrieval.
-DECODER optionally replaces the JSON response decoder.  SETTLE-ON-CANCEL asks
-cancellation to call ERRBACK even for an app-owned read; CANCEL-MESSAGE
-overrides ordinary cancellation.  COOKIE-ONLY restricts a GET to the XChat
+RESPONSE-TYPE selects `json', `json-stream', or `binary'.
+SETTLE-ON-CANCEL asks cancellation to call ERRBACK even for an app-owned read;
+CANCEL-MESSAGE overrides ordinary cancellation.  COOKIE-ONLY restricts a GET to the XChat
 media CDN without a bearer token.  TIMEOUT bounds the request in seconds, and
 TIMEOUT-MESSAGE describes that terminal failure."
   (unless (functionp callback)
@@ -1084,6 +1084,8 @@ TIMEOUT-MESSAGE describes that terminal failure."
             (error "X request URL is not trusted: %S" request-url))
           (unless (memq method '(get post))
             (error "X request method is invalid: %S" method))
+          (unless (memq response-type '(json json-stream binary))
+            (error "X response type is invalid: %S" response-type))
           (when (and cookie-only
                      (or (not (memq method '(get post)))
                          (not (string-prefix-p
@@ -1134,10 +1136,9 @@ TIMEOUT-MESSAGE describes that terminal failure."
                                (when deliver-p
                                  (let ((result
                                         (condition-case response-error
-                                            (funcall
-                                             (or decoder
-                                                 #'chirp-x--decode-response)
-                                             request-status allow-empty method)
+                                            (chirp-x--decode-response
+                                             request-status allow-empty method
+                                             response-type)
                                           (error
                                            (let ((message
                                                   (format
@@ -1224,15 +1225,16 @@ TIMEOUT-MESSAGE describes that terminal failure."
 
 (cl-defun chirp-x-api-request
     (service path callback &key (method 'get) query form json errback owner
-             timeout timeout-message)
+             timeout timeout-message (response-type 'json))
   "Request an authenticated X API PATH from SERVICE asynchronously.
 
 SERVICE is `web' for x.com/i/api or `legacy' for api.x.com/1.1.  METHOD may be
 `get' or `post'.  QUERY and FORM are string-keyed alists.  FORM and JSON are
 mutually exclusive POST bodies; JSON is encoded as application/json.
-CALLBACK receives decoded JSON, and ERRBACK receives one readable error
-string.  OWNER optionally owns the transport lifecycle.  TIMEOUT bounds the
-request in seconds; TIMEOUT-MESSAGE describes that terminal failure."
+CALLBACK receives decoded data, and ERRBACK receives one readable error string.
+RESPONSE-TYPE selects `json', `json-stream', or `binary'.  OWNER optionally
+owns the transport lifecycle.  TIMEOUT bounds the request in seconds;
+TIMEOUT-MESSAGE describes that terminal failure."
   (unless (functionp callback)
     (error "X API callback is not callable"))
   (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
@@ -1253,7 +1255,7 @@ request in seconds; TIMEOUT-MESSAGE describes that terminal failure."
                          (form (chirp-x--urlencode form)))
              :content-type (cond (json "application/json")
                                  (form "application/x-www-form-urlencoded"))
-             :errback error-fn
+             :errback error-fn :response-type response-type
              :owner owner :timeout timeout :timeout-message timeout-message)))
       (chirp-x--callback-error
        (chirp-x--resignal-callback-error err))
@@ -1288,7 +1290,7 @@ readable error string.  OWNER optionally owns the transport lifecycle."
            (concat chirp-x--chat-media-base-url
                    conversation-id "/" media-hash)
            'get callback
-           :decoder #'chirp-x--decode-binary-response
+           :response-type 'binary
            :errback error-fn
            :owner owner
            :cookie-only t
