@@ -36,6 +36,48 @@ Either `draft' or `scheduled'.")
 (defvar-local chirp-unsent-entries nil
   "Normalized unsent entries last rendered in the current buffer.")
 
+(defvar-local chirp-unsent--collection nil
+  "Collection incarnation, replaced on kind navigation and mode initialization.")
+
+(defvar-local chirp-unsent--fetch-token nil
+  "Identity of the outstanding collection fetch.")
+
+(defvar-local chirp-unsent--fetch-results nil
+  "Confirmed local results to overlay on the outstanding fetch.")
+
+(defvar-local chirp-unsent--status-owner nil
+  "Operation permitted to clear this controller's current status.")
+
+(cl-defstruct (chirp-unsent--source
+               (:constructor chirp-unsent--make-source))
+  buffer collection kind)
+
+(defun chirp-unsent-capture-source (buffer)
+  "Capture BUFFER's exact unsent controller and collection, or return nil."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (derived-mode-p 'chirp-unsent-mode)
+        (chirp-unsent--make-source
+         :buffer buffer
+         :collection chirp-unsent--collection :kind chirp-unsent-kind)))))
+
+(defun chirp-unsent--source-current-p (source)
+  "Return non-nil if SOURCE still owns its original collection."
+  (and source
+       (buffer-live-p (chirp-unsent--source-buffer source))
+       (with-current-buffer (chirp-unsent--source-buffer source)
+         (and (derived-mode-p 'chirp-unsent-mode)
+              (eq chirp-unsent--collection
+                  (chirp-unsent--source-collection source))))))
+
+(defun chirp-unsent--clear-status (source owner)
+  "Clear status only when SOURCE and its status OWNER remain current."
+  (when (chirp-unsent--source-current-p source)
+    (with-current-buffer (chirp-unsent--source-buffer source)
+      (when (eq owner chirp-unsent--status-owner)
+        (setq chirp-unsent--status-owner nil)
+        (chirp-clear-status)))))
+
 ;;; Mode
 
 (defvar-keymap chirp-unsent-mode-map
@@ -86,6 +128,10 @@ Either `draft' or `scheduled'.")
 
 (define-derived-mode chirp-unsent-mode tabulated-list-mode "Chirp-Unsent"
   "Major mode for X drafts and scheduled posts."
+  (setq-local chirp-unsent--collection (make-symbol "unsent-collection"))
+  ;; Tabulated List entries are permanent-local; a new controller must not
+  ;; inherit actionable rows from the previous incarnation.
+  (setq-local tabulated-list-entries nil)
   (setq-local truncate-lines t)
   (setq-local tabulated-list-format
               [("C" 1 nil :pad-right 1)
@@ -97,6 +143,7 @@ Either `draft' or `scheduled'.")
   (setq-local mode-line-process
               '((:eval (chirp--mode-line-status-string))))
   (tabulated-list-init-header)
+  (tabulated-list-print)
   (appkit-evil-normalize-keymaps))
 
 (defun chirp-unsent--setup-evil ()
@@ -130,13 +177,49 @@ Either `draft' or `scheduled'.")
                   (buffer-list))
       (generate-new-buffer (chirp--format-buffer-name "Drafts"))))
 
-(defun chirp-unsent--apply-entries (entries)
-  "Render ENTRIES in the current unsent buffer."
-  (setq-local chirp-unsent-entries entries)
-  (setq-local tabulated-list-entries
-              (mapcar #'chirp-unsent--row entries))
+(defun chirp-unsent--apply-entries (entries &optional preserve-marks)
+  "Render committed ENTRIES, retaining row marks when PRESERVE-MARKS is set."
+  (let ((old-rows (and preserve-marks tabulated-list-entries)))
+    (setq-local chirp-unsent-entries entries)
+    (setq-local tabulated-list-entries
+                (mapcar
+                 (lambda (entry)
+                   (let ((row (chirp-unsent--row entry)))
+                     (when-let* ((old (assoc (car row) old-rows)))
+                       (aset (cadr row) 0 (aref (cadr old) 0)))
+                     row))
+                 entries)))
   (tabulated-list-print t)
   (chirp--apply-buffer-name (current-buffer) (chirp-unsent--title)))
+
+(defun chirp-unsent--merge-result (entries id entry)
+  "Return ENTRIES with ID replaced by ENTRY, inserted, or deleted if nil."
+  (let (found result)
+    (dolist (old entries)
+      (if (equal id (plist-get old :id))
+          (progn
+            (setq found t)
+            (when entry (push entry result)))
+        (push old result)))
+    (setq result (nreverse result))
+    (if (and entry (not found))
+        (cons entry result)
+      result)))
+
+(defun chirp-unsent-apply-result (source kind id &optional entry)
+  "Apply a confirmed unsent write to SOURCE without fetching.
+KIND and ID identify the object.  ENTRY is a normalized unsent entry to
+upsert; nil means confirmed deletion.  Ignore a replaced controller or
+collection.  Retain unrelated marks and point."
+  (when (and (chirp-unsent--source-current-p source)
+             (eq kind (chirp-unsent--source-kind source)))
+    (with-current-buffer (chirp-unsent--source-buffer source)
+      ;; A fetch issued before this acknowledged write must not resurrect or
+      ;; overwrite it.  Keep only the newest result for each ID.
+      (when chirp-unsent--fetch-token
+        (setf (alist-get id chirp-unsent--fetch-results nil nil #'equal) entry))
+      (chirp-unsent--apply-entries
+       (chirp-unsent--merge-result chirp-unsent-entries id entry) t))))
 
 ;;; Requests
 
@@ -145,22 +228,36 @@ Either `draft' or `scheduled'.")
   (interactive)
   (unless (derived-mode-p 'chirp-unsent-mode)
     (user-error "Not in a Chirp unsent buffer"))
-  (let ((buffer (current-buffer))
-        (kind chirp-unsent-kind)
-        (token (chirp-begin-request (current-buffer))))
+  (let* ((buffer (current-buffer))
+         (source (chirp-unsent-capture-source buffer))
+         (kind chirp-unsent-kind)
+         (token (make-symbol "unsent-fetch")))
+    (setq chirp-unsent--fetch-token token
+          chirp-unsent--fetch-results nil
+          chirp-unsent--status-owner token)
     (chirp-set-status buffer (format "Loading %s..." (chirp-unsent--title)))
     (chirp-backend-fetch-unsent
      kind
      (lambda (entries _envelope)
-       (when (chirp-request-current-p buffer token)
+       (when (chirp-unsent--source-current-p source)
          (with-current-buffer buffer
-           (chirp-clear-status buffer)
-           (chirp-unsent--apply-entries entries)
-           (message "%s: %d" (chirp-unsent--title) (length entries)))))
+           (when (eq chirp-unsent--fetch-token token)
+             (dolist (result chirp-unsent--fetch-results)
+               (setq entries (chirp-unsent--merge-result
+                              entries (car result) (cdr result))))
+             (setq chirp-unsent--fetch-token nil
+                   chirp-unsent--fetch-results nil)
+             (chirp-unsent--clear-status source token)
+             (chirp-unsent--apply-entries entries t)
+             (message "%s: %d" (chirp-unsent--title) (length entries))))))
      (lambda (message)
-       (when (chirp-request-current-p buffer token)
-         (chirp-clear-status buffer)
-         (chirp-actions-show-error message))))))
+       (when (chirp-unsent--source-current-p source)
+         (with-current-buffer buffer
+           (when (eq chirp-unsent--fetch-token token)
+             (setq chirp-unsent--fetch-token nil
+                   chirp-unsent--fetch-results nil)
+             (chirp-unsent--clear-status source token)
+             (chirp-actions-show-error message))))))))
 
 ;;; Commands
 
@@ -174,8 +271,13 @@ KIND is `draft' or `scheduled'."
     (with-current-buffer buffer
       (unless (derived-mode-p 'chirp-unsent-mode)
         (chirp-unsent-mode))
-      (setq-local chirp-unsent-kind kind)
-      (chirp--apply-buffer-name buffer (chirp-unsent--title))
+      (unless (eq chirp-unsent-kind kind)
+        ;; Change identity and actionable rows in one synchronous transition.
+        (setq chirp-unsent-kind kind
+              chirp-unsent--collection (make-symbol "unsent-collection")
+              chirp-unsent--fetch-token nil
+              chirp-unsent--fetch-results nil)
+        (chirp-unsent--apply-entries nil))
       (chirp-unsent-refresh))
     (pop-to-buffer buffer)
     buffer))
@@ -265,20 +367,21 @@ KIND is `draft' or `scheduled'."
         (forward-line 1)))
     (nreverse ids)))
 
-(defun chirp-unsent--delete-ids (kind ids buffer)
-  "Delete IDS of KIND sequentially, then refresh BUFFER."
+(defun chirp-unsent--delete-ids (kind ids source owner)
+  "Delete approved IDS sequentially using their captured KIND.
+The approved server work may finish after navigation, but only SOURCE
+may receive local results; OWNER may clear only its own status."
   (if (null ids)
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (chirp-unsent-refresh)))
+      (chirp-unsent--clear-status source owner)
     (chirp-backend-delete-unsent
      kind (car ids)
      (lambda (_payload _envelope)
-       (chirp-unsent--delete-ids kind (cdr ids) buffer))
+       (chirp-unsent-apply-result source kind (car ids))
+       (chirp-unsent--delete-ids kind (cdr ids) source owner))
      (lambda (message)
-       (when (buffer-live-p buffer)
-         (chirp-clear-status buffer))
-       (chirp-actions-show-error message)))))
+       (when (chirp-unsent--source-current-p source)
+         (chirp-unsent--clear-status source owner)
+         (chirp-actions-show-error message))))))
 
 (defun chirp-unsent-execute ()
   "Delete every unsent post flagged with `chirp-unsent-flag-delete'."
@@ -288,7 +391,9 @@ KIND is `draft' or `scheduled'."
   (let* ((ids (chirp-unsent--flagged-ids chirp-unsent--delete-char))
          (kind chirp-unsent-kind)
          (label (if (eq kind 'scheduled) "scheduled post" "draft"))
-         (buffer (current-buffer)))
+         (buffer (current-buffer))
+         (source (chirp-unsent-capture-source buffer))
+         (owner (make-symbol "unsent-delete")))
     (when (null ids)
       (user-error "No unsent posts flagged for deletion"))
     (unless (yes-or-no-p
@@ -300,8 +405,11 @@ KIND is `draft' or `scheduled'."
                            "scheduled posts"
                          "drafts"))))
       (user-error "Delete canceled"))
-    (chirp-set-status buffer "Deleting...")
-    (chirp-unsent--delete-ids kind ids buffer)))
+    (when (chirp-unsent--source-current-p source)
+      (with-current-buffer buffer
+        (setq chirp-unsent--status-owner owner)
+        (chirp-set-status buffer "Deleting...")))
+    (chirp-unsent--delete-ids kind ids source owner)))
 
 (provide 'chirp-unsent)
 

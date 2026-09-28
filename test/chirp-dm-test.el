@@ -72,9 +72,8 @@
           (should (buffer-live-p buffer)))
       (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
-(ert-deftest chirp-direct-messages-projects-only-through-appkit-sync
-    ()
-  "Inbox completion should update state before its directory projection."
+(ert-deftest chirp-direct-messages-projects-committed-inbox ()
+  "Inbox completion should project its committed conversation state."
   (let ((chirp--app nil) buffer callback owner)
     (unwind-protect
         (save-window-excursion
@@ -105,16 +104,13 @@
                (eq (plist-get (appkit-surface-model view) :type)
                    'dm-inbox))
               (funcall callback (list conversation) nil)
+              (chirp-dm-test--drain view)
               (should
                (equal
                 (plist-get
                  (car (plist-get (appkit-surface-model view) :items))
                  :id)
                 "conversation-1"))
-              (with-current-buffer buffer
-                (should-not
-                 (string-match-p "projected later" (buffer-string))))
-              (appkit-loop-run-pass (appkit-surface-loop view))
               (with-current-buffer buffer
                 (should
                  (string-match-p "projected later" (buffer-string)))
@@ -129,9 +125,8 @@
                         '(dm-conversation "conversation-1")))))))
       (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
-(ert-deftest chirp-dm-decryption-updates-canonical-events-before-sync
-    ()
-  "Verified native plaintext should update state and then project through sync."
+(ert-deftest chirp-dm-decryption-projects-verified-canonical-events ()
+  "Verified native plaintext should reach canonical state and presentation."
   (let ((chirp--app nil) buffer owner)
     (unwind-protect
         (save-window-excursion
@@ -165,6 +160,7 @@
                     (with-current-buffer buffer
                       (appkit-current-surface)))
                    (state (appkit-surface-model view))
+                   (_drained (chirp-dm-test--drain view))
                    (decrypted
                     (car (chirp-dm-conversation--events state))))
                 nil nil
@@ -534,12 +530,13 @@
                   (should
                    (equal (appkit-chatbuf-input-string) "reply body"))
                   (chirp-dm-submit))
-                (funcall send-success '(:message-id "21") nil)
+                (funcall send-success
+                         (chirp-dm-test--normalized-event "21" "21" "reply body") nil)
                 (with-current-buffer buffer
                   (appkit-loop-run-pass (appkit-surface-loop view))
                   (should-not (appkit-chatbuf-aux-active-p))
                   (should (equal (appkit-chatbuf-input-string) "")))
-                (should refresh-started-p)))))
+                (should-not refresh-started-p)))))
       (chirp-stop)
       (dolist (buffer buffers)
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
@@ -633,97 +630,70 @@
       (dolist (buffer buffers)
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
-(ert-deftest chirp-dm-send-clears-only-after-ack-and-canonical-refresh
-    ()
-  "Acknowledged sends should merge focused deltas without optimistic rows."
-  (let
-      ((chirp--app nil) buffers send-success refresh-success
-       bridge-success send-owner sent-text)
+(ert-deftest chirp-dm-send-commits-verified-ack-without-focused-reload ()
+  "Acknowledged sends retain other windows, nodes and drafts without a read."
+  (let ((chirp--app nil) buffers success (reads 0) old-node)
     (unwind-protect
         (save-window-excursion
-          (let
-              ((send-request (generate-new-buffer " *chirp-dm-send*"))
-               (refresh-request
-                (generate-new-buffer " *chirp-dm-refresh*")))
-            (setq buffers (list send-request refresh-request))
-            (cl-letf
-                (((symbol-function 'chirp-backend-dm-send-text)
-                  (lambda
-                    (_conversation-id text callback &rest options)
-                    (setq sent-text text send-owner
-                          (plist-get options :owner) send-success
-                          callback)
-                    send-request))
-                 ((symbol-function 'chirp-backend-dm-conversation-data)
-                  (lambda (_conversation-id callback &rest _options)
-                    (setq refresh-success callback)
-                    refresh-request))
-                 ((symbol-function 'chirp-backend-dm-history)
-                  (lambda
-                    (_conversation-id _cursor callback &rest _options)
-                    (setq bridge-success callback)
-                    'bridge-request)))
-              (let*
-                  ((first-event
-                    (chirp-dm-test--normalized-event "20" "20" "old"))
-                   (conversation
+          (cl-letf
+              (((symbol-function 'chirp-backend-dm-send-text)
+                (lambda (_id _text callback &rest _options)
+                  (setq success callback) nil))
+               ((symbol-function 'chirp-backend-dm-conversation-data)
+                (lambda (&rest _args) (cl-incf reads)))
+               ((symbol-function 'chirp-backend-dm-history)
+                (lambda (&rest _args) (cl-incf reads)))
+               ((symbol-function 'chirp-backend-dm-signing-keys)
+                (lambda (_users callback &rest _options)
+                  (funcall callback [] nil)))
+               ((symbol-function 'chirp-xchat-native-decrypt-events)
+                (lambda (_id events _keys)
+                  (should (equal events '("acknowledged-ciphertext")))
+                  '((:sequence-id "21" :message-id "21" :sender-id "42"
+                     :conversation-id "conversation-1" :content-kind text
+                     :text "hello")))))
+            (let* ((conversation
                     (chirp-dm-test--normalized-conversation
-                     first-event))
+                     (chirp-dm-test--normalized-event "20" "20" "old")))
                    (buffer (chirp-dm-conversation-open conversation))
-                   (view
-                    (with-current-buffer buffer
-                      (appkit-current-surface)))
-                   (state (appkit-surface-model view)))
-                (push buffer buffers)
-                (with-current-buffer buffer
-                  (goto-char (point-max)) (insert "hello")
-                  (chirp-dm-submit)
-                  (should-error (chirp-dm-submit) :type 'user-error)
-                  (should (appkit-compose-operation-active-p))
-                  (should
-                   (eq (appkit-compose-operation-kind) 'dm-send))
-                  (should
-                   (equal (appkit-compose-label)
-                          "Sending direct message")))
-                nil nil (should (equal sent-text "hello"))
-                (should
-                 (= (length (chirp-dm-conversation--events state)) 1))
-                (funcall send-success '(:message-id "message-21") nil)
-                (should refresh-success)
-                (with-current-buffer buffer
-                  (appkit-loop-run-pass (appkit-surface-loop view))
-                  (should (equal (appkit-chatbuf-input-string) ""))
-                  (should
-                   (equal (appkit-chatbuf-input-history-elements)
-                          '("hello"))))
-                (let*
-                    ((sent-event
-                      (chirp-dm-test--normalized-event "21" "21"
-                                                       "hello"))
-                     (refreshed
-                      (chirp-dm-test--normalized-conversation
-                       sent-event)))
-                  (funcall refresh-success refreshed nil)
-                  (should bridge-success)
-                  (should
-                   (= (length (chirp-dm-conversation--events state)) 1))
-                  (funcall bridge-success
-                           (list first-event sent-event)
-                           '(("pagination" ("complete" . t))))
-                  (with-current-buffer buffer
-                    (appkit-loop-run-pass (appkit-surface-loop view))
-                    (should (appkit-chat-timeline-node "20"))
-                    (should (appkit-chat-timeline-node "21")))
-                  (should
-                   (= (length (chirp-dm-conversation--events state)) 2))
-                  (should
-                   (=
-                    (cl-count "21"
-                              (chirp-dm-conversation--events state)
-                              :key
-                              (lambda (event) (plist-get event :id))
-                              :test #'equal)
-                    1)))))))
+                   (other (chirp-dm-conversation-open conversation))
+                   (view (with-current-buffer buffer (appkit-current-surface)))
+                   (other-view (with-current-buffer other (appkit-current-surface)))
+                   (state (appkit-surface-model view))
+                   (ack (chirp-dm-test--normalized-event "21" "21" nil)))
+              (setq buffers (list buffer other))
+              (setf (plist-get ack :encrypted-p) t
+                    (plist-get ack :encoded-event) "acknowledged-ciphertext")
+              (with-current-buffer other
+                (appkit-chat-history-window-set "20" "20")
+                (goto-char (point-max)) (insert "unrelated draft"))
+              (with-current-buffer buffer
+                (setq old-node (appkit-chat-timeline-node "20"))
+                (goto-char (point-max)) (insert "hello")
+                (chirp-dm-submit)
+                (should-error (chirp-dm-submit) :type 'user-error)
+                (should (equal (appkit-chatbuf-input-string) "hello"))
+                (should-not (appkit-chat-timeline-node "21")))
+              (funcall success ack nil)
+              (funcall success ack nil)
+              (chirp-dm-test--drain view)
+              (chirp-dm-test--drain other-view)
+              (should (= reads 0))
+              (should (equal (mapcar (lambda (event) (plist-get event :id))
+                                    (chirp-dm-conversation--events state))
+                             '("20" "21")))
+              (with-current-buffer buffer
+                (should (eq old-node (appkit-chat-timeline-node "20")))
+                (should (appkit-chat-timeline-node "21"))
+                (should (string-match-p "hello" (buffer-string)))
+                (should-not (appkit-compose-operation-active-p))
+                (should (equal (appkit-chatbuf-input-string) ""))
+                (should (equal (appkit-chatbuf-input-history-elements) '("hello"))))
+              (with-current-buffer other
+                (should (equal (appkit-chatbuf-input-string) "unrelated draft"))
+                (should (equal (appkit-chat-history-window-first-key) "20"))
+                (should (equal (appkit-chat-history-window-last-key) "20"))
+                (should-not (appkit-chat-timeline-node "21"))))))
       (chirp-stop)
       (dolist (buffer buffers)
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
@@ -814,9 +784,7 @@
                   (if (= calls 1)
                       (funcall (plist-get options :errback)
                                "XChat media upload failed")
-                    (setq send-success callback) request)))
-               ((symbol-function 'chirp-dm-conversation--request)
-                (lambda (&rest _args) nil)))
+                    (setq send-success callback) request))))
             (let*
                 ((conversation
                   (chirp-dm-test--normalized-conversation
@@ -863,7 +831,8 @@
                (equal
                 (plist-get (car (cadr captured)) :attachment-kind)
                 'audio))
-              (funcall send-success '(:message-id "message-21") nil)
+              (funcall send-success
+                       (chirp-dm-test--normalized-event "21" "21" "attachment") nil)
               (with-current-buffer buffer
                 (appkit-loop-run-pass (appkit-surface-loop view))
                 (should-not buffer-read-only)
@@ -924,37 +893,39 @@
       (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest chirp-dm-send-callback-is-inert-after-view-kill ()
-  "A late send acknowledgement should not revive a killed conversation view."
-  (let
-      ((chirp--app nil)
-       (request (generate-new-buffer " *chirp-dm-stale-send*"))
-       success refreshed-p)
+  "Late acknowledgement cannot mutate canonical content or another draft."
+  (let ((chirp--app nil) buffers success)
     (unwind-protect
         (save-window-excursion
           (cl-letf
               (((symbol-function 'chirp-backend-dm-send-text)
-                (lambda
-                  (_conversation-id _text callback &rest _options)
-                  (setq success callback)
-                  request))
-               ((symbol-function 'chirp-backend-dm-conversation-data)
-                (lambda (&rest _args) (setq refreshed-p t))))
-            (let*
-                ((conversation
-                  (chirp-dm-test--normalized-conversation
-                   (chirp-dm-test--normalized-event "20" "20" "old")))
-                 (buffer (chirp-dm-conversation-open conversation))
-                 (view
-                  (with-current-buffer buffer
-                    (appkit-current-surface))))
+                (lambda (_id _text callback &rest _options)
+                  (setq success callback) nil)))
+            (let* ((conversation
+                    (chirp-dm-test--normalized-conversation
+                     (chirp-dm-test--normalized-event "20" "20" "old")))
+                   (buffer (chirp-dm-conversation-open conversation))
+                   (other (chirp-dm-conversation-open conversation))
+                   (other-view (with-current-buffer other (appkit-current-surface))))
+              (setq buffers (list buffer other))
+              (with-current-buffer other
+                (goto-char (point-max)) (insert "other draft"))
               (with-current-buffer buffer
                 (goto-char (point-max)) (insert "late")
                 (chirp-dm-submit))
-              (kill-buffer (appkit-surface-buffer view))
-              (funcall success '(:message-id "late") nil)
-              (should-not refreshed-p))))
+              (kill-buffer buffer)
+              (funcall success (chirp-dm-test--normalized-event "21" "21" "late") nil)
+              (chirp-dm-test--drain other-view)
+              (should (equal (mapcar (lambda (event) (plist-get event :id))
+                                    (chirp-dm-conversation--events
+                                     (appkit-surface-model other-view)))
+                             '("20")))
+              (with-current-buffer other
+                (should (equal (appkit-chatbuf-input-string) "other draft"))
+                (should-not (appkit-chat-timeline-node "21"))))))
       (chirp-stop)
-      (when (buffer-live-p request) (kill-buffer request)))))
+      (dolist (buffer buffers)
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
 (ert-deftest chirp-dm-unknown-senders-are-not-misattributed-to-the-viewer ()
   "Missing participant metadata should render an unknown sender, not `You'."
@@ -1029,7 +1000,7 @@
                   (let ((node (appkit-chat-timeline-node "20")))
                     (goto-char
                      (appkit-chat-timeline-key-position "20"))
-                    (chirp-dm-load-older-messages) nil nil
+                    (chirp-dm-load-older-messages)
                     (funcall callback
                              (list
                               (chirp-dm-test--normalized-event "10"
@@ -1051,8 +1022,6 @@
                                  :recovery-key-events)
                       '((:id "recovery-key-event" :encoded-event
                          "recovery-key-event"))))
-                    (should-not
-                     (string-match-p "older" (buffer-string)))
                     (appkit-loop-run-pass (appkit-surface-loop view))
                     (should (eq node (appkit-chat-timeline-node "20")))
                     (should
@@ -1355,6 +1324,184 @@
                   (should (looking-at "Alice New")))))))
       (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer))
       (dolist (request requests) (when (buffer-live-p request) (kill-buffer request))))))
+
+(ert-deftest chirp-dm-history-handles-bind-to-host-from-retrieval-buffer ()
+  "A disjoint callback must bind its live bridge handle to the DM host."
+  (let ((chirp--app nil) buffer refresh bridge refresh-handle bridge-handle
+        bridge-buffer canceled)
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf
+              (((symbol-function 'chirp-backend-dm-conversation-data)
+                (lambda (_id callback &rest options)
+                  (setq refresh callback
+                        refresh-handle
+                        (appkit-register-handle
+                         (plist-get options :owner) 'function 'refresh
+                         (lambda (value) (push value canceled))))))
+               ((symbol-function 'chirp-backend-dm-history)
+                (lambda (_id _cursor callback &rest options)
+                  (setq bridge callback
+                        bridge-buffer (generate-new-buffer " *dm-bridge*")
+                        bridge-handle
+                        (appkit-register-handle
+                         (plist-get options :owner) 'function 'bridge
+                         (lambda (value) (push value canceled))))
+                  (with-current-buffer bridge-buffer
+                    (setq-local chirp-x--request-handle bridge-handle))
+                  bridge-buffer)))
+            (let* ((old (chirp-dm-test--normalized-event "20" "20" "old"))
+                   (fresh (chirp-dm-test--normalized-event "30" "30" "fresh"))
+                   (conversation (chirp-dm-test--normalized-conversation old)))
+              (setq buffer (chirp-dm-conversation-open conversation))
+              (let ((view (with-current-buffer buffer (appkit-current-surface))))
+                (with-temp-buffer
+                  (chirp-dm-conversation--request view 'refresh)
+                  (should (appkit-handle-alive-p refresh-handle))
+                  (appkit-retire-handle refresh-handle)
+                  (funcall refresh (chirp-dm-test--normalized-conversation fresh) nil)
+                  (should (appkit-handle-alive-p bridge-handle))
+                  (should-not canceled)
+                  (appkit-retire-handle bridge-handle)
+                  (funcall bridge (list old fresh)
+                           '(("pagination" ("complete" . t)))))
+                (chirp-dm-test--drain view)
+                (with-current-buffer buffer
+                  (should-not (appkit-chat-history-loading-p))
+                  (should (appkit-chat-timeline-node "20"))
+                  (should (appkit-chat-timeline-node "30")))
+                (should-not canceled)))))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (when (buffer-live-p bridge-buffer) (kill-buffer bridge-buffer)))))
+
+(ert-deftest chirp-dm-decrypt-coalesces-and-fences-old-native-epochs ()
+  "Old signing callbacks cannot clear newer work or commit to a new epoch."
+  (let ((chirp--app nil) buffer callbacks errors batches)
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf
+              (((symbol-function 'chirp-backend-dm-signing-keys)
+                (lambda (_users callback &rest options)
+                  (setq callbacks (append callbacks (list callback))
+                        errors (append errors (list (plist-get options :errback))))
+                  nil))
+               ((symbol-function 'chirp-xchat-native-decrypt-events)
+                (lambda (_id encoded _keys)
+                  (push encoded batches)
+                  (mapcar
+                   (lambda (id)
+                     (list :sequence-id id :message-id id :sender-id "42"
+                           :conversation-id "conversation-1"
+                           :content-kind 'text :text (concat "verified " id)))
+                   encoded))))
+            (let* ((first (append '(:encrypted-p t :encoded-event "20")
+                                  (chirp-dm-test--normalized-event "20" "20" nil)))
+                   (second (append '(:encrypted-p t :encoded-event "21")
+                                   (chirp-dm-test--normalized-event "21" "21" nil)))
+                   (conversation (chirp-dm-test--normalized-conversation first)))
+              (setf (plist-get conversation :has-more) nil
+                    (plist-get conversation :older-cursor) nil
+                    (chirp--session-xchat-native-epoch (chirp--session)) 1)
+              (setq buffer (chirp-dm-conversation-open conversation))
+              (let* ((view (with-current-buffer buffer (appkit-current-surface)))
+                     (state (appkit-surface-model view)))
+                (chirp-dm-state-accept-live-event second)
+                (chirp-dm-test--drain view)
+                (chirp-dm-conversation--decrypt-view view t)
+                (chirp-dm-conversation--decrypt-view view t)
+                (should (= (length callbacks) 1))
+                (funcall (nth 0 callbacks) [] nil)
+                (should (= (length callbacks) 2))
+                (should (plist-get state :decrypt-loading-p))
+                (funcall (nth 0 errors) "stale error")
+                (funcall (nth 0 callbacks) [] nil)
+                (should (plist-get state :decrypt-loading-p))
+                (setf (chirp--session-xchat-native-epoch (chirp--session)) 2)
+                (chirp-dm-conversation--decrypt-view view t)
+                (should (= (length callbacks) 3))
+                (funcall (nth 1 callbacks) [] nil)
+                (funcall (nth 1 errors) "old native session")
+                (should (plist-get state :decrypt-loading-p))
+                (should (equal batches '(("20"))))
+                (funcall (nth 2 callbacks) [] nil)
+                (chirp-dm-test--drain view)
+                (should-not (plist-get state :decrypt-loading-p))
+                (should (equal (nreverse batches) '(("20") ("21"))))
+                (should
+                 (equal (mapcar (lambda (event) (plist-get event :text))
+                                (chirp-dm-conversation--events state))
+                        '("verified 20" "verified 21")))
+                (with-current-buffer buffer
+                  (should (string-match-p "verified 21" (buffer-string))))))))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest chirp-dm-decrypt-completion-cannot-own-replaced-surface-state ()
+  "A live Surface is not sufficient authority for a captured old decrypt."
+  (let ((chirp--app nil) buffer callback (native-calls 0))
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf
+              (((symbol-function 'chirp-backend-dm-signing-keys)
+                (lambda (_users success &rest _options)
+                  (setq callback success) nil))
+               ((symbol-function 'chirp-xchat-native-decrypt-events)
+                (lambda (&rest _args) (cl-incf native-calls))))
+            (let* ((event (append '(:encrypted-p t :encoded-event "ciphertext")
+                                 (chirp-dm-test--normalized-event "20" "20" nil)))
+                   (conversation (chirp-dm-test--normalized-conversation event)))
+              (setf (plist-get conversation :has-more) nil
+                    (plist-get conversation :older-cursor) nil)
+              (setq buffer (chirp-dm-conversation-open conversation))
+              (let* ((view (with-current-buffer buffer (appkit-current-surface)))
+                     (previous (appkit-surface-model view))
+                     (replacement (copy-sequence previous)))
+                (setf (plist-get replacement :decrypt-operation) nil
+                      (plist-get replacement :decrypt-loading-p) nil)
+                (appkit-surface-send view (list 'chirp-model replacement))
+                (funcall callback [] nil)
+                (should (= native-calls 0))
+                (should-not (plist-get replacement :decrypt-loading-p))
+                (should (plist-get
+                         (car (chirp-dm-conversation--events replacement))
+                         :encrypted-p))))))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest chirp-dm-acknowledged-send-seeds-other-empty-view ()
+  "An owned acknowledgement seeds empty views but clears only its own input."
+  (let ((chirp--app nil) buffers success)
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf
+              (((symbol-function 'chirp-backend-dm-send-text)
+                (lambda (_id _text callback &rest _options)
+                  (setq success callback) nil))
+               ((symbol-function 'chirp-backend-dm-conversation-data)
+                (lambda (&rest _args) (ert-fail "Acknowledgement triggered a reload"))))
+            (let* ((conversation (chirp-dm-test--normalized-conversation))
+                   (_complete (setf (plist-get conversation :has-more) nil))
+                   (sender (chirp-dm-conversation-open conversation))
+                   (other (chirp-dm-conversation-open conversation)))
+              (setq buffers (list sender other))
+              (with-current-buffer other
+                (goto-char (point-max)) (insert "other input"))
+              (with-current-buffer sender
+                (goto-char (point-max)) (insert "acknowledged text")
+                (chirp-dm-submit))
+              (funcall success
+                       (chirp-dm-test--normalized-event
+                        "20" "20" "acknowledged text") nil)
+              (dolist (buffer buffers)
+                (with-current-buffer buffer
+                  (chirp-dm-test--drain (appkit-current-surface))
+                  (should (appkit-chat-timeline-node "20"))
+                  (should (equal (appkit-chatbuf-input-string)
+                                 (if (eq buffer sender) "" "other input"))))))))
+      (chirp-stop)
+      (dolist (buffer buffers)
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
 (provide 'chirp-dm-test)
 

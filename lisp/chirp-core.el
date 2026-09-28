@@ -210,8 +210,7 @@ commands still work, and displays alt text when the backend provides it."
                     (appkit-next
                      :model (chirp--make-session)
                      :render appkit-render-none))
-            :update (lambda (_context _model message)
-                      (error "Unsupported Chirp App message: %S" message))
+            :update #'chirp--app-update
             :shutdown #'chirp--shutdown-app)
            :identity 'chirp)))
   chirp--app)
@@ -219,6 +218,8 @@ commands still work, and displays alt text when the backend provides it."
 (defun chirp--session ()
   "Return state for Chirp's current application session."
   (appkit-app-model (chirp-app)))
+
+(defvar chirp-compose-app)
 
 (defun chirp-stop ()
   "Stop Chirp's runtime and cancel its owned asynchronous work."
@@ -228,8 +229,8 @@ commands still work, and displays alt text when the backend provides it."
         (dolist (buffer (buffer-list))
           (when (buffer-live-p buffer)
             (with-current-buffer buffer
-              (when (and (derived-mode-p 'appkit-chat-compose-mode)
-                         (fboundp 'appkit-compose-operation-active-p)
+              (when (and (derived-mode-p 'chirp-compose-mode)
+                         (eq chirp-compose-app chirp--app)
                          (appkit-compose-operation-active-p))
                 (ignore-errors (appkit-compose-cancel-operation))))))
         (when (appkit-app-live-p chirp--app)
@@ -520,18 +521,30 @@ revisited later."
   (chirp-set-status buffer (format "Loading %s..." title))
   (chirp-begin-request buffer))
 
+(cl-defstruct (chirp--request (:constructor chirp--request-create))
+  "A request's exact Surface and logical view incarnation."
+  surface model)
+
 (defun chirp-begin-request (buffer)
   "Return a new request token for BUFFER."
-  (let ((token (gensym "chirp-request-")))
+  (let* ((surface (chirp--live-projection-view buffer))
+         (token (chirp--request-create
+                 :surface surface
+                 :model (and surface (appkit-surface-model surface)))))
     (with-current-buffer buffer
       (setq-local chirp--request-token token))
     token))
 
 (defun chirp-request-current-p (buffer token)
-  "Return non-nil when TOKEN still matches BUFFER's active request."
-  (and (buffer-live-p buffer)
-       (with-current-buffer buffer
-         (eq chirp--request-token token))))
+  "Return non-nil when TOKEN still owns BUFFER's exact view and request."
+  (and (chirp--request-p token)
+       (buffer-live-p buffer)
+       (with-current-buffer buffer (eq chirp--request-token token))
+       (let ((surface (chirp--request-surface token)))
+         (or (null surface)
+             (and (appkit-surface-live-p surface)
+                  (eq (appkit-surface-model surface)
+                      (chirp--request-model token)))))))
 
 (defun chirp-view-state-token-current-p
     (view state token &optional property)
@@ -962,20 +975,8 @@ revisited later."
 
 (defun chirp--expand-tweet (tweet-id)
   "Expand TWEET-ID inline and update the current view."
-  (if-let*
-      ((view (chirp--live-projection-view))
-       (state (appkit-surface-model view)))
-      (let
-          ((table
-            (or (plist-get state :expanded-tweet-ids)
-                (setf (plist-get state :expanded-tweet-ids)
-                      (make-hash-table :test #'equal)))))
-        (puthash tweet-id t table)
-        (appkit-surface-post view
-                             (appkit-projection-change-create
-                              :full-p t
-                              :frame-p t
-                              :position 'preserve)))
+  (if-let* ((view (chirp--live-projection-view)))
+      (appkit-surface-post view (list 'chirp-expand-tweet tweet-id))
     (unless (functionp chirp--rerender-function)
       (user-error "This Chirp view cannot expand tweet content"))
     (unless (hash-table-p chirp--expanded-tweet-ids)
@@ -1675,11 +1676,10 @@ When MAX-COUNT is non-nil, return at most that many images."
   "Return non-nil when quoted TWEET already carries full fetched detail."
   (plist-get tweet :chirp-enriched-p))
 
-(defun chirp--dispatch-quoted-tweet-callbacks (tweet-id payload)
-  "Run pending callbacks for TWEET-ID with PAYLOAD."
-  (let* ((pending (chirp--session-quoted-tweet-pending (chirp--session)))
-         (callbacks (prog1 (gethash tweet-id pending)
-                      (remhash tweet-id pending))))
+(defun chirp--dispatch-quoted-tweet-callbacks (pending tweet-id payload)
+  "Run callbacks owned by PENDING for TWEET-ID with PAYLOAD."
+  (let ((callbacks (prog1 (gethash tweet-id pending)
+                     (remhash tweet-id pending))))
     (dolist (callback callbacks)
       (when callback
         (condition-case err
@@ -1711,28 +1711,39 @@ When MAX-COUNT is non-nil, return at most that many images."
       (chirp-backend-tweet
        tweet-id
        (lambda (tweet _envelope)
+         (when tweet (setf (plist-get tweet :chirp-enriched-p) t))
          (puthash tweet-id tweet cache)
-         (chirp--dispatch-quoted-tweet-callbacks tweet-id tweet))
+         (chirp--dispatch-quoted-tweet-callbacks pending tweet-id tweet))
        (lambda (_message)
          (puthash tweet-id chirp--quoted-tweet-fetch-failed cache)
-         (chirp--dispatch-quoted-tweet-callbacks tweet-id nil)))))))
+         (chirp--dispatch-quoted-tweet-callbacks pending tweet-id nil)))))))
+
+(defun chirp--apply-quoted-tweet (model tweet preview full)
+  "Replace PREVIEW with FULL only while TWEET still belongs to MODEL."
+  (when (and (or (memq tweet (plist-get model :items))
+                 (memq tweet (plist-get model :pending-new-items)))
+             (not (plist-get tweet :deleted-p))
+             (or (eq (plist-get tweet :quoted-tweet) preview)
+                 (eq (plist-get tweet :quoted-tweet) full)))
+    (setf (plist-get tweet :quoted-tweet) full)
+    t))
 
 (defun chirp-enrich-quoted-tweets (tweets buffer)
-  "Asynchronously enrich quoted tweets inside TWEETS and rerender BUFFER."
-  (dolist (tweet tweets)
-    (when-let* ((quoted (plist-get tweet :quoted-tweet))
-                (quoted-id (plist-get quoted :id))
-                ((not (chirp-quoted-tweet-enriched-p quoted))))
-      (chirp--request-quoted-tweet
-       quoted-id
-       (lambda (full-quoted)
-         (when (and full-quoted
-                    (buffer-live-p buffer))
-           (plist-put full-quoted :chirp-enriched-p t)
-           (plist-put tweet :quoted-tweet full-quoted)
-           (chirp-media-prefetch-tweet full-quoted buffer)
-           (chirp-request-tweet-rerender
-            (plist-get tweet :id) buffer)))))))
+  "Enrich TWEETS through BUFFER's captured Surface and committed model."
+  (when-let* ((view (chirp--live-projection-view buffer))
+              (model (appkit-surface-model view))
+              (app (appkit-surface-app view)))
+    (dolist (tweet tweets)
+      (when-let* ((quoted (plist-get tweet :quoted-tweet))
+                  (quoted-id (plist-get quoted :id))
+                  ((not (chirp-quoted-tweet-enriched-p quoted))))
+        (chirp--request-quoted-tweet
+         quoted-id
+         (lambda (full)
+           (when (and full (appkit-surface-live-p view))
+             (let ((result (list 'chirp-quote-loaded model tweet quoted full)))
+               (appkit-app-send app result)
+               (appkit-surface-post view result)))))))))
 
 ;;; Tweet State
 
@@ -1799,15 +1810,13 @@ Retweets use their wrapper ID so the wrapper and original remain distinct."
 (defun chirp-set-tweet-state-override (tweet-id prop value)
   "Store VALUE as local PROP override for TWEET-ID."
   (when tweet-id
-    (let* ((table (chirp--session-tweet-state-overrides (chirp--session)))
-           (state (copy-sequence (gethash tweet-id table))))
-      (setq state (plist-put state prop value))
-      (puthash tweet-id state table))))
+    (appkit-app-send
+     (chirp-app) (list 'chirp-tweet-state-override tweet-id prop value))))
 
 (defun chirp-clear-tweet-state-overrides (tweet-id)
   "Clear local state overrides for TWEET-ID."
   (when tweet-id
-    (remhash tweet-id (chirp--session-tweet-state-overrides (chirp--session)))))
+    (appkit-app-send (chirp-app) (list 'chirp-clear-tweet-overrides tweet-id))))
 
 (defun chirp-apply-tweet-state-overrides (tweet)
   "Apply current session state overrides to normalized TWEET and return it."
@@ -1867,59 +1876,141 @@ Retweets use their wrapper ID so the wrapper and original remain distinct."
     (when extra-state (cl-pushnew extra-state states :test #'eq))
     states))
 
-(defun chirp-update-tweet-by-id (buffer tweet-id fn &optional rerender)
-  "Apply FN to every cached tweet matching TWEET-ID for BUFFER.
+(defun chirp--tweet-resources (model tweet-id)
+  "Return visible row dependencies owning TWEET-ID in MODEL."
+  (let (resources)
+    (dolist (tweet (plist-get model :items))
+      (when (chirp--update-tweet-tree tweet tweet-id #'ignore)
+        (cl-pushnew (list 'tweet (plist-get tweet :id))
+                    resources :test #'equal)))
+    resources))
 
-Quoted descendants are included.  When RERENDER is non-nil, request targeted
-updates for the owning top-level rows visible in BUFFER."
-  (let ((active-state (chirp--appkit-timeline-state buffer))
-        changed-p
-        dirty-ids)
-    (dolist (state (chirp--primary-feed-state-values active-state))
-      (dolist (slot '(:items :pending-new-items))
-        (dolist (tweet (plist-get state slot))
-          (when (chirp--update-tweet-tree tweet tweet-id fn)
-            (setq changed-p t)
-            (when (and (eq state active-state) (eq slot :items))
-              (cl-pushnew
-               (plist-get tweet :id) dirty-ids :test #'equal))))))
-    (unless active-state
-      (chirp--map-buffer-tweets
-       buffer
-       (lambda (tweet)
-         (when (chirp--update-tweet-tree tweet tweet-id fn)
-           (setq changed-p t)
-           (cl-pushnew (plist-get tweet :id) dirty-ids :test #'equal)))))
-    (when rerender
-      (dolist (dirty-id dirty-ids)
-        (chirp-request-tweet-rerender dirty-id buffer)))
-    changed-p))
-
-(defun chirp--remove-tweet-from-primary-feeds (buffer tweet-id)
-  "Remove TWEET-ID from retained primary feeds represented by BUFFER.\n\nReturn non-nil when BUFFER currently projects a primary feed."
-  (let
-      ((active-state (chirp--appkit-timeline-state buffer))
-       active-changed-p)
-    (dolist (state (chirp--primary-feed-state-values active-state))
-      (dolist (slot '(:items :pending-new-items))
-        (let*
-            ((items (plist-get state slot))
-             (remaining
+(defun chirp--apply-tweet-result (model message)
+  "Apply confirmed tweet MESSAGE to MODEL's retained items."
+  (let* ((delete-p (eq (car message) 'chirp-tweet-delete))
+         (tweet-id (nth 1 message))
+         (key (if delete-p :deleted-p (nth 2 message)))
+         (value (if delete-p t (nth 3 message)))
+         (count-key (nth 4 message))
+         (remove-p
+          (or delete-p
+              (and (not value)
+                   (pcase key
+                     (:bookmarked-p
+                      (eq (plist-get (plist-get model :query) :kind)
+                          'bookmarks))
+                     (:liked-p
+                      (or (eq (plist-get model :mode) 'likes)
+                          (eq (plist-get (plist-get model :query) :kind)
+                              'likes))))))))
+    (dolist (slot '(:items :pending-new-items :all-items))
+      (dolist (tweet (plist-get model slot))
+        (chirp--update-tweet-tree
+         tweet tweet-id
+         (lambda (entry)
+           (let ((previous (chirp-boolean-value (plist-get entry key))))
+             (setf (plist-get entry key) value)
+             (when (and count-key (not (eq previous value)))
+               (setf (plist-get entry count-key)
+                     (chirp-adjust-count
+                      (plist-get entry count-key) (if value 1 -1))))))))
+      (when remove-p
+        (setf (plist-get model slot)
               (cl-remove-if
                (lambda (tweet) (equal (plist-get tweet :id) tweet-id))
-               items)))
-          (unless (= (length items) (length remaining))
-            (setf (plist-get state slot) remaining)
-            (when (eq state active-state) (setq active-changed-p t))))))
-    (when (and active-changed-p (buffer-live-p buffer))
-      (with-current-buffer buffer
-        (when-let* ((view (appkit-current-surface)))
-          (appkit-surface-post view
-                               (appkit-projection-change-create
-                                :full-p t
-                                :frame-p t
-                                :position 'preserve)))))
-    (and active-state t)))
+               (plist-get model slot)))))))
+
+(defun chirp--tweet-result-update (model message)
+  "Commit confirmed tweet MESSAGE and invalidate only affected MODEL rows."
+  (if (not (memq (plist-get model :type) '(timeline collection profile thread)))
+      (appkit-next-reject 'no-tweets)
+    (let ((resources (chirp--tweet-resources model (cadr message))))
+      (chirp--apply-tweet-result model message)
+      (appkit-next
+       :model model
+       :render (appkit-projection-change-create
+                :full-p t :frame-p t :resources resources
+                :position 'preserve)))))
+
+(defun chirp--posts-created-eligible-p (model)
+  "Return non-nil when MODEL can classify newly published tweets locally."
+  (or (eq (plist-get model :type) 'thread)
+      (and (eq (plist-get model :type) 'profile)
+           (plist-get (plist-get model :user) :self-p)
+           (memq (plist-get model :mode) '(posts replies)))))
+
+(defun chirp--posts-created-update (model expected tweets)
+  "Merge confirmed TWEETS only into the unchanged, eligible EXPECTED view."
+  (if (not (and (eq model expected) (chirp--posts-created-eligible-p model)))
+      (appkit-next-reject 'unrelated-publication)
+    (let* ((thread-p (eq (plist-get model :type) 'thread))
+           (items (plist-get model :items))
+           (handle (plist-get (plist-get model :user) :handle))
+           accepted)
+      (dolist (tweet tweets)
+        (when
+            (and (chirp-tweet-visible-p tweet)
+                 (if thread-p
+                     (let ((parent (plist-get tweet :reply-to-id)))
+                       (and parent
+                            (or (equal parent
+                                       (plist-get (plist-get model :query) :focus-id))
+                                (cl-find parent items
+                                         :key (lambda (item) (plist-get item :id))
+                                         :test #'equal)
+                                (cl-find parent accepted
+                                         :key (lambda (item) (plist-get item :id))
+                                         :test #'equal))))
+                   (and handle (plist-get tweet :author-handle)
+                        (string-equal
+                         (downcase handle)
+                         (downcase (plist-get tweet :author-handle)))
+                        (or (eq (plist-get model :mode) 'replies)
+                            (not (plist-get tweet :reply-to-id))))))
+          (push tweet accepted)))
+      (if (null accepted)
+          (appkit-next-reject 'unrelated-publication)
+        (setf (plist-get model :items)
+              (if thread-p
+                  (chirp-append-unique-tweets items (reverse accepted))
+                (chirp-append-unique-tweets accepted items)))
+        (when (and thread-p (plist-member model :all-items))
+          (setf (plist-get model :all-items)
+                (chirp-append-unique-tweets
+                 (plist-get model :all-items) (reverse accepted))))
+        (appkit-next
+         :model model
+         :render (appkit-projection-change-create
+                  :full-p t :frame-p t :position 'preserve))))))
+
+(defun chirp--app-update (context session message)
+  "Commit MESSAGE to its owning SESSION, never a successor application."
+  (if (eq (car-safe message) 'chirp-dm-state)
+      (chirp-dm-state--app-update context session message)
+    (pcase (car-safe message)
+      ('chirp-invalidate-cache
+       (clrhash (chirp--session-backend-read-cache session)))
+      ('chirp-quote-loaded
+       (let ((state (nth 1 message)))
+         (when (memq state (hash-table-values
+                           (chirp--session-primary-feed-states session)))
+           (chirp--apply-quoted-tweet
+            state (nth 2 message) (nth 3 message) (nth 4 message)))))
+      ('chirp-clear-tweet-overrides
+       (remhash (cadr message) (chirp--session-tweet-state-overrides session)))
+      ((or 'chirp-tweet-state 'chirp-tweet-delete 'chirp-tweet-state-override)
+       (let* ((table (chirp--session-tweet-state-overrides session))
+              (tweet-id (nth 1 message))
+              (delete-p (eq (car message) 'chirp-tweet-delete))
+              (key (if delete-p :deleted-p (nth 2 message)))
+              (value (if delete-p t (nth 3 message))))
+         (puthash tweet-id (plist-put (gethash tweet-id table) key value) table)
+         (unless (eq (car message) 'chirp-tweet-state-override)
+           (maphash
+            (lambda (_kind state) (chirp--apply-tweet-result state message))
+            (chirp--session-primary-feed-states session)))))
+      (_ (error "Unsupported Chirp App message: %S" message)))
+    (appkit-next :model session :render appkit-render-none)))
 
 ;;; Tweet Fields
 
@@ -2758,6 +2849,7 @@ over the card's `t.co` permalink."
             :article-title article-title
             :article-text article-text
             :promoted-p promoted-p
+            :deleted-p nil
             :media media
             :retweeted-p retweeted-p
             :liked-p liked-p
@@ -2793,8 +2885,9 @@ over the card's `t.co` permalink."
 
 (defun chirp-tweet-visible-p (tweet)
   "Return non-nil when TWEET should be shown in Chirp."
-  (or (not chirp-hide-promoted-posts)
-      (not (plist-get tweet :promoted-p))))
+  (and (not (plist-get tweet :deleted-p))
+       (or (not chirp-hide-promoted-posts)
+           (not (plist-get tweet :promoted-p)))))
 
 (defun chirp--top-level-tweets-from-x (value)
   "Return visible Chirp tweets decoded from top-level X VALUE."
@@ -2849,6 +2942,36 @@ over the card's `t.co` permalink."
         (chirp-profile--follow-update
          model (nth 1 message) (nth 2 message) (nth 3 message))
       (appkit-next-reject 'no-user-summary)))
+   ((memq (car-safe message) '(chirp-tweet-state chirp-tweet-delete))
+    (chirp--tweet-result-update model message))
+   ((eq (car-safe message) 'chirp-quote-loaded)
+    (let ((tweet (nth 2 message)))
+      (if (and (eq model (nth 1 message))
+               (chirp--apply-quoted-tweet
+                model tweet (nth 3 message) (nth 4 message)))
+          (appkit-next
+           :model model
+           :render (appkit-projection-change-create
+                    :resources (list (list 'tweet (plist-get tweet :id)))
+                    :position 'preserve))
+        (appkit-next-reject 'stale-quoted-tweet))))
+   ((eq (car-safe message) 'chirp-posts-created)
+    (chirp--posts-created-update model (nth 1 message) (nth 2 message)))
+   ((eq (car-safe message) 'chirp-dm-conversation)
+    (chirp-dm-conversation--update context model message))
+   ((eq (car-safe message) 'chirp-dm-inbox)
+    (chirp-dm-inbox--update context model message))
+   ((eq (car-safe message) 'chirp-expand-tweet)
+    (let ((tweet-id (cadr message))
+          (table (or (plist-get model :expanded-tweet-ids)
+                     (setf (plist-get model :expanded-tweet-ids)
+                           (make-hash-table :test #'equal)))))
+      (puthash tweet-id t table)
+      (appkit-next
+       :model model
+       :render (appkit-projection-change-create
+                :resources (chirp--tweet-resources model tweet-id)
+                :position 'preserve))))
    (t (error "Unsupported Chirp Surface message: %S" message))))
 
 (defun chirp--geometry-changed (surface _width)

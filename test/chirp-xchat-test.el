@@ -775,6 +775,199 @@
       (when (file-exists-p file)
         (delete-file file)))))
 
+(defun chirp-xchat-test--cancel-attachment-send (pause)
+  "Cancel a staged send at PAUSE using real Surface and transport handles."
+  (let* ((chirp--app nil)
+         (source (make-temp-file "chirp-xchat-source-" nil ".jpg" "source"))
+         (staged (list (make-temp-file "chirp-xchat-stage-" nil nil "encrypted-1")
+                       (make-temp-file "chirp-xchat-stage-" nil nil "encrypted-2")))
+         (pending-stages (copy-sequence staged))
+         (stage-index 0)
+         view workflow requests canceled released acknowledged failures
+         unrelated-canceled history-handle media-handle)
+    (cl-labels
+        ((complete (request)
+           (appkit-retire-handle (plist-get request :handle))
+           (unwind-protect
+               (funcall (plist-get request :callback)
+                        (plist-get request :payload))
+             (when (buffer-live-p (plist-get request :buffer))
+               (kill-buffer (plist-get request :buffer)))))
+         (request (kind payload callback options)
+           (let* ((buffer (generate-new-buffer " *chirp-xchat-child*"))
+                  (failure (plist-get options :errback))
+                  (handle
+                   (appkit-register-handle
+                    (plist-get options :owner) 'function
+                    (list :buffer buffer :method 'post
+                          :owner (plist-get options :owner)
+                          :settle-on-cancel t
+                          :cancel-message (plist-get options :cancel-message)
+                          :errback failure)
+                    (lambda (transport)
+                      (push kind canceled)
+                      (chirp-x--cancel-request transport))))
+                  (record (list :kind kind :buffer buffer :handle handle
+                                :callback callback :failure failure
+                                :payload payload)))
+             (with-current-buffer buffer
+               (setq-local chirp-x--request-handle handle))
+             (push record requests)
+             (cond
+              ((and (eq kind 'send) (eq pause 'send-handoff))
+               ;; Cancellation can precede the constructor returning its
+               ;; transport.  The late handoff must still cancel this child.
+               (appkit-cancel-handle workflow))
+              ((or (eq kind pause)
+                   (and (eq pause 'send-handoff)
+                        (eq kind 'upload) (null workflow))))
+              (t (complete record)))
+             buffer)))
+      (unwind-protect
+          (progn
+            (setf (chirp--session-xchat-user-id (chirp--session)) "42")
+            (setq view
+                  (chirp-open-projection-view
+                   :id (make-symbol "attachment-owner")
+                   :title "Attachment owner"
+                   :state (list :type 'test)
+                   :setup #'ignore
+                   :render-function
+                   (lambda (&rest _args) (appkit-render-result-create))))
+            (setq history-handle
+                  (appkit-register-handle
+                   view 'function
+                   (lambda () (push 'history unrelated-canceled)))
+                  media-handle
+                  (appkit-register-handle
+                   view 'function
+                   (lambda () (push 'media unrelated-canceled))))
+            (cl-letf
+                (((symbol-function 'chirp-xchat-native-prepare-media-file)
+                  (lambda (_conversation-id _source)
+                    (list :stage-id (cl-incf stage-index)
+                          :encrypted-file (pop pending-stages)
+                          :encrypted-bytes 11
+                          :plaintext-bytes 6
+                          :filename "photo.jpg" :media-type 1
+                          :key-version "7" :width 40 :height 20)))
+                 ((symbol-function 'chirp-xchat-native-release-media-stage)
+                  (lambda (stage-id)
+                    (push stage-id released)
+                    (delete-file (nth (1- stage-id) staged))))
+                 ((symbol-function 'chirp-xchat-native-prepare-text)
+                  (lambda (_conversation-id _text &optional _attachments)
+                    '(:message-id "01234567-89ab-cdef-0123-456789abcdef"
+                      :encoded-message-create-event "YXR0YWNobWVudA=="
+                      :encoded-message-event-signature "c2ln")))
+                 ((symbol-function 'chirp-x-graphql-request)
+                  (lambda (operation variables callback &rest options)
+                    (cond
+                     ((eq operation chirp-x--chat-media-initialize-operation)
+                      (request
+                       'initialize
+                       '(("data" .
+                          (("xchat_initialize_media_upload" .
+                            (("media_hash_key" . "media_hash")
+                             ("resume_id" . "123"))))))
+                       callback options))
+                     ((eq operation chirp-x--chat-media-finalize-operation)
+                      (request
+                       'finalize
+                       '(("data" .
+                          (("xchat_finalize_media_upload" .
+                            (("upload_error"))))))
+                       callback options))
+                     (t
+                      (request
+                       'send
+                       `(("data" .
+                          (("xchat_send_create_message_event" .
+                            (("__typename" . "XChatSendMessageCreateEventResponse")
+                             ("encoded_message_event" .
+                              ,(chirp-dm-test--event
+                                :sequence "30"
+                                :message-id (cdr (assoc "message_id" variables))
+                                :sender-id "42" :conversation-id "42:99"
+                                :text "" :key-version "1"
+                                :attachment-count 2)))))))
+                       callback options)))))
+                 ((symbol-function 'chirp-x--request)
+                  (lambda (_url _method callback &rest options)
+                    (request 'upload (make-hash-table :test #'equal)
+                             callback options))))
+              (setq workflow
+                    (chirp-backend-dm-send-attachments
+                     "42-99" ""
+                     (list (list :path source :attachment-kind 'photo)
+                           (list :path source :attachment-kind 'photo))
+                     (lambda (event _envelope) (push event acknowledged))
+                     :errback (lambda (message) (push message failures))
+                     :owner view))
+              (should (appkit-handle-p workflow))
+              (should (appkit-handle-alive-p workflow))
+              (should-not failures)
+              (if (eq pause 'send-handoff)
+                  (complete (cl-find 'upload requests
+                                     :key (lambda (item)
+                                            (plist-get item :kind))))
+                (appkit-cancel-handle workflow))
+              (should-not (appkit-handle-alive-p workflow))
+              (should (equal canceled
+                             (list (if (eq pause 'upload) 'upload 'send))))
+              (should (equal (sort (copy-sequence released) #'<) '(1 2)))
+              (should-not (cl-some #'file-exists-p staged))
+              (should (= (length failures) 1))
+              (if (eq pause 'upload)
+                  (progn
+                    (should-not (string-prefix-p "X write outcome is unknown"
+                                                (car failures)))
+                    (should-not (cl-find 'send requests
+                                         :key (lambda (item)
+                                                (plist-get item :kind)))))
+                (should (string-prefix-p "X write outcome is unknown"
+                                         (car failures)))
+                (should (= (cl-count 'send requests
+                                     :key (lambda (item)
+                                            (plist-get item :kind)))
+                           1)))
+              (let ((request-count (length requests)))
+                ;; Even an already-queued success or error cannot reenter the
+                ;; workflow after cancellation, release twice, or send again.
+                (dolist (item (copy-sequence requests))
+                  (funcall (plist-get item :callback) (plist-get item :payload))
+                  (funcall (plist-get item :failure) "late failure")
+                  (should-not (appkit-handle-alive-p
+                               (plist-get item :handle))))
+                (appkit-cancel-handle workflow)
+                (should (= (length requests) request-count)))
+              (should-not acknowledged)
+              (should (= (length failures) 1))
+              (should (equal (sort (copy-sequence released) #'<) '(1 2)))
+              (should-not unrelated-canceled)
+              (should (appkit-handle-alive-p history-handle))
+              (should (appkit-handle-alive-p media-handle))))
+        (chirp-stop)
+        (when (and view (buffer-live-p (appkit-surface-buffer view)))
+          (kill-buffer (appkit-surface-buffer view)))
+        (dolist (item requests)
+          (when (buffer-live-p (plist-get item :buffer))
+            (kill-buffer (plist-get item :buffer))))
+        (dolist (file (cons source staged))
+          (when (file-exists-p file) (delete-file file)))))))
+
+(ert-deftest chirp-backend-xchat-attachment-cancel-stops-paused-upload ()
+  "Canceling a staged send must stop only its active upload and release stages."
+  (chirp-xchat-test--cancel-attachment-send 'upload))
+
+(ert-deftest chirp-backend-xchat-attachment-cancel-stops-paused-send ()
+  "The stable send handle must reach the final write and preserve uncertainty."
+  (chirp-xchat-test--cancel-attachment-send 'send))
+
+(ert-deftest chirp-backend-xchat-attachment-cancel-during-send-handoff ()
+  "A write returned after cancellation must not escape operation ownership."
+  (chirp-xchat-test--cancel-attachment-send 'send-handoff))
+
 (ert-deftest chirp-backend-xchat-attachment-rejects-content-kind-mismatch ()
   "Typed media should fail before upload when bytes do not match its kind."
   (let ((chirp--app nil)

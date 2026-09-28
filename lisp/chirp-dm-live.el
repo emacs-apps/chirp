@@ -75,32 +75,12 @@
     (chirp-dm-live--cancel-keepalive service)
     t))
 
-(defun chirp-dm-live--matching-conversation-view
-    (service conversation)
-  "Return one live view in SERVICE for canonical CONVERSATION."
-  (let (matched)
-    (dolist
-        (view
-         (appkit-app--surface-snapshot
-          (chirp-dm-live--service-app service)))
-      (progn
-        (when (and (null matched) (appkit-surface-live-p view))
-          (let ((state (appkit-surface-model view)))
-            (when
-                (and (eq (plist-get state :type) 'dm-conversation)
-                     (eq (plist-get state :conversation) conversation))
-              (setq matched view))))))
-    matched))
-
 (defun chirp-dm-live--accept-event (service event)
-  "Merge normalized live EVENT through canonical SERVICE state."
-  (if-let* ((conversation (chirp-dm-state-accept-live-event event)))
-      (when-let* ((view
-                   (chirp-dm-live--matching-conversation-view
-                    service conversation)))
-        (chirp-dm-conversation-accept-live-event view conversation))
-    (setf (chirp-dm-live--service-pending-inbox-p service) t)
-    (chirp-dm-live--dispatch-fallback service)))
+  "Commit normalized live EVENT under SERVICE's original App."
+  (let ((chirp--app (chirp-dm-live--service-app service)))
+    (unless (chirp-dm-state-accept-live-event event)
+      (setf (chirp-dm-live--service-pending-inbox-p service) t)
+      (chirp-dm-live--dispatch-fallback service))))
 
 (defun chirp-dm-live--collect-fallback (service)
   "Collect current DM surfaces into SERVICE's fallback refresh set."

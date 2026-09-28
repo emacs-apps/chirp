@@ -12,6 +12,7 @@
 (require 'chirp-render)
 (require 'chirp-actions)
 (require 'chirp-thread)
+(require 'chirp-timeline)
 
 (defun chirp-test--face-member-p (face value)
   "Return non-nil when FACE appears in text property VALUE."
@@ -554,46 +555,42 @@
         (should-not (string-match-p "https://t\\.co/demo" rendered))))))
 
 (ert-deftest chirp-open-at-point-expands-only-from-show-more ()
-  "RET should expand Show more while tweet-body RET opens the thread."
-  (let ((tweet (chirp-test--sample-article-tweet))
-        opened-thread
-        (rerender-count 0))
-    (with-temp-buffer
-      (chirp-view-mode)
-      (cl-letf (((symbol-function 'chirp-media-avatar-image)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'chirp-media-thumbnail-image)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'chirp-thread-open-tweet)
-                 (lambda (tweet)
-                   (setq opened-thread (plist-get tweet :id)))))
-        (let ((inhibit-read-only t))
-          (chirp-render-insert-tweet tweet))
-        (setq-local
-         chirp--rerender-function
-         (lambda ()
-           (cl-incf rerender-count)
-           (let ((inhibit-read-only t))
-             (erase-buffer)
-             (chirp-render-insert-tweet tweet))))
-        (goto-char (point-min))
-        (search-forward "Read this")
-        (goto-char (match-beginning 0))
-        (chirp-open-at-point)
-        (should (equal opened-thread "123"))
-        (should (zerop rerender-count))
-        (setq opened-thread nil)
-        (goto-char (point-min))
-        (should (search-forward "Show more" nil t))
-        (goto-char (match-beginning 0))
-        (should (equal (get-text-property (point) 'chirp-expand-tweet-id)
-                       "123"))
-        (chirp-open-at-point)
-        (should (= rerender-count 1))
-        (should-not opened-thread)
-        (should (gethash "123" chirp--expanded-tweet-ids))
-        (should (string-match-p "Second paragraph" (buffer-string)))
-        (should-not (string-match-p "Show more" (buffer-string)))))))
+  "Expansion changes the actual projected row, not just its model flag."
+  (let ((chirp--app nil)
+        (chirp-show-avatars nil)
+        (chirp-show-tweet-media nil)
+        (tweet (chirp-test--sample-article-tweet))
+        buffer opened-thread)
+    (unwind-protect
+        (let* ((state (list :type 'collection :query '(:kind bookmarks)
+                            :items (list tweet) :title "Articles"
+                            :status '(:phase idle)
+                            :expanded-tweet-ids (make-hash-table :test #'equal)))
+               (view (chirp-open-projection-view
+                      :id 'article-test :title "Articles" :state state
+                      :render-function #'chirp-timeline--sync
+                      :printer #'chirp-render-print-tweet-row)))
+          (setq buffer (appkit-surface-buffer view))
+          (cl-letf (((symbol-function 'chirp-thread-open-tweet)
+                     (lambda (item) (setq opened-thread (plist-get item :id)))))
+            (with-current-buffer buffer
+              (goto-char (point-min))
+              (search-forward "Read this")
+              (goto-char (match-beginning 0))
+              (chirp-open-at-point)
+              (should (equal opened-thread "123"))
+              (should-not (string-match-p "Second paragraph" (buffer-string)))
+              (setq opened-thread nil)
+              (goto-char (point-min))
+              (search-forward "Show more")
+              (goto-char (match-beginning 0))
+              (chirp-open-at-point)
+              (appkit-loop-run-pass (appkit-surface-loop view))
+              (should-not opened-thread)
+              (should (string-match-p "Second paragraph" (buffer-string)))
+              (should-not (string-match-p "Show more" (buffer-string))))))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest chirp-open-entry-at-point-bypasses-local-actions ()
   "Entry-open should ignore a Show more action and open the tweet thread."
@@ -2476,46 +2473,66 @@
       (should-error (chirp-previous-entry)
                     :type 'user-error))))
 
-(ert-deftest chirp-enrich-quoted-tweets-upgrades-preview-and-prefetches-media ()
-  "Quoted tweet enrichment should replace the preview and kick media prefetch."
+(ert-deftest chirp-enrich-quoted-tweets-updates-only-current-model ()
+  "Quoted detail appears locally, but cannot replace a successor view's data."
   (let ((chirp--app nil)
+        (chirp-show-avatars nil)
+        (chirp-show-tweet-media nil)
         (tweet (chirp-test--sample-quoted-tweet))
-        rerendered-buffer
-        prefetched-media-url)
+        buffer callback)
     (unwind-protect
-        (let ((buffer (generate-new-buffer " *chirp-quote-enrich-test*")))
-          (with-current-buffer buffer
-            (chirp-view-mode))
-          (cl-letf (((symbol-function 'chirp-backend-tweet)
-                     (lambda (_tweet-id callback &optional _errback)
-                       (funcall
-                        callback
-                        (chirp--tweet-from-x
-                         '(("id" . "456")
-                           ("text" . "Quoted body text with image")
-                           ("author" . (("screenName" . "bob")
-                                        ("name" . "Bob")))
-                           ("media" . ((("type" . "photo")
-                                        ("url" . "https://example.com/quoted.jpg"))))))
-                        nil)))
-                    ((symbol-function 'chirp-request-tweet-rerender)
-                     (lambda (_tweet-id target &optional _delay)
-                       (setq rerendered-buffer target)))
-                    ((symbol-function 'chirp-media-prefetch-tweet)
-                     (lambda (quoted _buffer)
-                       (setq prefetched-media-url
-                             (plist-get (car (plist-get quoted :media)) :url)))))
-            (chirp-enrich-quoted-tweets (list tweet) buffer))
-          (let ((quoted (plist-get tweet :quoted-tweet)))
-            (should (plist-get quoted :chirp-enriched-p))
-            (should (equal rerendered-buffer buffer))
-            (should (equal prefetched-media-url "https://example.com/quoted.jpg"))
-            (should (equal (plist-get (car (plist-get quoted :media)) :url)
-                           "https://example.com/quoted.jpg"))))
+        (cl-letf (((symbol-function 'chirp-backend-tweet)
+                   (lambda (_id success &optional _error) (setq callback success))))
+          (let* ((state (list :type 'collection :query '(:kind bookmarks)
+                              :items (list tweet) :status '(:phase idle)))
+                 (view (chirp-open-projection-view
+                        :id 'quote-test :title "Quotes" :state state
+                        :render-function #'chirp-timeline--sync
+                        :printer #'chirp-render-print-tweet-row)))
+            (setq buffer (appkit-surface-buffer view))
+            (chirp-enrich-quoted-tweets (list tweet) buffer)
+            (funcall callback
+                     (list :kind 'tweet :id "456" :text "Complete quoted body")
+                     nil)
+            (appkit-loop-run-pass (appkit-surface-loop view))
+            (with-current-buffer buffer
+              (should (string-match-p "Complete quoted body" (buffer-string))))
+            (clrhash (chirp--session-quoted-tweet-cache (chirp--session)))
+            (setf (plist-get (plist-get tweet :quoted-tweet) :chirp-enriched-p) nil)
+            (chirp-enrich-quoted-tweets (list tweet) buffer)
+            (let* ((replacement (copy-tree state))
+                   (new-tweet (car (plist-get replacement :items))))
+              (setf (plist-get (plist-get new-tweet :quoted-tweet) :text)
+                    "Replacement quoted body")
+              (appkit-surface-send view (list 'chirp-model replacement))
+              (funcall callback
+                       (list :kind 'tweet :id "456" :text "Obsolete quoted body")
+                       nil)
+              (appkit-loop-run-pass (appkit-surface-loop view))
+              (with-current-buffer buffer
+                (should (string-match-p "Replacement quoted body" (buffer-string)))
+                (should-not (string-match-p "Obsolete quoted body" (buffer-string)))))))
       (chirp-stop)
-      (dolist (name '(" *chirp-quote-enrich-test*"))
-        (when-let* ((buffer (get-buffer name)))
-          (kill-buffer buffer))))))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest chirp-quoted-tweet-completion-keeps-session-ownership ()
+  "An old lookup cannot drain a new session's subscribers for the same ID."
+  (let ((chirp--app nil) callbacks old-result new-result)
+    (unwind-protect
+        (cl-letf (((symbol-function 'chirp-backend-tweet)
+                   (lambda (_id success &optional _error)
+                     (push success callbacks))))
+          (chirp--request-quoted-tweet "456" (lambda (tweet) (setq old-result tweet)))
+          (let ((old-callback (car callbacks)))
+            (chirp-stop)
+            (chirp--request-quoted-tweet
+             "456" (lambda (tweet) (setq new-result tweet)))
+            (funcall old-callback (list :kind 'tweet :id "456" :text "Old") nil)
+            (should (equal (plist-get old-result :text) "Old"))
+            (should-not new-result)
+            (funcall (car callbacks) (list :kind 'tweet :id "456" :text "New") nil)
+            (should (equal (plist-get new-result :text) "New"))))
+      (chirp-stop))))
 
 (ert-deftest chirp-quoted-tweet-callback-errors-are-reported-and-isolated ()
   "A failed quoted-tweet callback should not block later pending callbacks."
@@ -2531,7 +2548,8 @@
     (cl-letf (((symbol-function 'display-warning)
                (lambda (type message &rest _args)
                  (setq warning (list type message)))))
-      (chirp--dispatch-quoted-tweet-callbacks "456" :payload))
+      (chirp--dispatch-quoted-tweet-callbacks
+       (chirp--session-quoted-tweet-pending (chirp--session)) "456" :payload))
     (should (eq later-payload :payload))
     (should-not
      (gethash "456" (chirp--session-quoted-tweet-pending (chirp--session))))

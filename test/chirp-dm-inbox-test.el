@@ -307,6 +307,9 @@
                          (list
                           (chirp-dm-test--normalized-conversation old))
                          nil)
+                (chirp-dm-test--drain inbox-view)
+                (with-current-buffer inbox-buffer
+                  (should (string-match-p "old preview" (buffer-string))))
                 (let*
                     ((conversation
                       (car
@@ -328,6 +331,133 @@
                   (with-current-buffer inbox-buffer
                     (goto-char (point-min))
                     (should (search-forward "new preview" nil t))))))))
+      (chirp-stop)
+      (dolist (buffer buffers)
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest chirp-dm-inbox-latest-request-fences-pagination-and-errors ()
+  "Superseded pages and refreshes must not change membership or request state."
+  (let ((chirp--app nil) buffer callbacks errors)
+    (unwind-protect
+        (cl-letf (((symbol-function 'chirp-backend-dm-inbox)
+                   (lambda (callback &rest options)
+                     (setq callbacks (append callbacks (list callback))
+                           errors (append errors (list (plist-get options :errback))))
+                     nil)))
+          (setq buffer (chirp-dm-inbox-open))
+          (let* ((view (with-current-buffer buffer (appkit-current-surface)))
+                 (state (appkit-surface-model view))
+                 (first (chirp-dm-test--normalized-conversation
+                         (chirp-dm-test--normalized-event "20" "20" "first")))
+                 (second (copy-tree first))
+                 (cursor '(:cursor-id "old-page" :graph-snapshot-id "old"))
+                 (fresh-cursor '(:cursor-id "new-page" :graph-snapshot-id "new")))
+            (setf (plist-get second :id) "conversation-2")
+            (funcall (nth 0 callbacks) (list first)
+                     `(("pagination" ("nextCursor" . ,cursor))))
+            (chirp-dm-test--drain view)
+            (with-current-buffer buffer
+              (chirp-dm-load-more-inbox)
+              (chirp-dm-refresh-inbox))
+            (funcall (nth 1 errors) "stale page error")
+            (should (plist-get state :loading-p))
+            (should (eq (plist-get (plist-get state :status) :phase) 'refresh))
+            (funcall (nth 2 callbacks) (list second)
+                     `(("pagination" ("nextCursor" . ,fresh-cursor))))
+            (funcall (nth 1 callbacks) (list first) nil)
+            (should (equal (mapcar (lambda (item) (plist-get item :id))
+                                  (plist-get state :items))
+                           '("conversation-2")))
+            (should (equal (plist-get (plist-get state :page) :next-cursor)
+                           fresh-cursor))
+            (with-current-buffer buffer
+              (chirp-dm-refresh-inbox)
+              (chirp-dm-refresh-inbox))
+            (funcall (nth 4 callbacks) (list first) nil)
+            (funcall (nth 3 errors) "stale refresh error")
+            (funcall (nth 3 callbacks) (list second)
+                     `(("pagination" ("nextCursor" . ,fresh-cursor))))
+            (chirp-dm-test--drain view)
+            (should (equal (mapcar (lambda (item) (plist-get item :id))
+                                  (plist-get state :items))
+                           '("conversation-1")))
+            (should-not (plist-get state :loading-p))
+            (should (eq (plist-get (plist-get state :status) :phase) 'idle))
+            (should (plist-get (plist-get state :page) :exhausted-p))
+            (should-not (plist-get (plist-get state :page) :next-cursor))
+            (with-current-buffer buffer (chirp-dm-refresh-inbox))
+            (let ((replacement (chirp-dm-inbox--make-state 999))
+                  (late (copy-tree first)))
+              (setf (plist-get late :id) "unowned-conversation")
+              (appkit-surface-send view (list 'chirp-model replacement))
+              (funcall (nth 5 callbacks) (list late) nil)
+              (funcall (nth 5 errors) "retired state error")
+              (chirp-dm-test--drain view)
+              (should (eq replacement (appkit-surface-model view)))
+              (should-not (plist-get replacement :items))
+              (should-not (plist-get replacement :loading-p))
+              (should (eq (plist-get (plist-get replacement :status) :phase)
+                          'initial))
+              (should-not
+               (gethash "unowned-conversation"
+                        (chirp--session-dm-conversations
+                         (appkit-app-model (appkit-surface-app view))))))))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest chirp-dm-inbox-disjoint-preview-preserves-history-continuity ()
+  "A bounded inbox preview must not conceal a focused refresh's history gap."
+  (let ((chirp--app nil) buffers inbox-callback refresh-callback bridge-callback)
+    (unwind-protect
+        (cl-letf
+            (((symbol-function 'chirp-backend-dm-inbox)
+              (lambda (callback &rest _options)
+                (setq inbox-callback callback) nil))
+             ((symbol-function 'chirp-backend-dm-conversation-data)
+              (lambda (_id callback &rest _options)
+                (setq refresh-callback callback) nil))
+             ((symbol-function 'chirp-backend-dm-history)
+              (lambda (_id _cursor callback &rest _options)
+                (setq bridge-callback callback) nil)))
+          (let* ((old (chirp-dm-test--normalized-event "20" "20" "old timeline"))
+                 (middle (chirp-dm-test--normalized-event "50" "50" "bridge"))
+                 (fresh (chirp-dm-test--normalized-event "100" "100" "new preview"))
+                 (snapshot (chirp-dm-test--normalized-conversation fresh))
+                 (conversation-buffer
+                  (chirp-dm-conversation-open
+                   (chirp-dm-test--normalized-conversation old)))
+                 (view (with-current-buffer conversation-buffer
+                         (appkit-current-surface)))
+                 (conversation
+                  (plist-get (appkit-surface-model view) :conversation))
+                 (inbox-buffer (chirp-dm-inbox-open))
+                 (inbox-view (with-current-buffer inbox-buffer
+                               (appkit-current-surface))))
+            (setq buffers (list conversation-buffer inbox-buffer))
+            (chirp-dm-test--drain view)
+            (funcall inbox-callback (list snapshot) nil)
+            (chirp-dm-test--drain inbox-view)
+            (chirp-dm-test--drain view)
+            (should (equal (mapcar #'chirp-dm-state--event-id
+                                  (plist-get conversation :events))
+                           '("20")))
+            (with-current-buffer inbox-buffer
+              (should (string-match-p "new preview" (buffer-string))))
+            (with-current-buffer conversation-buffer
+              (should-not (appkit-chat-timeline-node "100"))
+              (chirp-dm-refresh-conversation))
+            (funcall refresh-callback snapshot nil)
+            (should bridge-callback)
+            (should (equal (mapcar #'chirp-dm-state--event-id
+                                  (plist-get conversation :events))
+                           '("20")))
+            (funcall bridge-callback (list old middle fresh)
+                     '(("pagination" ("complete" . t))))
+            (chirp-dm-test--drain view)
+            (with-current-buffer conversation-buffer
+              (should (appkit-chat-timeline-node "20"))
+              (should (appkit-chat-timeline-node "50"))
+              (should (appkit-chat-timeline-node "100")))))
       (chirp-stop)
       (dolist (buffer buffers)
         (when (buffer-live-p buffer) (kill-buffer buffer))))))

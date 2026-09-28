@@ -18,11 +18,6 @@
 (require 'chirp-core)
 (require 'chirp-xchat)
 
-(defun chirp-dm-state--table ()
-  "Return the current Chirp session's canonical conversation table."
-  (or (chirp--session-dm-conversations (chirp--session))
-      (error "Chirp session has no direct-message conversation store")))
-
 (defun chirp-dm-state--event-id (event)
   "Return normalized EVENT's stable identity."
   (or (plist-get event :sequence-id)
@@ -119,41 +114,31 @@ not replaced by a later encrypted snapshot."
           (and activity (plist-get activity :created-at-msec))))
   conversation)
 
-(defun chirp-dm-state-set-events (conversation events)
+(defun chirp-dm-state--set-events (conversation events)
   "Replace canonical CONVERSATION's ordered EVENTS and derived fields."
   (setf (plist-get conversation :events)
         (chirp-dm-state--refresh-reactions events))
   (chirp-dm-state--refresh-derived-fields conversation))
 
-(defun chirp-dm-state-accept-live-event (event)
-  "Merge normalized websocket EVENT into its canonical conversation.
+(defun chirp-dm-state--commit (operation &rest arguments)
+  "Synchronously commit OPERATION with ARGUMENTS under the current App."
+  (let* ((app (or chirp--app (chirp-app)))
+         (id (plist-get (car arguments)
+                        (if (eq operation 'live-event) :conversation-id :id))))
+    (appkit-app-send app (list 'chirp-dm-state operation arguments))
+    (gethash id (chirp--session-dm-conversations (appkit-app-model app)))))
 
-Return the canonical conversation, or nil when its metadata has not been
-loaded.  Existing inboxes promote the changed conversation to the recent edge."
-  (let*
-      ((conversation-id
-        (and (listp event) (plist-get event :conversation-id)))
-       (conversation
-        (and (stringp conversation-id)
-             (gethash conversation-id (chirp-dm-state--table)))))
-    (when conversation
-      (chirp-dm-state--event-id event)
-      (chirp-dm-state-set-events conversation
-                                 (chirp-dm-state-merge-events
-                                  (plist-get conversation :events)
-                                  (list event)))
-      (when (appkit-app-live-p chirp--app)
-        (dolist (view (appkit-app--surface-snapshot chirp--app))
-          (progn
-            (when (appkit-surface-live-p view)
-              (let ((state (appkit-surface-model view)))
-                (when (eq (plist-get state :type) 'dm-inbox)
-                  (setf (plist-get state :items)
-                        (cons conversation
-                              (delq conversation
-                                    (copy-sequence
-                                     (plist-get state :items)))))))))))
-      (chirp-dm-state-publish conversation) conversation)))
+(defun chirp-dm-state-set-events (conversation events)
+  "Commit ordered EVENTS and derived fields to canonical CONVERSATION."
+  (chirp-dm-state--commit 'set-events conversation events))
+
+(defun chirp-dm-state-accept-live-event (event)
+  "Commit normalized websocket EVENT and notify its interested Surfaces.
+Return its canonical conversation, or nil if metadata has not been loaded."
+  (when-let* ((conversation (chirp-dm-state--commit 'live-event event)))
+    (chirp-dm-state-publish
+     conversation (chirp-dm-state--event-id event) t t)
+    conversation))
 
 (defun chirp-dm-state--copy-field (target source property)
   "Copy PROPERTY from SOURCE to TARGET when SOURCE carries it."
@@ -161,16 +146,13 @@ loaded.  Existing inboxes promote the changed conversation to the recent edge."
     (setf (plist-get target property)
           (copy-tree (plist-get source property)))))
 
-(cl-defun chirp-dm-state-merge-snapshot
+(cl-defun chirp-dm-state--merge-snapshot
     (conversation snapshot &key events)
-  "Merge normalized SNAPSHOT into canonical CONVERSATION.
-
-EVENTS, when non-nil, is the already continuity-checked ordered event list.
-Otherwise preserve canonical events while adding events from SNAPSHOT."
+  "Merge continuity-checked SNAPSHOT and optional EVENTS into CONVERSATION."
   (dolist (property '(:type :title :participants :muted-p
                       :message-request-p :has-more :older-cursor))
     (chirp-dm-state--copy-field conversation snapshot property))
-  (chirp-dm-state-set-events
+  (chirp-dm-state--set-events
    conversation
    (or events
        (chirp-dm-state-merge-events
@@ -178,46 +160,116 @@ Otherwise preserve canonical events while adding events from SNAPSHOT."
         (plist-get snapshot :events))))
   conversation)
 
-(defun chirp-dm-state-acquire (snapshot)
-  "Return the session-owned canonical conversation for normalized SNAPSHOT."
+(cl-defun chirp-dm-state-merge-snapshot
+    (conversation snapshot &key events)
+  "Commit continuity-checked SNAPSHOT and optional EVENTS to CONVERSATION."
+  (chirp-dm-state--commit 'merge-snapshot conversation snapshot events))
+
+(defun chirp-dm-state--acquire (table snapshot)
+  "Return TABLE's canonical conversation for continuity-checked SNAPSHOT."
   (let ((id (and (listp snapshot) (plist-get snapshot :id))))
     (unless (and (stringp id) (not (string-empty-p id)))
       (error "XChat conversation has no canonical identity"))
-    (let* ((table (chirp-dm-state--table))
-           (conversation (gethash id table)))
+    (let ((conversation (gethash id table)))
       (cond
        ((eq conversation snapshot))
        (conversation
-        (chirp-dm-state-merge-snapshot conversation snapshot))
+        (chirp-dm-state--merge-snapshot conversation snapshot))
        (t
-        (setq conversation (copy-tree snapshot))
-        (chirp-dm-state-set-events
+        (setq conversation (plist-put (copy-tree snapshot) :inbox-preview nil))
+        (chirp-dm-state--set-events
          conversation (plist-get conversation :events))
         (puthash id conversation table)))
       conversation)))
 
-(defun chirp-dm-state-publish (conversation)
-  "Synchronize every live DM view that references canonical CONVERSATION."
+(defun chirp-dm-state-acquire (snapshot)
+  "Return the App-owned canonical conversation for checked SNAPSHOT."
+  (chirp-dm-state--commit 'acquire snapshot))
+
+(defun chirp-dm-state--acquire-preview (table snapshot)
+  "Acquire inbox SNAPSHOT in TABLE without joining disjoint timeline fragments."
+  (let* ((id (plist-get snapshot :id))
+         (conversation (gethash id table))
+         (current (plist-get conversation :events))
+         (fetched (plist-get snapshot :events)))
+    (if (or (null conversation) (null current))
+        (chirp-dm-state--acquire table snapshot)
+      ;; Inbox metadata must not replace an open timeline's older-page cursor.
+      (dolist (property '(:type :title :participants :muted-p :message-request-p))
+        (chirp-dm-state--copy-field conversation snapshot property))
+      (if (cl-some
+           (lambda (event)
+             (cl-find (chirp-dm-state--event-id event) current
+                      :key #'chirp-dm-state--event-id :test #'equal))
+           fetched)
+          (chirp-dm-state--set-events
+           conversation (chirp-dm-state-merge-events current fetched))
+        ;; A disjoint bounded preview is not evidence of timeline continuity.
+        (let ((event (plist-get snapshot :latest-event))
+              (previous (plist-get conversation :inbox-preview)))
+          (when (chirp-xchat-event-before-p
+                 (plist-get previous :latest-event) event)
+            (setf (plist-get conversation :inbox-preview)
+                  (list :preview (copy-tree (plist-get snapshot :preview))
+                        :updated-at-msec (plist-get snapshot :updated-at-msec)
+                        :latest-event
+                        (list :kind (plist-get event :kind)
+                              :sequence-id (plist-get event :sequence-id)
+                              :sender-id (plist-get event :sender-id)))))))
+      conversation)))
+
+(defun chirp-dm-state-acquire-preview (snapshot)
+  "Commit bounded inbox SNAPSHOT without bypassing history continuity."
+  (let* ((conversation (chirp-dm-state--commit 'acquire-preview snapshot))
+         (first (car (plist-get conversation :events))))
+    (chirp-dm-state-publish
+     conversation (and first (chirp-dm-state--event-id first)) nil)
+    conversation))
+
+(defun chirp-dm-state--app-update (_context session message)
+  "Apply canonical DM MESSAGE to its original SESSION."
+  (let* ((table (chirp--session-dm-conversations session))
+         (arguments (nth 2 message))
+         (conversation (car arguments)))
+    (pcase (nth 1 message)
+      ('set-events (apply #'chirp-dm-state--set-events arguments))
+      ('merge-snapshot
+       (chirp-dm-state--merge-snapshot
+        conversation (nth 1 arguments) :events (nth 2 arguments)))
+      ('acquire (chirp-dm-state--acquire table conversation))
+      ('acquire-preview (chirp-dm-state--acquire-preview table conversation))
+      ('live-event
+       (let* ((event conversation)
+              (canonical (gethash (plist-get event :conversation-id) table)))
+         (when canonical
+           (chirp-dm-state--set-events
+            canonical
+            (chirp-dm-state-merge-events
+             (plist-get canonical :events) (list event))))))
+      (_ (error "Unsupported canonical DM operation: %S" message)))
+    (appkit-next :model session :render appkit-render-none)))
+
+(defun chirp-dm-state-publish
+    (conversation &optional seed-key decrypt-p promote-p)
+  "Notify exact live Surfaces of committed CONVERSATION.
+SEED-KEY may seed an authoritative-empty window.  DECRYPT-P requests pending
+verification; PROMOTE-P moves live activity to the inbox's recent edge.
+Only Surface reducers change their own local state."
   (when (appkit-app-live-p chirp--app)
     (dolist (view (appkit-app--surface-snapshot chirp--app))
-      (progn
-        (when (appkit-surface-live-p view)
-          (let ((state (appkit-surface-model view)))
-            (pcase (plist-get state :type)
-              ('dm-conversation
-               (when (eq (plist-get state :conversation) conversation)
-                 (appkit-surface-post view
-                                      (appkit-projection-change-create
-                                       :full-p t
-                                       :frame-p t
-                                       :position 'preserve))))
-              ('dm-inbox
-               (when (memq conversation (plist-get state :items))
-                 (appkit-surface-post view
-                                      (appkit-projection-change-create
-                                       :full-p t
-                                       :frame-p t
-                                       :position 'preserve)))))))))))
+      (when (appkit-surface-live-p view)
+        (let ((state (appkit-surface-model view)))
+          (pcase (plist-get state :type)
+            ('dm-conversation
+             (when (eq (plist-get state :conversation) conversation)
+               (appkit-surface-post
+                view (list 'chirp-dm-conversation 'canonical-changed
+                           view conversation seed-key decrypt-p))))
+            ('dm-inbox
+             (when (or promote-p (memq conversation (plist-get state :items)))
+               (appkit-surface-post
+                view (list 'chirp-dm-inbox 'canonical-changed
+                           state conversation promote-p))))))))))
 
 (provide 'chirp-dm-state)
 

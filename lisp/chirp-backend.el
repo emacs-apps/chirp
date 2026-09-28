@@ -585,6 +585,40 @@ ERRBACK handles failures.  FETCHER is called with success and error callbacks."
                      (not (string-empty-p (format "%s" identifier))))
            return (format "%s" identifier)))
 
+(defun chirp-backend--published-tweet (result)
+  "Normalize a complete published RESULT, never an ID-only acknowledgement."
+  (let* ((object (or (chirp-get result "tweet") result))
+         (legacy (chirp-get object "legacy")))
+    (when (and (chirp-get legacy "full_text")
+               (chirp--extract-user-object object))
+      (chirp--tweet-from-x result))))
+
+(defun chirp-backend-created-tweet (payload)
+  "Return a complete normalized created tweet from PAYLOAD, or nil."
+  (cl-loop for operation in '("create_tweet" "notetweet_create"
+                              "create_note_tweet")
+           for result = (chirp-get-in
+                         payload (list "data" operation "tweet_results" "result"))
+           for tweet = (chirp-backend--published-tweet result)
+           when tweet return tweet))
+
+(defun chirp-backend-read-created-tweet (id callback errback owner)
+  "Read published ID once for CALLBACK under exact OWNER lifetime.
+ERRBACK receives read failures.  This bypasses list caches and pagination."
+  (chirp-x-graphql-request
+   (chirp-backend--operation 'article)
+   `(("tweetId" . ,id)
+     ("withCommunity" . :json-false)
+     ("includePromotedContent" . :json-false)
+     ("withVoice" . :json-false))
+   (lambda (payload)
+     (let ((tweet (chirp-backend--published-tweet
+                   (chirp-get-in payload '("data" "tweetResult" "result")))))
+       (if (and tweet (equal (plist-get tweet :id) id))
+           (funcall callback tweet)
+         (funcall errback "X did not return the published tweet"))))
+   :errback errback :owner owner))
+
 (defun chirp-backend--compose-variables
     (kind text target-id media-ids note-tweet-p &optional reply-audience)
   "Build X create variables for KIND, TEXT, TARGET-ID, and MEDIA-IDS.
@@ -872,6 +906,28 @@ PROGRESS and OWNER are forwarded to each item upload."
                      (not (string-empty-p (format "%s" identifier))))
            return (format "%s" identifier)))
 
+(defun chirp-backend--confirmed-unsent-entry
+    (id kind target-id items uploaded execute-at)
+  "Build the confirmed unsent snapshot from uploaded ITEMS and authoritative ID."
+  (let ((entry
+         (chirp-backend--normalize-unsent-entry
+          (if execute-at 'scheduled 'draft)
+          `(("rest_id" . ,id)
+            ("execute_at" . ,execute-at)
+            ("post_tweet_request"
+             . ,(chirp-backend--post-tweet-request kind target-id uploaded))))))
+    (cl-mapc
+     (lambda (normalized original)
+       (cl-mapc
+        (lambda (attachment submitted)
+          (when (listp submitted)
+            (dolist (key '(:description :type :preview-url :width :height))
+              (when (plist-member submitted key)
+                (nconc attachment (list key (plist-get submitted key)))))))
+        (plist-get normalized :attachments) (plist-get original :attachments)))
+     (plist-get entry :items) items)
+    entry))
+
 (cl-defun chirp-backend--submit-unsent
     (kind target-id items existing-id execute-at callback errback
           &key progress owner)
@@ -915,7 +971,10 @@ draft.  PROGRESS and OWNER are forwarded to upload and the GraphQL write."
           (lambda (payload)
             (if-let* ((identifier
                        (or (chirp-backend--unsent-id payload) existing)))
-                (funcall callback identifier payload)
+                (funcall
+                 callback identifier
+                 (chirp-backend--confirmed-unsent-entry
+                  identifier kind target-id items uploaded execute-at))
               (funcall
                errback
                (format "X did not return a %s ID (%s)"
@@ -935,8 +994,9 @@ draft.  PROGRESS and OWNER are forwarded to upload and the GraphQL write."
 KIND is `post', `reply', or `quote'.  TARGET-ID is required for replies and
 quotes.  ITEMS are plists with `:text' and optional `:attachments'.
 DRAFT-ID selects EditDraftTweet when non-nil.  CALLBACK receives the saved
-draft ID and the raw GraphQL envelope.  ERRBACK receives upload or save
-failures.  PROGRESS and OWNER are forwarded to upload and the save request.
+draft ID and normalized entry with the confirmed uploaded media IDs.
+ERRBACK receives upload or save failures.  PROGRESS and OWNER are forwarded
+to upload and the save request.
 Save mutations are never retried automatically."
   (unless (functionp callback)
     (error "Draft callback is not callable"))
@@ -1178,12 +1238,12 @@ raw GraphQL envelope.  ERRBACK receives request failures."
        (funcall error-fn (error-message-string err))
        nil))))
 
-(defun chirp-backend-delete-unsent (kind id callback &optional errback)
+(defun chirp-backend-delete-unsent (kind id callback &optional errback owner)
   "Delete unsent post ID of KIND and call CALLBACK.
 
 KIND is `draft' or `scheduled'.  CALLBACK receives the raw GraphQL
-envelope.  ERRBACK receives request failures.  Deletes are never retried
-automatically."
+envelope and nil.  ERRBACK receives request failures.  OWNER bounds the
+request lifetime.  Deletes are never retried automatically."
   (unless (functionp callback)
     (error "Unsent delete callback is not callable"))
   (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
@@ -1203,7 +1263,7 @@ automatically."
            `((,key . ,id))
            (lambda (payload)
              (funcall callback payload nil))
-           :errback error-fn))
+           :errback error-fn :owner owner))
       (error
        (funcall error-fn (error-message-string err))
        nil))))
@@ -1502,113 +1562,131 @@ older target.  CALLBACK, ERRBACK, and OWNER follow
 (cl-defun chirp-backend-dm-send-attachments
     (conversation-id text attachments callback &key target-event
                      key-events errback owner progress)
-  "Encrypt, upload, and send typed ATTACHMENTS with TEXT to CONVERSATION-ID.\n\nEach attachment supplies `:path' and `:attachment-kind'.  TARGET-EVENT and\nKEY-EVENTS select reply semantics.  CALLBACK receives the acknowledged\nnormalized event and a nil envelope.  ERRBACK and OWNER own the complete\nstaged-media, upload, and non-retrying send lifecycle.  PROGRESS receives\nupload phase plists."
-  (let
-      ((error-fn
-        (or errback (lambda (message) (message "%s" message))))
-       (attachment-count
-        (and (listp attachments) (length attachments)))
-       stages workflow-handle settled-p)
+  "Encrypt, upload, and send typed ATTACHMENTS with TEXT to CONVERSATION-ID.
+
+Each attachment supplies `:path' and `:attachment-kind'.  TARGET-EVENT and
+KEY-EVENTS select reply semantics.  CALLBACK receives the acknowledged
+normalized event and a nil envelope.  ERRBACK and OWNER own the complete
+staged-media, upload, and non-retrying send lifecycle.  PROGRESS receives
+upload phase plists.  Return one lifecycle handle through final acknowledgement;
+canceling a dispatched write cannot establish whether X accepted it."
+  (let ((error-fn (or errback (lambda (message) (message "%s" message))))
+        (attachment-count (and (listp attachments) (length attachments)))
+        stages workflow-handle settled-p child child-token write-started-p)
     (cl-labels
-        ((release-stages nil
-           (dolist (stage stages)
-             (when-let* ((stage-id (plist-get stage :stage-id)))
-               (ignore-errors
-                 (chirp-xchat-native-release-media-stage stage-id))))
-           (setq stages nil))
-         (retire-workflow nil
-           (when
-               (and (appkit-handle-p workflow-handle)
-                    (appkit-handle-alive-p workflow-handle))
-             (appkit-retire-handle workflow-handle)
-             (setq workflow-handle nil)))
+        ((release-stage (stage)
+           (when-let* ((stage-id (plist-get stage :stage-id)))
+             (ignore-errors
+               (chirp-xchat-native-release-media-stage stage-id))))
+         (release-stages ()
+           (let ((pending stages))
+             (setq stages nil)
+             (mapc #'release-stage pending)))
+         (retire-workflow ()
+           (when (appkit-handle-p workflow-handle)
+             (appkit-retire-handle workflow-handle)))
+         (cancel-child (request)
+           (cond
+            ((appkit-handle-p request) (appkit-cancel-handle request))
+            ((buffer-live-p request) (chirp-x-cancel-request request))))
          (fail (message)
            (unless settled-p
-             (setq settled-p t) (release-stages) (retire-workflow)
-             (funcall error-fn message)))
+             (let ((request child))
+               ;; Revoke callback authority before cancellation can reenter.
+               (setq settled-p t child nil child-token nil)
+               (unwind-protect
+                   (cancel-child request)
+                 (release-stages)
+                 (retire-workflow)
+                 (funcall error-fn message)))))
+         (start-child (start success)
+           (unless settled-p
+             (let ((token (list nil)))
+               (setq child-token token child nil)
+               (condition-case err
+                   (let ((request
+                          (funcall
+                           start
+                           (lambda (value &optional envelope)
+                             (when (and (not settled-p)
+                                        (eq token child-token))
+                               (setq child-token nil child nil)
+                               (funcall success value envelope)))
+                           (lambda (message)
+                             (when (and (not settled-p)
+                                        (eq token child-token))
+                               (setq child-token nil child nil)
+                               (fail message))))))
+                     ;; A synchronous callback may already have advanced to
+                     ;; another child, or canceled the entire operation.
+                     (if (and (not settled-p) (eq token child-token))
+                         (setq child request)
+                       (cancel-child request)))
+                 ((error quit)
+                  (fail (error-message-string err))
+                  (when (eq (car err) 'quit)
+                    (signal (car err) (cdr err))))))))
          (finish-send (uploaded)
            (unless settled-p
-             (release-stages) (retire-workflow)
-             (let
-                 ((prepare
-                   (if target-event
-                       (lambda ()
-                         (chirp-xchat-native-prepare-reply
-                          conversation-id text target-event key-events
-                          uploaded))
-                     (lambda ()
-                       (chirp-xchat-native-prepare-text
-                        conversation-id text uploaded)))))
-               (chirp-backend--dm-send-prepared conversation-id
-                                                prepare
-                                                (lambda
-                                                  (event envelope)
-                                                  (unless settled-p
-                                                    (setq settled-p t)
-                                                    (funcall callback
-                                                             event
-                                                             envelope)))
-                                                :errback #'fail
-                                                :owner owner))))
+             (release-stages)
+             (start-child
+              (lambda (success failure)
+                (chirp-backend--dm-send-prepared
+                 conversation-id
+                 (lambda ()
+                   (let ((prepared
+                          (if target-event
+                              (chirp-xchat-native-prepare-reply
+                               conversation-id text target-event key-events
+                               uploaded)
+                            (chirp-xchat-native-prepare-text
+                             conversation-id text uploaded))))
+                     (when settled-p
+                       (error "XChat attachment send was canceled"))
+                     (setq write-started-p t)
+                     prepared))
+                 success :errback failure :owner owner))
+              (lambda (event envelope)
+                (setq settled-p t)
+                (retire-workflow)
+                (funcall callback event envelope)))))
          (upload-next (remaining uploaded index)
            (unless settled-p
-             (if (null remaining) (finish-send (nreverse uploaded))
+             (if (null remaining)
+                 (finish-send (nreverse uploaded))
                (let ((stage (car remaining)))
-                 (chirp-x-upload-chat-media conversation-id
-                                            (plist-get stage
-                                                       :encrypted-file)
-                                            (plist-get stage
-                                                       :encrypted-bytes)
-                                            (lambda (media-hash)
-                                              (when-let*
-                                                  ((stage-id
-                                                    (plist-get stage
-                                                               :stage-id)))
-                                                (ignore-errors
-                                                  (chirp-xchat-native-release-media-stage
-                                                   stage-id))
-                                                (setq stages
-                                                      (delq stage
-                                                            stages)))
-                                              (upload-next
-                                               (cdr remaining)
-                                               (cons
-                                                (list :media-hash-key
-                                                      media-hash
-                                                      :width
-                                                      (plist-get stage
-                                                                 :width)
-                                                      :height
-                                                      (plist-get stage
-                                                                 :height)
-                                                      :plaintext-bytes
-                                                      (plist-get stage
-                                                                 :plaintext-bytes)
-                                                      :key-version
-                                                      (plist-get stage
-                                                                 :key-version)
-                                                      :filename
-                                                      (plist-get stage
-                                                                 :filename)
-                                                      :media-type
-                                                      (plist-get stage
-                                                                 :media-type))
-                                                uploaded)
-                                               (1+ index)))
-                                            :errback #'fail
-                                            :owner owner
-                                            :progress
-                                            (and progress
-                                                 (lambda (event)
-                                                   (funcall progress
-                                                            (append
-                                                             (list
-                                                              :attachment-index
-                                                              (1+
-                                                               index)
-                                                              :attachment-count
-                                                              attachment-count)
-                                                             event))))))))))
+                 (start-child
+                  (lambda (success failure)
+                    (chirp-x-upload-chat-media
+                     conversation-id
+                     (plist-get stage :encrypted-file)
+                     (plist-get stage :encrypted-bytes)
+                     success :errback failure :owner owner
+                     :progress
+                     (and progress
+                          (lambda (event)
+                            (when (and (not settled-p) (eq stage (car stages)))
+                              (funcall
+                               progress
+                               (append
+                                (list :attachment-index (1+ index)
+                                      :attachment-count attachment-count)
+                                event)))))))
+                  (lambda (media-hash &optional _envelope)
+                    (setq stages (delq stage stages))
+                    (release-stage stage)
+                    (upload-next
+                     (cdr remaining)
+                     (cons (list :media-hash-key media-hash
+                                 :width (plist-get stage :width)
+                                 :height (plist-get stage :height)
+                                 :plaintext-bytes
+                                 (plist-get stage :plaintext-bytes)
+                                 :key-version (plist-get stage :key-version)
+                                 :filename (plist-get stage :filename)
+                                 :media-type (plist-get stage :media-type))
+                           uploaded)
+                     (1+ index)))))))))
       (condition-case err
           (progn
             (unless (functionp callback)
@@ -1677,12 +1755,16 @@ older target.  CALLBACK, ERRBACK, and OWNER follow
               (error
                "Multiple XChat attachments must all be images, GIFs, or videos"))
             (setq workflow-handle
-                  (appkit-register-handle (or owner (chirp-app))
-                                          'function
-                                          (lambda ()
-                                            (fail
-                                             "XChat attachment send was canceled"))))
-            (progn (upload-next stages nil 0) workflow-handle))
+                  (appkit-register-handle
+                   (or owner (chirp-app)) 'function
+                   (lambda ()
+                     (fail
+                      (if write-started-p
+                          (chirp-x-unknown-write-outcome
+                           "XChat attachment send was canceled before acknowledgement")
+                        "XChat attachment send was canceled")))))
+            (upload-next stages nil 0)
+            workflow-handle)
         ((error quit)
          (let ((message (error-message-string err)))
            (fail message)

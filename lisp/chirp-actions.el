@@ -316,57 +316,42 @@ Only `unknown' persists because it changes whether repeating a write is safe.")
         (display-warning 'chirp condensed :warning)
       (message "Chirp action failed: %s" condensed))))
 
-(defun chirp-actions--refresh-current-view ()
-  "Refresh the current Chirp view."
-  (when chirp--refresh-function
-    (funcall chirp--refresh-function)))
-
-(defun chirp-actions--refresh-buffer (buffer)
-  "Refresh BUFFER when it is a live Chirp view."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (chirp-actions--refresh-current-view))))
-
 ;;;; Dispatch
 
 (defun chirp-actions--perform (args on-success &optional on-error)
   "Run backend action ARGS and call ON-SUCCESS with the decoded payload.
 
 When ON-ERROR is non-nil, call it with the human-readable error message."
-  (chirp-backend-request
-   args
-   (lambda (data envelope)
-     (chirp-backend-clear-cache)
-     (funcall on-success data envelope))
-   (or on-error
-       #'chirp-actions-show-error)))
+  (let ((app (chirp-app)))
+    (chirp-backend-request
+     args
+     (lambda (data envelope)
+       (when (appkit-app-live-p app)
+         (appkit-app-send app '(chirp-invalidate-cache))
+         (funcall on-success data envelope)))
+     (lambda (error-message)
+       (when (appkit-app-live-p app)
+         (funcall (or on-error #'chirp-actions-show-error) error-message))))))
 
 ;;;; Tweet State
 
-(defun chirp-actions--apply-state (buffer tweet-id state-key state-value count-key)
-  "Update tweet state in BUFFER for TWEET-ID.
+(defun chirp-actions--tweet-surfaces (app tweet-id)
+  "Capture APP's exact live Surfaces currently containing TWEET-ID."
+  (let (surfaces)
+    (dolist (buffer (buffer-list))
+      (when-let* ((surface (chirp--live-projection-view buffer))
+                  ((eq (appkit-surface-app surface) app))
+                  ((chirp--tweet-resources
+                    (appkit-surface-model surface) tweet-id)))
+        (push surface surfaces)))
+    surfaces))
 
-STATE-KEY is set to STATE-VALUE and COUNT-KEY is adjusted when needed."
-  (chirp-set-tweet-state-override tweet-id state-key state-value)
-  (chirp-update-tweet-by-id
-   buffer
-   tweet-id
-   (lambda (tweet)
-     (let ((old-state (chirp-boolean-value (plist-get tweet state-key))))
-       (plist-put tweet state-key state-value)
-       (unless (eq old-state state-value)
-         (plist-put tweet
-                    count-key
-                    (chirp-adjust-count
-                     (plist-get tweet count-key)
-                     (if state-value 1 -1))))))
-   t))
-
-(defun chirp-actions--bookmarks-view-p (buffer)
-  "Return non-nil when BUFFER is currently showing bookmarks."
-  (and (buffer-live-p buffer)
-       (with-current-buffer buffer
-         (string= chirp--view-title "Bookmarks"))))
+(defun chirp-actions--publish-tweet-result (app surfaces result)
+  "Commit confirmed RESULT to APP and its captured SURFACES."
+  (appkit-app-send app result)
+  (dolist (surface surfaces)
+    (when (appkit-surface-live-p surface)
+      (appkit-surface-post surface result))))
 
 (defun chirp-actions--set-state (state-key command count-key state-value success-message)
   "Set STATE-KEY for the current tweet using COMMAND.
@@ -374,15 +359,14 @@ STATE-KEY is set to STATE-VALUE and COUNT-KEY is adjusted when needed."
 COUNT-KEY is adjusted locally to reflect STATE-VALUE.  Display SUCCESS-MESSAGE
 when the request succeeds."
   (let* ((tweet-id (chirp-actions--tweet-id-at-point))
-         (buffer (current-buffer)))
+         (app (chirp-app))
+         (surfaces (chirp-actions--tweet-surfaces app tweet-id)))
     (chirp-actions--perform
      (list command tweet-id)
      (lambda (_data _envelope)
-       (chirp-actions--apply-state buffer tweet-id state-key state-value count-key)
-       (when (and (eq state-key :bookmarked-p)
-                  (not state-value)
-                  (chirp-actions--bookmarks-view-p buffer))
-         (chirp-actions--refresh-buffer buffer))
+       (chirp-actions--publish-tweet-result
+        app surfaces (list 'chirp-tweet-state tweet-id state-key
+                           state-value count-key))
        (message "%s" success-message)))))
 
 (defun chirp-actions--toggle-state (state-key command-on command-off count-key
@@ -496,18 +480,32 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
 (defun chirp-delete-at-point ()
   "Delete the tweet at point after confirmation."
   (interactive)
-  (let ((id (chirp-actions--tweet-id-at-point))
-        (buffer (current-buffer)))
+  (let* ((id (chirp-actions--tweet-id-at-point))
+         (app (chirp-app))
+         (surfaces (chirp-actions--tweet-surfaces app id)))
     (when (y-or-n-p (format "Delete tweet %s? " id))
       (chirp-actions--perform
        (list "delete" "--yes" id)
        (lambda (_data _envelope)
-         (chirp-clear-tweet-state-overrides id)
-         (unless (chirp--remove-tweet-from-primary-feeds buffer id)
-           (chirp-actions--refresh-buffer buffer))
+         (chirp-actions--publish-tweet-result
+          app surfaces (list 'chirp-tweet-delete id))
          (message "Tweet deleted."))))))
 
 ;;; Compose State
+
+(autoload 'chirp-unsent-capture-source "chirp-unsent")
+(autoload 'chirp-unsent-apply-result "chirp-unsent")
+
+(defvar-local chirp-compose-source-surface nil
+  "Exact published Surface captured when this composer was opened.")
+(defvar-local chirp-compose-source-model nil
+  "Original source model identity, separate from the restoration buffer.")
+(defvar-local chirp-compose-unsent-source nil
+  "Exact originating unsent collection reference.")
+(defvar-local chirp-compose-app nil
+  "App owning this composer at creation.")
+(defvar-local chirp-compose--accepted-owner nil
+  "Operation whose write was accepted and is now settling cleanup.")
 
 (defun chirp-compose--buffer-name ()
   "Return a compose buffer name for the current draft."
@@ -590,7 +588,8 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
   "Return non-nil when OWNER still owns compose BUFFER."
   (and (buffer-live-p buffer)
        (with-current-buffer buffer
-         (appkit-compose-operation-current-p owner))))
+         (and (derived-mode-p 'chirp-compose-mode)
+              (appkit-compose-operation-current-p owner)))))
 
 (defun chirp-compose--settle-editable (buffer owner temp-attachments outcome)
   "Settle OWNER in BUFFER and restore TEMP-ATTACHMENTS for OUTCOME."
@@ -599,7 +598,8 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
     (chirp-compose--cleanup-files temp-attachments)
     nil)
    ((with-current-buffer buffer
-      (when (appkit-compose-operation-current-p owner)
+      (when (and (chirp-compose--operation-current-p buffer owner)
+                 (not (eq chirp-compose--accepted-owner owner)))
         (appkit-compose-operation-finish owner)
         (setq-local chirp-compose-write-outcome
                     (and (eq outcome 'unknown) 'unknown))
@@ -1188,65 +1188,98 @@ When PATH is nil, prompt for one attached image."
                        (or chirp-compose-reply-audience 'everyone))))
     draft))
 
-(defun chirp-compose--close-after-send
-    (compose-buffer source-buffer temp-attachments success-message)
-  "Delete TEMP-ATTACHMENTS and close COMPOSE-BUFFER to SOURCE-BUFFER.
+(defun chirp-compose--invalidate-cache ()
+  "Invalidate only this composer's original, still-live App cache."
+  (when (appkit-app-live-p chirp-compose-app)
+    (appkit-app-send chirp-compose-app '(chirp-invalidate-cache))))
 
-Refresh the source view and show SUCCESS-MESSAGE."
-  (chirp-backend-clear-cache)
-  (chirp-compose--cleanup-files temp-attachments)
-  (when (buffer-live-p compose-buffer)
-    (chirp-compose--close compose-buffer source-buffer))
-  (when (buffer-live-p source-buffer)
-    (chirp-actions--refresh-buffer source-buffer))
-  (message "%s" success-message))
+(defun chirp-compose--publication-source-current-p (surface model)
+  "Return non-nil when SURFACE still displays captured MODEL."
+  (and surface (appkit-surface-live-p surface)
+       (eq (appkit-surface-model surface) model)))
+
+(defun chirp-compose--publish-result (id envelope)
+  "Reconcile accepted published ID and ENVELOPE with the original source."
+  (chirp-compose--invalidate-cache)
+  (let ((surface chirp-compose-source-surface)
+        (model chirp-compose-source-model))
+    (when (and (chirp-compose--publication-source-current-p surface model)
+               (chirp--posts-created-eligible-p model))
+      (let ((deliver
+             (lambda (tweet)
+               (when (chirp-compose--publication-source-current-p surface model)
+                 (appkit-surface-post
+                  surface (list 'chirp-posts-created model (list tweet)))))))
+        (if-let* ((tweet (chirp-backend-created-tweet envelope)))
+            (funcall deliver tweet)
+          (when id
+            (chirp-backend-read-created-tweet
+             id deliver #'ignore surface)))))))
+
+(defun chirp-compose--close-after-send
+    (compose-buffer owner source-buffer temp-attachments success-message)
+  "Close only OWNER's COMPOSE-BUFFER after an accepted write."
+  (when (chirp-compose--operation-current-p compose-buffer owner)
+    (with-current-buffer compose-buffer
+      (setq-local chirp-compose--submit-temps nil
+                  chirp-compose-write-outcome nil)
+      (appkit-compose-operation-finish owner))
+    (chirp-compose--cleanup-files temp-attachments)
+    (chirp-compose--close compose-buffer source-buffer)
+    (message "%s" success-message)))
 
 (defun chirp-compose--delete-unsent-after-send
-    (kind id compose-buffer source-buffer temp-attachments success-message)
-  "Delete unsent KIND ID after publishing from COMPOSE-BUFFER.
-
-Then close to SOURCE-BUFFER, delete TEMP-ATTACHMENTS, and show
-SUCCESS-MESSAGE."
-  (chirp-backend-delete-unsent
-   kind id
-   (lambda (_payload _envelope)
-     (chirp-compose--close-after-send
-      compose-buffer source-buffer temp-attachments success-message))
-   (lambda (message)
-     (chirp-compose--close-after-send
-      compose-buffer source-buffer temp-attachments success-message)
-     (chirp-actions-show-error
-      (format "Post sent, but the X %s was not deleted: %s"
-              (if (eq kind 'scheduled) "scheduled post" "draft")
-              message)))))
+    (kind id compose-buffer owner source-buffer temp-attachments success-message)
+  "Delete consumed KIND ID, retaining OWNER until cleanup settles."
+  (let ((surface (with-current-buffer compose-buffer (appkit-current-surface)))
+        (unsent-source
+         (with-current-buffer compose-buffer chirp-compose-unsent-source)))
+    (chirp-backend-delete-unsent
+     kind id
+     (lambda (_payload _envelope)
+       (chirp-unsent-apply-result unsent-source kind id)
+       (when (appkit-surface-live-p surface)
+         (chirp-compose--close-after-send
+          compose-buffer owner source-buffer temp-attachments success-message)))
+     (lambda (error-message)
+       (when (and (appkit-surface-live-p surface)
+                  (chirp-compose--operation-current-p compose-buffer owner))
+         (chirp-compose--close-after-send
+          compose-buffer owner source-buffer temp-attachments success-message)
+         (chirp-actions-show-error
+          (format "%s The X %s was not deleted: %s"
+                  success-message
+                  (if (eq kind 'scheduled) "scheduled post" "draft")
+                  error-message))))
+     surface)))
 
 (defun chirp-compose--finish-send
-    (compose-buffer owner source-buffer temp-attachments success-message)
-  "Accept OWNER and close COMPOSE-BUFFER after a successful write.
-
-SOURCE-BUFFER is restored, TEMP-ATTACHMENTS are deleted, and SUCCESS-MESSAGE is
-shown.  A stored draft or scheduled object is deleted after acceptance."
+    (compose-buffer owner source-buffer temp-attachments success-message
+                    &optional scheduled-p)
+  "Settle accepted OWNER, consuming only the appropriate stored object.
+SCHEDULED-P retains an edited schedule; only publication consumes schedules."
   (when (chirp-compose--operation-current-p compose-buffer owner)
-    (let ((draft-id
-           (with-current-buffer compose-buffer chirp-compose-draft-id))
-          (scheduled-id
-           (with-current-buffer compose-buffer chirp-compose-scheduled-id)))
-      (with-current-buffer compose-buffer
-        (setq-local chirp-compose--submit-temps nil
+    (with-current-buffer compose-buffer
+      (let ((draft-id chirp-compose-draft-id)
+            (scheduled-id (and (not scheduled-p) chirp-compose-scheduled-id)))
+        (setq-local chirp-compose--accepted-owner owner
                     chirp-compose-write-outcome nil)
-        (appkit-compose-operation-finish owner))
-      (cond
-       (draft-id
-        (chirp-compose--delete-unsent-after-send
-         'draft draft-id compose-buffer source-buffer
-         temp-attachments success-message))
-       (scheduled-id
-        (chirp-compose--delete-unsent-after-send
-         'scheduled scheduled-id compose-buffer source-buffer
-         temp-attachments success-message))
-       (t
-        (chirp-compose--close-after-send
-         compose-buffer source-buffer temp-attachments success-message))))))
+        (appkit-compose-operation-update
+         owner :label success-message
+         :cancel-function
+         (lambda ()
+           (if (chirp-compose--operation-current-p compose-buffer owner)
+               (chirp-compose--close-after-send
+                compose-buffer owner source-buffer temp-attachments success-message)
+             (chirp-compose--cleanup-files temp-attachments))))
+        (cond
+         ((or draft-id scheduled-id)
+          (chirp-compose--delete-unsent-after-send
+           (if draft-id 'draft 'scheduled) (or draft-id scheduled-id)
+           compose-buffer owner source-buffer temp-attachments success-message))
+         (t
+          (chirp-compose--close-after-send
+           compose-buffer owner source-buffer temp-attachments success-message)))))))
 
 (defun chirp-compose--fail-send
     (compose-buffer owner temp-attachments message)
@@ -1285,10 +1318,13 @@ until the final settlement."
        :attachments (plist-get item :attachments)
        :reply-audience (and root-p (plist-get draft :reply-audience))
        :callback
-       (lambda (created-tweet-id _envelope)
-         (chirp-compose--send-next
-          compose-buffer owner source-buffer draft items (1+ index)
-          created-tweet-id temp-attachments success-message))
+       (lambda (created-tweet-id envelope)
+         (when (chirp-compose--operation-current-p compose-buffer owner)
+           (with-current-buffer compose-buffer
+             (chirp-compose--publish-result created-tweet-id envelope))
+           (chirp-compose--send-next
+            compose-buffer owner source-buffer draft items (1+ index)
+            created-tweet-id temp-attachments success-message)))
        :errback
        (lambda (message)
          (chirp-compose--fail-send
@@ -1385,9 +1421,12 @@ until the final settlement."
            :items (plist-get draft :items)
            :draft-id (plist-get draft :draft-id)
            :callback
-           (lambda (draft-id _envelope)
+           (lambda (draft-id entry)
              (when (chirp-compose--operation-current-p compose-buffer owner)
                (with-current-buffer compose-buffer
+                 (when entry
+                   (chirp-unsent-apply-result
+                    chirp-compose-unsent-source 'draft draft-id entry))
                  (setq-local chirp-compose-draft-id draft-id
                              chirp-compose-write-outcome nil
                              buffer-read-only nil)
@@ -1438,10 +1477,15 @@ for a local date and time."
            :scheduled-id chirp-compose-scheduled-id
            :execute-at execute-at
            :callback
-           (lambda (_created _envelope)
-             (chirp-compose--finish-send
-              compose-buffer owner source-buffer temp-attachments
-              "Post scheduled."))
+           (lambda (scheduled-id entry)
+             (when (chirp-compose--operation-current-p compose-buffer owner)
+               (with-current-buffer compose-buffer
+                 (when entry
+                   (chirp-unsent-apply-result
+                    chirp-compose-unsent-source 'scheduled scheduled-id entry)))
+               (chirp-compose--finish-send
+                compose-buffer owner source-buffer temp-attachments
+                "Post scheduled." t)))
            :errback
            (lambda (message)
              (chirp-compose--fail-send
@@ -1534,6 +1578,10 @@ for a local date and time."
 TARGET-ID, TARGET-HANDLE, and TARGET-URL describe an optional reply or quote
 target."
   (let* ((source (chirp-compose--source-buffer))
+         (source-surface (with-current-buffer source (appkit-current-surface)))
+         (source-model (and source-surface (appkit-surface-model source-surface)))
+         (unsent-source (chirp-unsent-capture-source source))
+         (app (chirp-app))
          (buffer (generate-new-buffer "*chirp compose*")))
     (pop-to-buffer buffer)
     (with-current-buffer buffer
@@ -1543,6 +1591,10 @@ target."
       (setq-local chirp-compose-target-handle target-handle)
       (setq-local chirp-compose-target-url target-url)
       (setq-local chirp-compose-source-buffer source)
+      (setq-local chirp-compose-source-surface source-surface
+                  chirp-compose-source-model source-model
+                  chirp-compose-unsent-source unsent-source
+                  chirp-compose-app app)
       (setq-local chirp-compose-temp-attachments nil)
       (setq-local chirp-compose--submit-temps nil)
       (setq-local chirp-compose-draft-id nil)
@@ -1553,7 +1605,7 @@ target."
       (rename-buffer (chirp-compose--buffer-name) t)
       (add-hook 'kill-buffer-hook #'chirp-compose--cleanup-temp-attachments nil t)
       (appkit-chat-compose-setup
-       :app (chirp-app)
+       :app app
        :context-function #'chirp-compose--header-string
        :status-fields-function #'chirp-compose--status-fields
        :parts-function #'chirp-compose--parts)

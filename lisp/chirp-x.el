@@ -1310,8 +1310,9 @@ ENCRYPTED-BYTES is the exact ciphertext size.  CALLBACK receives the
 `media_hash_key' returned by X web's initialize, TON upload, and finalize
 workflow.  Chirp generates the upload's transport UUID internally.  ERRBACK
 owns setup, transport, cancellation, and response failures.  OWNER owns the
-complete Appkit lifecycle.  PROGRESS receives bounded phase plists.  No upload
-request is retried automatically."
+complete Appkit lifecycle.  Return a stable lifecycle handle that cancels the
+current initialize, part, or finalize request.  PROGRESS receives bounded phase
+plists.  No upload request is retried automatically."
   (unless (functionp callback)
     (error "XChat media upload callback is not callable"))
   (when (and progress (not (functionp progress)))
@@ -1340,25 +1341,57 @@ request is retried automatically."
                  (ceiling encrypted-bytes
                           chirp-x--chat-upload-chunk-size))
                 (upload-owner (or owner (chirp-app)))
-                settled-p workflow-handle)
+                settled-p workflow-handle child child-token)
             (cl-labels
-                ((notify
-                   (phase progress-value)
-                   (chirp-x--notify-upload-progress
-                    progress
-                    (list :phase phase :progress progress-value)))
-                 (retire-workflow
-                   ()
-                   (when (and (appkit-handle-p workflow-handle)
-                              (appkit-handle-alive-p workflow-handle))
-                     (appkit-retire-handle workflow-handle)
-                     (setq workflow-handle nil)))
-                 (fail
-                   (message)
+                ((notify (phase progress-value)
                    (unless settled-p
-                     (setq settled-p t)
-                     (retire-workflow)
-                     (funcall error-fn message)))
+                     (chirp-x--notify-upload-progress
+                      progress
+                      (list :phase phase :progress progress-value))))
+                 (retire-workflow ()
+                   (when (appkit-handle-p workflow-handle)
+                     (appkit-retire-handle workflow-handle)))
+                 (cancel-child (request)
+                   (cond
+                    ((appkit-handle-p request) (appkit-cancel-handle request))
+                    ((buffer-live-p request) (chirp-x-cancel-request request))))
+                 (fail (message)
+                   (unless settled-p
+                     (let ((request child))
+                       (setq settled-p t child nil child-token nil)
+                       (unwind-protect
+                           (cancel-child request)
+                         (retire-workflow)
+                         (funcall error-fn message)))))
+                 (start-request (start success)
+                   (when (ensure-active)
+                     (let ((token (list nil)))
+                       (setq child-token token child nil)
+                       (condition-case err
+                           (let ((request
+                                  (funcall
+                                   start
+                                   (lambda (payload)
+                                     (when (and (not settled-p)
+                                                (eq token child-token))
+                                       (setq child nil child-token nil)
+                                       (funcall success payload)))
+                                   (lambda (message)
+                                     (when (and (not settled-p)
+                                                (eq token child-token))
+                                       (setq child nil child-token nil)
+                                       (fail message))))))
+                             ;; Do not overwrite a newer child when the
+                             ;; previous transport completed synchronously.
+                             (if (and (not settled-p) (eq token child-token))
+                                 (setq child request)
+                               (cancel-child request)))
+                         (chirp-x--callback-error
+                          (signal (car err) (cdr err)))
+                         ((error quit)
+                          (fail (error-message-string err))
+                          (when (eq (car err) 'quit)
+                            (signal (car err) (cdr err))))))))
                  (succeed
                    (media-hash)
                    (unless settled-p
@@ -1373,25 +1406,33 @@ request is retried automatically."
                     (t
                      (fail "XChat media upload was canceled")
                      nil)))
-                 (finalize
-                   (media-hash resume-id)
+                 (finalize (media-hash resume-id)
                    (when (ensure-active)
                      (notify 'finalize 1.0)
-                     (chirp-x-graphql-request
-                      chirp-x--chat-media-finalize-operation
-                      `(("conversationId" . ,conversation-id)
-                        ("isPublic" . :json-false)
-                        ("mediaHashKey" . ,media-hash)
-                        ("messageId" . ,upload-message-id)
-                        ("numParts" . ,(number-to-string segment-count))
-                        ("resumeId" . ,resume-id)
-                        ("ttlMsec" . "2592000000"))
+                     (start-request
+                      (lambda (success failure)
+                        (chirp-x-graphql-request
+                         chirp-x--chat-media-finalize-operation
+                         `(("conversationId" . ,conversation-id)
+                           ("isPublic" . :json-false)
+                           ("mediaHashKey" . ,media-hash)
+                           ("messageId" . ,upload-message-id)
+                           ("numParts" . ,(number-to-string segment-count))
+                           ("resumeId" . ,resume-id)
+                           ("ttlMsec" . "2592000000"))
+                         success
+                         :errback
+                         (lambda (message)
+                           (funcall
+                            failure
+                            (format "XChat media finalize request failed: %s"
+                                    message)))
+                         :owner upload-owner))
                       (lambda (payload)
                         (let* ((result
                                 (chirp-get-in
                                  payload
-                                 '("data"
-                                   "xchat_finalize_media_upload")))
+                                 '("data" "xchat_finalize_media_upload")))
                                (upload-error
                                 (and (chirp-object-p result)
                                      (chirp-get result "upload_error"))))
@@ -1401,18 +1442,9 @@ request is retried automatically."
                              "XChat media finalize returned invalid metadata"))
                            ((chirp-x--nonblank-string upload-error)
                             (fail
-                             (format
-                              "XChat media finalize failed: %s"
-                              upload-error)))
-                           (t
-                            (succeed media-hash)))))
-                      :errback
-                      (lambda (message)
-                        (fail
-                         (format
-                          "XChat media finalize request failed: %s"
-                          message)))
-                      :owner upload-owner)))
+                             (format "XChat media finalize failed: %s"
+                                     upload-error)))
+                           (t (succeed media-hash))))))))
                  (upload
                    (media-hash resume-id part-number)
                    (when (ensure-active)
@@ -1427,34 +1459,36 @@ request is retried automatically."
                         (+ 0.05
                            (* 0.9
                               (/ (float part-number) segment-count))))
-                       (chirp-x--request
-                        (concat
-                         chirp-x--chat-media-base-url
-                         conversation-id "/" media-hash
-                         "?concurrent=true&resumeId="
-                         (url-hexify-string resume-id)
-                         "&partNumber="
-                         (number-to-string part-number))
-                        'post
+                       (start-request
+                        (lambda (success failure)
+                          (chirp-x--request
+                           (concat
+                            chirp-x--chat-media-base-url
+                            conversation-id "/" media-hash
+                            "?concurrent=true&resumeId="
+                            (url-hexify-string resume-id)
+                            "&partNumber="
+                            (number-to-string part-number))
+                           'post success
+                           :data
+                           (chirp-x--read-file-range encrypted-file start length)
+                           :content-type "application/octet-stream"
+                           :allow-empty t
+                           :errback
+                           (lambda (message)
+                             (funcall
+                              failure
+                              (format "XChat media part %d request failed: %s"
+                                      part-number message)))
+                           :owner upload-owner
+                           :cookie-only t
+                           :settle-on-cancel t
+                           :cancel-message "XChat media upload was canceled"))
                         (lambda (_payload)
                           (let ((next-part (1+ part-number)))
                             (if (< next-part segment-count)
                                 (upload media-hash resume-id next-part)
-                              (finalize media-hash resume-id))))
-                        :data
-                        (chirp-x--read-file-range encrypted-file start length)
-                        :content-type "application/octet-stream"
-                        :allow-empty t
-                        :errback
-                        (lambda (message)
-                          (fail
-                           (format
-                            "XChat media part %d request failed: %s"
-                            part-number message)))
-                        :owner upload-owner
-                        :cookie-only t
-                        :settle-on-cancel t
-                        :cancel-message "XChat media upload was canceled"))))
+                              (finalize media-hash resume-id))))))))
                  (initialize-result
                    (payload)
                    (let* ((result
@@ -1496,19 +1530,23 @@ request is retried automatically."
                      upload-owner 'function
                      (lambda () (fail "XChat media upload was canceled"))))
               (notify 'initialize 0.0)
-              (chirp-x-graphql-request
-               chirp-x--chat-media-initialize-operation
-               `(("conversationId" . ,conversation-id)
-                 ("messageId" . ,upload-message-id)
-                 ("totalBytes" . ,(number-to-string encrypted-bytes)))
-               #'initialize-result
-               :errback
-               (lambda (message)
-                 (fail
-                  (format
-                   "XChat media initialize request failed: %s"
-                   message)))
-               :owner upload-owner))))
+              (start-request
+               (lambda (success failure)
+                 (chirp-x-graphql-request
+                  chirp-x--chat-media-initialize-operation
+                  `(("conversationId" . ,conversation-id)
+                    ("messageId" . ,upload-message-id)
+                    ("totalBytes" . ,(number-to-string encrypted-bytes)))
+                  success
+                  :errback
+                  (lambda (message)
+                    (funcall
+                     failure
+                     (format "XChat media initialize request failed: %s"
+                             message)))
+                  :owner upload-owner))
+               #'initialize-result)
+              workflow-handle)))
       (chirp-x--callback-error
        (chirp-x--resignal-callback-error err))
       (error

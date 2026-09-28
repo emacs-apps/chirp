@@ -8,6 +8,7 @@
 (require 'cl-lib)
 (require 'chirp-core)
 (require 'chirp-timeline)
+(require 'chirp-actions)
 
 (ert-deftest chirp-buffer-creates-fresh-view-buffers ()
   "Each `chirp-buffer' call should return a fresh buffer."
@@ -596,47 +597,6 @@
               (should-not (member "Older page failed" messages)))))
       (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
-(ert-deftest chirp-primary-tweet-actions-update-canonical-state-by-key
-    ()
-  "Tweet actions should not recover primary state from rendered text."
-  (let ((chirp--app nil) buffer callback)
-    (unwind-protect
-        (save-window-excursion
-          (cl-letf
-              (((symbol-function 'chirp-backend-feed)
-                (lambda (success &rest _args) (setq callback success)))
-               ((symbol-function 'chirp-media-prefetch-tweets)
-                #'ignore)
-               ((symbol-function 'chirp-enrich-quoted-tweets) #'ignore))
-            (setq buffer (chirp-timeline-open-home))
-            (let
-                ((view
-                  (with-current-buffer buffer
-                    (appkit-current-surface))))
-              (funcall callback
-                       (list
-                        '(:kind tweet :id "1" :text "First" :liked-p
-                          nil))
-                       nil)
-              (appkit-loop-run-pass (appkit-surface-loop view))
-              (cl-letf
-                  (((symbol-function 'chirp--map-buffer-tweets)
-                    (lambda (&rest _args)
-                      (ert-fail "primary state was scanned from text"))))
-                (should
-                 (chirp-update-tweet-by-id buffer "1"
-                                           (lambda (tweet)
-                                             (setf
-                                              (plist-get tweet
-                                                         :liked-p)
-                                              t))
-                                           t)))
-              (should
-               (plist-get
-                (car (plist-get (appkit-surface-model view) :items))
-                :liked-p)))))
-      (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
-
 (ert-deftest chirp-primary-tweet-mutations-keep-inactive-feed-coherent
     ()
   "Tweet updates and deletion should reach both cached primary feeds."
@@ -650,6 +610,10 @@
                ((symbol-function 'chirp-media-prefetch-tweets)
                 #'ignore)
                ((symbol-function 'chirp-enrich-quoted-tweets) #'ignore))
+            (cl-letf (((symbol-function 'chirp-backend-request)
+                       (lambda (_args success &optional _error)
+                         (funcall success nil nil)))
+                      ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
             (setq buffer (chirp-timeline-open-home))
             (let
                 ((view
@@ -672,13 +636,11 @@
               (with-current-buffer buffer
                 (chirp-toggle-home-following))
               (appkit-loop-run-pass (appkit-surface-loop view))
-              (should
-               (chirp-update-tweet-by-id buffer "1"
-                                         (lambda (tweet)
-                                           (setf
-                                            (plist-get tweet :liked-p)
-                                            t))
-                                         t))
+              (with-current-buffer buffer
+                (goto-char (point-min))
+                (search-forward "Home")
+                (chirp-like-at-point))
+              (appkit-loop-run-pass (appkit-surface-loop view))
               (let
                   ((states
                     (chirp--session-primary-feed-states
@@ -691,11 +653,14 @@
                  (plist-get
                   (car (plist-get (gethash 'following states) :items))
                   :liked-p))
-                (should
-                 (chirp--remove-tweet-from-primary-feeds buffer "1"))
+                (with-current-buffer buffer
+                  (goto-char (point-min))
+                  (search-forward "Home")
+                  (chirp-delete-at-point))
+                (appkit-loop-run-pass (appkit-surface-loop view))
                 (should-not (plist-get (gethash 'home states) :items))
                 (should-not
-                 (plist-get (gethash 'following states) :items))))))
+                 (plist-get (gethash 'following states) :items)))))))
       (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest chirp-primary-quoted-action-invalidates-owning-row ()
@@ -722,13 +687,14 @@
                         :quoted-tweet quoted)))
               (funcall callback (list outer) nil)
               (appkit-loop-run-pass (appkit-surface-loop view))
-              (should
-               (chirp-update-tweet-by-id buffer "quoted"
-                                         (lambda (tweet)
-                                           (setf
-                                            (plist-get tweet :liked-p)
-                                            t))
-                                         t))
+              (cl-letf (((symbol-function 'chirp-backend-request)
+                         (lambda (_args success &optional _error)
+                           (funcall success nil nil))))
+                (with-current-buffer buffer
+                  (goto-char (point-min))
+                  (search-forward "Quoted")
+                  (chirp-like-at-point)))
+              (appkit-loop-run-pass (appkit-surface-loop view))
               (should (plist-get quoted :liked-p)))))
       (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
@@ -947,10 +913,9 @@
             (appkit-loop-run-pass (appkit-surface-loop view)))
           (with-current-buffer buffer
             (should (= (how-many "Before" (point-min) (point-max)) 2)))
-          (chirp-update-tweet-by-id buffer tweet-id
-                                    (lambda (tweet)
-                                      (plist-put tweet :text "After"))
-                                    t)
+          (dolist (tweet (plist-get (appkit-surface-model view) :items))
+            (setf (plist-get tweet :text) "After"))
+          (chirp-request-tweet-rerender tweet-id buffer)
           (while (> (appkit-loop-pending-count (appkit-surface-loop view)) 0)
             (appkit-loop-run-pass (appkit-surface-loop view)))
           (with-current-buffer buffer
