@@ -18,6 +18,7 @@
       (chirp-compose-mode)
       (setq-local chirp-compose-kind 'post)
       (setq-local chirp-compose-source-buffer source)
+      (setq-local chirp-compose-app (chirp-app))
       (setq-local chirp-compose-temp-attachments nil)
       (setq-local chirp-compose-draft-id nil)
       (setq-local chirp-compose-scheduled-id nil)
@@ -186,30 +187,6 @@ Return a list of (compose source foreign)."
         (when (buffer-live-p source)
           (kill-buffer source))))))
 
-(ert-deftest chirp-compose-save-posts-a-thread-as-one-draft ()
-  "A multi-part save should send every item in one draft request."
-  (pcase-let ((`(,compose . ,source)
-               (chirp-test--make-compose-buffer "first")))
-    (let (captured)
-      (unwind-protect
-          (cl-letf (((symbol-function 'chirp-backend-save-draft)
-                     (lambda (&rest draft)
-                       (setq captured draft)
-                       (funcall (plist-get draft :callback)
-                                "1" nil))))
-            (with-current-buffer compose
-              (chirp-compose-add-post)
-              (insert "second")
-              (chirp-compose-save))
-            (let ((items (plist-get captured :items)))
-              (should (= (length items) 2))
-              (should (equal (plist-get (car items) :text) "first"))
-              (should (equal (plist-get (cadr items) :text) "second")))
-            (should (buffer-live-p compose)))
-        (when (buffer-live-p compose)
-          (kill-buffer compose))
-        (when (buffer-live-p source)
-          (kill-buffer source))))))
 
 (ert-deftest chirp-compose-schedule-closes-after-success ()
   "Scheduling should submit one request and close the compose buffer."
@@ -349,7 +326,7 @@ Return a list of (compose source foreign)."
                          (funcall (plist-get draft :callback)
                                   "1" nil)))
                       ((symbol-function 'chirp-backend-delete-unsent)
-                       (lambda (kind id callback &optional _errback)
+                       (lambda (kind id callback &optional _errback _owner)
                          (setq deleted (list kind id))
                          (funcall callback nil nil))))
               (with-current-buffer compose
@@ -913,6 +890,303 @@ Return a list of (compose source foreign)."
       (when (buffer-live-p source)
         (kill-buffer source)))))
 
+(defun chirp-test--compose-from-unsent (kind entry)
+  "Open a real composer from a temporary KIND collection containing ENTRY."
+  (let ((source (generate-new-buffer " *chirp-compose-unsent*"))
+        compose)
+    (switch-to-buffer source)
+    (chirp-unsent-mode)
+    (setq-local chirp-unsent-kind kind)
+    (chirp-unsent--apply-entries (list entry))
+    (chirp-compose-open-unsent entry)
+    (setq compose (current-buffer))
+    (cons compose source)))
+
+(ert-deftest chirp-compose-save-reconciles-submitted-thread-snapshot ()
+  "Saving updates the originating row with confirmed text and uploaded media."
+  (save-window-excursion
+    (pcase-let ((`(,compose . ,source)
+                 (chirp-test--compose-from-unsent
+                  'draft '(:id "2087" :kind draft :texts ("old")))))
+      (let (complete)
+        (unwind-protect
+            (cl-letf (((symbol-function 'chirp-x-graphql-request)
+                       (lambda (_operation _variables callback &rest _options)
+                         (setq complete callback)))
+                      ((symbol-function 'chirp-x-upload-media-alt-text)
+                       (lambda (_id _text callback &rest _options)
+                         (funcall callback nil))))
+              (with-current-buffer compose
+                (appkit-chat-compose-set-items
+                 '((:text "first" :attachments
+                          ((:media-id "77" :description "cat" :type "photo")))
+                   (:text "second" :attachments nil)))
+                (chirp-compose-save)
+                ;; Simulate another in-memory edit while the request is pending.
+                (let ((inhibit-read-only t))
+                  (appkit-chat-compose-set-items '((:text "later edit")))))
+              (funcall complete '(("data" . nil)))
+              (with-current-buffer source
+                (let ((entry (car chirp-unsent-entries)))
+                  (should (equal (plist-get entry :texts) '("first" "second")))
+                  (should (equal
+                           (plist-get
+                            (car (plist-get (car (plist-get entry :items))
+                                            :attachments)) :media-id)
+                           "77"))
+                  (should (= (plist-get entry :media-count) 1))))
+              (with-current-buffer compose
+                (should (equal (appkit-chat-compose-bodies) '("later edit")))
+                (should-not (appkit-compose-operation-active-p))))
+          (dolist (buffer (list compose source))
+            (when (buffer-live-p buffer) (kill-buffer buffer))))))))
+
+(ert-deftest chirp-compose-edit-schedule-retains-confirmed-object ()
+  "An accepted schedule edit updates its row without deleting that schedule."
+  (save-window-excursion
+    (pcase-let ((`(,compose . ,source)
+                 (chirp-test--compose-from-unsent
+                  'scheduled
+                  '(:id "2090" :kind scheduled :texts ("old")
+                         :execute-at 1786700000))))
+      (let (deleted)
+        (unwind-protect
+            (cl-letf (((symbol-function 'chirp-x-graphql-request)
+                       (lambda (_operation _variables callback &rest _options)
+                         (funcall callback '(("data" . nil)))))
+                      ((symbol-function 'chirp-backend-delete-unsent)
+                       (lambda (&rest args) (setq deleted args))))
+              (with-current-buffer compose
+                (appkit-chat-compose-set-items '((:text "edited")))
+                (chirp-compose-schedule 1886700000))
+              (should-not deleted)
+              (should-not (buffer-live-p compose))
+              (with-current-buffer source
+                (should (equal (plist-get (car chirp-unsent-entries) :texts)
+                               '("edited")))
+                (should (= (plist-get (car chirp-unsent-entries) :execute-at)
+                           1886700000))))
+          (dolist (buffer (list compose source))
+            (when (buffer-live-p buffer) (kill-buffer buffer))))))))
+
+(ert-deftest chirp-compose-accepted-write-retains-authority-through-cleanup ()
+  "A delayed cleanup blocks repeats, consumes the row, and then closes."
+  (dolist (operation '(send schedule))
+    (save-window-excursion
+      (pcase-let ((`(,compose . ,source)
+                   (chirp-test--compose-from-unsent
+                    'draft '(:id "2087" :kind draft :texts ("publish")))))
+        (let (cleanup (writes 0) deleted-kind)
+          (unwind-protect
+              (cl-letf (((symbol-function 'chirp-backend-compose)
+                         (lambda (&rest args)
+                           (cl-incf writes)
+                           (funcall (plist-get args :callback) "99" nil)))
+                        ((symbol-function 'chirp-backend-schedule)
+                         (lambda (&rest args)
+                           (cl-incf writes)
+                           (funcall (plist-get args :callback) "100" nil)))
+                        ((symbol-function 'chirp-backend-delete-unsent)
+                         (lambda (kind _id callback &optional _errback _owner)
+                           (setq deleted-kind kind cleanup callback))))
+                (with-current-buffer compose
+                  (if (eq operation 'send)
+                      (chirp-compose-send)
+                    (chirp-compose-schedule 1886700000))
+                  (should (appkit-compose-operation-active-p))
+                  (should buffer-read-only)
+                  (should-error (chirp-compose-send) :type 'user-error)
+                  (should-error (chirp-compose-save) :type 'user-error)
+                  (should-error (chirp-compose-schedule 1886700001)
+                                :type 'user-error))
+                (should (= writes 1))
+                (should (eq deleted-kind 'draft))
+                (with-current-buffer source
+                  (should (assoc "2087" tabulated-list-entries)))
+                (funcall cleanup nil nil)
+                (should-not (buffer-live-p compose))
+                (with-current-buffer source
+                  (should-not chirp-unsent-entries)
+                  (should-not (assoc "2087" tabulated-list-entries))))
+            (dolist (buffer (list compose source))
+              (when (buffer-live-p buffer) (kill-buffer buffer)))))))))
+
+(ert-deftest chirp-compose-cleanup-failure-does-not-reopen-published-draft ()
+  "Cleanup failure closes the accepted composer but retains the unconsumed row."
+  (save-window-excursion
+    (pcase-let ((`(,compose . ,source)
+                 (chirp-test--compose-from-unsent
+                  'draft '(:id "2087" :kind draft :texts ("publish")))))
+      (let (fail)
+        (unwind-protect
+            (cl-letf (((symbol-function 'chirp-backend-compose)
+                       (lambda (&rest args)
+                         (funcall (plist-get args :callback) "99" nil)))
+                      ((symbol-function 'chirp-backend-delete-unsent)
+                       (lambda (_kind _id _callback &optional errback _owner)
+                         (setq fail errback)))
+                      ((symbol-function 'chirp-actions-show-error) #'ignore))
+              (with-current-buffer compose (chirp-compose-send))
+              (funcall fail "delete denied")
+              (should-not (buffer-live-p compose))
+              (with-current-buffer source
+                (should (equal (plist-get (car chirp-unsent-entries) :id)
+                               "2087"))))
+          (dolist (buffer (list compose source))
+            (when (buffer-live-p buffer) (kill-buffer buffer))))))))
+
+(ert-deftest chirp-compose-old-cleanup-cannot-close-successor-composer ()
+  "Both cleanup success and failure lack authority over a reset composer."
+  (dolist (outcome '(success failure))
+    (pcase-let ((`(,compose . ,source)
+                 (chirp-test--make-compose-buffer "publish")))
+      (let (complete fail successor)
+        (unwind-protect
+            (cl-letf (((symbol-function 'chirp-backend-compose)
+                       (lambda (&rest args)
+                         (funcall (plist-get args :callback) "99" nil)))
+                      ((symbol-function 'chirp-backend-delete-unsent)
+                       (lambda (_kind _id callback &optional errback _owner)
+                         (setq complete callback fail errback))))
+              (with-current-buffer compose
+                (setq-local chirp-compose-draft-id "2087")
+                (chirp-compose-send)
+                (appkit-compose-operation-finish chirp-compose--accepted-owner)
+                (setq-local buffer-read-only nil)
+                (appkit-chat-compose-set-items '((:text "successor")))
+                (setq successor
+                      (chirp-compose--begin-operation 'saving "Saving successor")))
+              (if (eq outcome 'success)
+                  (funcall complete nil nil)
+                (funcall fail "old failure"))
+              (should (buffer-live-p compose))
+              (with-current-buffer compose
+                (should (appkit-compose-operation-current-p successor))
+                (should (equal (appkit-chat-compose-bodies) '("successor")))
+                (should buffer-read-only)))
+          (dolist (buffer (list compose source))
+            (when (buffer-live-p buffer) (kill-buffer buffer))))))))
+
+(defun chirp-test--created-reply-result ()
+  "Return a complete server reply result for publication reconciliation."
+  '(("rest_id" . "11")
+    ("legacy" . (("full_text" . "server reply")
+                 ("in_reply_to_status_id_str" . "10")
+                 ("conversation_id_str" . "10")))
+    ("core" . (("user_results" .
+                (("result" .
+                  (("rest_id" . "42")
+                   ("legacy" . (("screen_name" . "writer")
+                                ("name" . "Writer")))))))))))
+
+(ert-deftest chirp-compose-published-results-reconcile-only-original-model ()
+  "Full creates insert locally; ID-only reads are bounded and lifetime fenced."
+  (dolist (scenario '(complete id-only switched-after-read replaced-surface))
+    (save-window-excursion
+      (let* ((model (list :type 'thread :query '(:focus-id "10")
+                          :items '((:id "10" :text "original"))
+                          :page '(:next-cursor "keep")))
+             (surface (chirp-open-projection-view
+                       :id (make-symbol "created-source") :title "Created source"
+                       :state model :render-function #'ignore :printer #'ignore))
+             (source (appkit-surface-buffer surface))
+             compose complete read-complete (reads 0))
+        (unwind-protect
+            (cl-letf (((symbol-function 'chirp-backend-compose)
+                       (lambda (&rest args)
+                         (setq complete (plist-get args :callback))))
+                      ((symbol-function 'chirp-x-graphql-request)
+                       (lambda (_operation _variables callback &rest _options)
+                         (cl-incf reads)
+                         (setq read-complete callback))))
+              (switch-to-buffer source)
+              (chirp-compose-open 'reply :target-id "10")
+              (setq compose (current-buffer))
+              (appkit-chat-compose-set-items '((:text "submitted reply")))
+              (chirp-compose-send)
+              (funcall complete "11"
+                       (when (eq scenario 'complete)
+                         `(("data" .
+                            (("create_tweet" .
+                              (("tweet_results" .
+                                (("result" .
+                                  ,(chirp-test--created-reply-result)))))))))))
+              (should-not (buffer-live-p compose))
+              (should (= reads (if (eq scenario 'complete) 0 1)))
+              (when (eq scenario 'switched-after-read)
+                (setq model (list :type 'thread :query '(:focus-id "20")
+                                  :items '((:id "20" :text "other"))))
+                (appkit-surface-send surface (list 'chirp-model model)))
+              (when (eq scenario 'replaced-surface)
+                (appkit-surface-stop surface))
+              (when read-complete
+                (funcall read-complete
+                         `(("data" .
+                            (("tweetResult" .
+                              (("result" .
+                                ,(chirp-test--created-reply-result)))))))))
+              (when (appkit-surface-live-p surface)
+                (appkit-loop-run-pass (appkit-surface-loop surface)))
+              (let ((items (plist-get model :items)))
+                (if (memq scenario '(complete id-only))
+                    (progn
+                      (should (equal (mapcar (lambda (item) (plist-get item :id))
+                                             items)
+                                     '("10" "11")))
+                      (should (equal (plist-get (cadr items) :text)
+                                     "server reply"))
+                      (should (equal (plist-get model :page)
+                                     '(:next-cursor "keep"))))
+                  (should-not (cl-find "11" items :test #'equal
+                                       :key (lambda (item) (plist-get item :id)))))))
+          (dolist (buffer (list compose source))
+            (when (buffer-live-p buffer) (kill-buffer buffer))))))))
+
+(ert-deftest chirp-compose-settlement-preserves-source-without-reload ()
+  "Schedule/send completion never reloads or retargets a changed source model."
+  (dolist (scenario '(schedule send switched-source))
+    (save-window-excursion
+      (let* ((model (list :type 'thread :query '(:focus-id "10")
+                          :items '((:id "10" :text "original"))
+                          :page '(:next-cursor "keep")))
+             (surface (chirp-open-projection-view
+                       :id (make-symbol "compose-source") :title "Compose source"
+                       :state model :render-function #'ignore :printer #'ignore))
+             (source (appkit-surface-buffer surface))
+             compose complete (reloads 0))
+        (unwind-protect
+            (progn
+              (switch-to-buffer source)
+              (setq-local chirp--refresh-function
+                          (lambda () (cl-incf reloads)))
+              (chirp-compose-open 'reply :target-id "10")
+              (setq compose (current-buffer))
+              (appkit-chat-compose-set-items '((:text "reply")))
+              (cl-letf (((symbol-function 'chirp-backend-compose)
+                         (lambda (&rest args)
+                           (setq complete (plist-get args :callback))))
+                        ((symbol-function 'chirp-backend-schedule)
+                         (lambda (&rest args)
+                           (setq complete (plist-get args :callback)))))
+                (if (eq scenario 'schedule)
+                    (chirp-compose-schedule 1886700000)
+                  (chirp-compose-send)))
+              (when (eq scenario 'switched-source)
+                (setq model (list :type 'thread :query '(:focus-id "20")
+                                  :items '((:id "20" :text "new source"))
+                                  :page '(:next-cursor "new-page")))
+                (appkit-surface-send surface (list 'chirp-model model)))
+              (let ((before (copy-tree model))
+                    (position (with-current-buffer source (point))))
+                (funcall complete nil nil)
+                (should-not (buffer-live-p compose))
+                (should (= reloads 0))
+                (should (eq (appkit-surface-model surface) model))
+                (should (equal model before))
+                (with-current-buffer source (should (= (point) position)))))
+          (dolist (buffer (list compose source))
+            (when (buffer-live-p buffer) (kill-buffer buffer))))))))
+
 (defun chirp-test--with-tweet-buffer (tweet fn)
   "Create a temporary Chirp view buffer with TWEET and call FN inside it."
   (let ((buffer (generate-new-buffer " *chirp-action-tweet*")))
@@ -1072,71 +1346,6 @@ Return a list of (compose source foreign)."
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest chirp-toggle-like-at-point-uses-like-and-unlike-commands ()
-  "Toggle like should choose the backend command from the current local state."
-  (clrhash (chirp--session-tweet-state-overrides (chirp--session)))
-  (let (captured-args rerendered)
-    (unwind-protect
-        (progn
-          (chirp-test--with-tweet-buffer
-           '(:kind tweet :id "123" :liked-p nil :like-count 10)
-           (lambda (_buffer)
-             (cl-letf (((symbol-function 'chirp-actions--perform)
-                        (lambda (args on-success &optional _on-error)
-                          (setq captured-args args)
-                          (funcall on-success nil nil)))
-                       ((symbol-function 'chirp-request-rerender)
-                        (lambda (&optional _buffer _delay)
-                          (setq rerendered t))))
-               (chirp-toggle-like-at-point)
-               (should (equal captured-args '("like" "123")))
-               (should rerendered)
-               (should (plist-get (chirp-entry-at-point) :liked-p))
-               (should (= (plist-get (chirp-entry-at-point) :like-count) 11)))))
-          (setq captured-args nil
-                rerendered nil)
-          (chirp-test--with-tweet-buffer
-           '(:kind tweet :id "123" :liked-p t :like-count 10)
-           (lambda (_buffer)
-             (cl-letf (((symbol-function 'chirp-actions--perform)
-                        (lambda (args on-success &optional _on-error)
-                          (setq captured-args args)
-                          (funcall on-success nil nil)))
-                       ((symbol-function 'chirp-request-rerender)
-                        (lambda (&optional _buffer _delay)
-                          (setq rerendered t))))
-               (chirp-toggle-like-at-point)
-               (should (equal captured-args '("unlike" "123")))
-               (should rerendered)
-               (should-not (plist-get (chirp-entry-at-point) :liked-p))
-               (should (= (plist-get (chirp-entry-at-point) :like-count) 9))))))
-      (clrhash (chirp--session-tweet-state-overrides (chirp--session))))))
-
-(ert-deftest chirp-delete-at-point-removes-primary-canonical-state ()
-  "Successful deletion should remove primary state without a feed refresh."
-  (let (captured-args removed refreshed)
-    (chirp-test--with-tweet-buffer
-     '(:kind tweet :id "123")
-     (lambda (buffer)
-       (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
-                 ((symbol-function 'chirp-actions--perform)
-                  (lambda (args on-success &optional _on-error)
-                    (setq captured-args args)
-                    (funcall on-success nil nil)))
-                 ((symbol-function 'chirp-clear-tweet-state-overrides) #'ignore)
-                 ((symbol-function 'chirp--remove-tweet-from-primary-feeds)
-                  (lambda (target tweet-id)
-                    (should (eq target buffer))
-                    (should (equal tweet-id "123"))
-                    (setq removed t)))
-                 ((symbol-function 'chirp-actions--refresh-buffer)
-                  (lambda (_target)
-                    (setq refreshed t))))
-         (chirp-delete-at-point)
-         (should (equal captured-args '("delete" "--yes" "123")))
-         (should removed)
-         (should-not refreshed))))))
-
 (ert-deftest chirp-translate-at-point-renders-thread-result ()
   "An asynchronous translation must appear without refreshing the thread."
   (let ((chirp--app nil)
@@ -1209,9 +1418,13 @@ Return a list of (compose source foreign)."
               (appkit-loop-run-pass (appkit-surface-loop surface))
               (should (equal (caar requests) "456"))
               (let ((old-callback (cdar requests)))
-                (chirp-update-tweet-by-id
-                 buffer "456"
-                 (lambda (tweet) (plist-put tweet :text "Quoted edited")) t)
+                (setf (plist-get
+                       (plist-get
+                        (car (plist-get (appkit-surface-model surface) :items))
+                        :quoted-tweet)
+                       :text)
+                      "Quoted edited")
+                (chirp-request-tweet-rerender "123" buffer)
                 (appkit-loop-run-pass (appkit-surface-loop surface))
                 (with-current-buffer buffer
                   (goto-char (point-min))
@@ -1305,6 +1518,202 @@ Return a list of (compose source foreign)."
          (should (equal captured-url "https://fixupx.com/alice/status/123"))
          (should (equal last-message
                         "Copied https://fixupx.com/alice/status/123")))))))
+
+(ert-deftest chirp-stop-preserves-another-apps-active-composer ()
+  "Stopping one App must not cancel another App's pending publication."
+  (let ((chirp--app nil) buffer)
+    (unwind-protect
+        (save-window-excursion
+          (with-temp-buffer
+            (cl-letf (((symbol-function 'chirp-backend-compose) #'ignore))
+              (chirp-compose-open 'post)
+              (setq buffer (current-buffer))
+              (appkit-chat-compose-set-items '((:text "Pending publication")))
+              (chirp-compose-send)
+              (let ((chirp--app nil))
+                (chirp-app)
+                (cl-letf (((symbol-function 'buffer-list) (lambda () (list buffer))))
+                  (chirp-stop)))
+              (should (appkit-compose-operation-active-p))
+              (should buffer-read-only))))
+      (when (appkit-app-live-p chirp--app) (appkit-app-close chirp--app))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(defun chirp-test--with-action-surface (state function)
+  "Run FUNCTION with a real tweet projection owning STATE."
+  (let ((chirp--app nil)
+        (chirp-show-avatars nil)
+        (chirp-show-tweet-media nil)
+        buffer)
+    (unwind-protect
+        (save-window-excursion
+          (let ((surface (chirp-open-projection-view
+                          :id 'action-test :title "Saved posts" :state state
+                          :render-function #'chirp-timeline--sync
+                          :printer #'chirp-render-print-tweet-row :select t)))
+            (setq buffer (appkit-surface-buffer surface))
+            (with-current-buffer buffer (funcall function surface))))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest chirp-tweet-actions-commit-counts-without-reloading ()
+  "Confirmed toggles redraw their row; duplicate results don't double counts."
+  (let* ((tweet (list :kind 'tweet :id "1" :text "Target" :liked-p nil :like-count 10))
+         (state (list :type 'collection :items (list tweet)
+                      :query '(:kind search) :status '(:phase idle)
+                      :refresh (lambda () (ert-fail "Unexpected reload"))))
+         callback)
+    (chirp-test--with-action-surface
+     state
+     (lambda (surface)
+       (cl-letf (((symbol-function 'chirp-backend-request)
+                  (lambda (_args success &optional _error) (setq callback success))))
+         (goto-char (point-min))
+         (search-forward "Target")
+         (chirp-toggle-like-at-point)
+         (should-not (plist-get tweet :liked-p))
+         (with-temp-buffer (funcall callback nil nil))
+         (appkit-loop-run-pass (appkit-surface-loop surface))
+         (should (plist-get tweet :liked-p))
+         (should (= (plist-get tweet :like-count) 11))
+         (should (string-match-p "11" (buffer-string)))
+         (funcall callback nil nil)
+         (appkit-loop-run-pass (appkit-surface-loop surface))
+         (should (= (plist-get tweet :like-count) 11))
+         (goto-char (point-min))
+         (search-forward "Target")
+         (chirp-toggle-like-at-point)
+         (funcall callback nil nil)
+         (appkit-loop-run-pass (appkit-surface-loop surface))
+         (should-not (plist-get tweet :liked-p))
+         (should (= (plist-get tweet :like-count) 10))
+         (should-not (string-match-p "11" (buffer-string))))))))
+
+(ert-deftest chirp-unbookmark-removes-row-without-resetting-view ()
+  "Unbookmark uses collection identity and preserves unrelated loaded state."
+  (let* ((tweet (list :kind 'tweet :id "1" :text "Target" :bookmarked-p t))
+         (other (list :kind 'tweet :id "2" :text "Other retained post"))
+         (page (list :next-cursor "older-page"))
+         (expanded (make-hash-table :test #'equal))
+         (state (list :type 'collection :query '(:kind bookmarks)
+                      :items (list tweet other) :status '(:phase idle)
+                      :page page :expanded-tweet-ids expanded
+                      :refresh (lambda () (ert-fail "Unexpected reload"))))
+         callback)
+    (puthash "2" t expanded)
+    (chirp-test--with-action-surface
+     state
+     (lambda (surface)
+       (cl-letf (((symbol-function 'chirp-backend-request)
+                  (lambda (_args success &optional _error) (setq callback success))))
+         (goto-char (point-min))
+         (search-forward "Target")
+         (chirp-unbookmark-at-point)
+         (goto-char (point-min))
+         (search-forward "Other retained")
+         (let ((column (current-column)))
+           (with-temp-buffer (funcall callback nil nil))
+           (appkit-loop-run-pass (appkit-surface-loop surface))
+           (should (eq state (appkit-surface-model surface)))
+           (should (equal (plist-get state :items) (list other)))
+           (should (eq (plist-get state :page) page))
+           (should (gethash "2" (plist-get state :expanded-tweet-ids)))
+           (should (= (current-column) column))
+           (should (equal (plist-get (chirp-entry-at-point) :id) "2"))
+           (should-not (string-match-p "Target" (buffer-string)))))))))
+
+(ert-deftest chirp-tweet-result-cannot-retarget-replaced-surface ()
+  "A still-live buffer is not authority to update its successor Surface."
+  (let* ((tweet (list :kind 'tweet :id "1" :text "Original" :liked-p nil))
+         (state (list :type 'collection :items (list tweet) :status '(:phase idle)))
+         callback)
+    (chirp-test--with-action-surface
+     state
+     (lambda (surface)
+       (cl-letf (((symbol-function 'chirp-backend-request)
+                  (lambda (_args success &optional _error) (setq callback success))))
+         (goto-char (point-min))
+         (search-forward "Original")
+         (chirp-like-at-point)
+         (let ((type (appkit-surface-type surface))
+               (buffer (current-buffer))
+               (request (chirp-begin-request (current-buffer)))
+               (successor-tweet (list :kind 'tweet :id "1" :text "Successor" :liked-p nil)))
+           (appkit-surface-stop surface)
+           (let ((successor
+                  (appkit-open-generated-surface
+                   type :app (chirp-app) :identity 'replacement :buffer buffer
+                   :input (list :type 'collection :items (list successor-tweet)
+                                :status '(:phase idle)))))
+             (should-not (chirp-request-current-p buffer request))
+             (with-temp-buffer (funcall callback nil nil))
+             (appkit-loop-run-pass (appkit-surface-loop successor))
+             (should-not (plist-get successor-tweet :liked-p))
+             (should (string-match-p "Successor" (buffer-string))))))))))
+
+(ert-deftest chirp-tweet-result-cannot-clear-successor-session-cache ()
+  "Old write acknowledgements cannot invalidate or override a new App."
+  (let* ((tweet (list :kind 'tweet :id "1" :text "Original"))
+         (state (list :type 'collection :items (list tweet) :status '(:phase idle)))
+         callback)
+    (chirp-test--with-action-surface
+     state
+     (lambda (_surface)
+       (cl-letf (((symbol-function 'chirp-backend-request)
+                  (lambda (_args success &optional _error) (setq callback success))))
+         (goto-char (point-min))
+         (search-forward "Original")
+         (chirp-like-at-point)
+         (chirp-stop)
+         (let* ((session (chirp--session))
+                (cache (chirp--session-backend-read-cache session)))
+           (puthash "new-session" 'retained cache)
+           (with-temp-buffer (funcall callback nil nil))
+           (should (eq (gethash "new-session" cache) 'retained))
+           (should-not (gethash "1" (chirp--session-tweet-state-overrides session)))))))))
+
+(ert-deftest chirp-delete-thread-row-survives-late-article-and-refilter ()
+  "Deletion keeps loaded replies and cannot be undone by retained raw data."
+  (let ((chirp--app nil) (chirp-show-avatars nil) (chirp-show-tweet-media nil)
+        buffer thread-callback article-callback write-callback (reads 0))
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'chirp-backend-thread)
+                     (lambda (_id success &optional _error)
+                       (cl-incf reads) (setq thread-callback success)))
+                    ((symbol-function 'chirp-backend-article)
+                     (lambda (_id success &optional _error)
+                       (setq article-callback success)))
+                    ((symbol-function 'chirp-backend-request)
+                     (lambda (_args success &optional _error)
+                       (setq write-callback success)))
+                    ((symbol-function 'chirp-media-prefetch-tweets) #'ignore)
+                    ((symbol-function 'chirp-enrich-quoted-tweets) #'ignore)
+                    ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+            (let ((root (list :kind 'tweet :id "1" :text "Delete root" :article-title "Article"))
+                  (reply (list :kind 'tweet :id "2" :text "Keep reply" :reply-to-id "1")))
+              (setq buffer (chirp-thread-open-tweet root))
+              (funcall thread-callback (list root reply) nil)
+              (with-current-buffer buffer
+                (let ((surface (appkit-current-surface)))
+                  (appkit-loop-run-pass (appkit-surface-loop surface))
+                  (goto-char (point-min))
+                  (search-forward "Delete root")
+                  (chirp-delete-at-point)
+                  (funcall write-callback nil nil)
+                  (appkit-loop-run-pass (appkit-surface-loop surface))
+                  (funcall article-callback
+                           (list :kind 'tweet :id "1" :text "Obsolete article") nil)
+                  (funcall chirp-thread--refilter-function)
+                  (appkit-loop-run-pass (appkit-surface-loop surface))
+                  (should (= reads 1))
+                  (should (equal (mapcar (lambda (item) (plist-get item :id))
+                                        (plist-get (appkit-surface-model surface) :items))
+                                 '("2")))
+                  (should (string-match-p "Keep reply" (buffer-string)))
+                  (should-not (string-match-p "Obsolete article\\|Delete root" (buffer-string))))))))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (provide 'chirp-actions-test)
 

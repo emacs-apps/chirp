@@ -832,6 +832,7 @@ for caller consistency; the card owns its border face.  WRITE-ACTIONS-P
 controls mutation actions.  Nested quoted tweets are omitted after one level."
   (ignore prefix-face)
   (when-let* ((quoted (plist-get tweet :quoted-tweet))
+              ((not (plist-get quoted :deleted-p)))
               ((< chirp-render--quoted-tweet-depth 1))
               (span
                (let ((chirp-render--quoted-tweet-depth
@@ -1906,13 +1907,11 @@ tweet content and actions."
 
 (defun chirp-render-print-tweet-row (row)
   "Insert one projected tweet ROW at point."
-  (let ((start (point)))
-    (chirp-render-insert-tweet-row
-     (appkit-projection-row-payload row)
-     (appkit-projection-row-context row))
-    (when (< start (point))
-      (put-text-property
-       start (point) 'chirp-entry-id (appkit-projection-row-key row)))))
+  (let ((start (chirp-render-insert-tweet-row
+                (appkit-projection-row-payload row)
+                (appkit-projection-row-context row))))
+    (put-text-property
+     start (point) 'chirp-entry-id (appkit-projection-row-key row))))
 
 (defun chirp-render--tweet-separator-line ()
   "Return the tweet separator line, or nil when disabled."
@@ -1931,16 +1930,19 @@ tweet content and actions."
   "Insert TWEET as a list row following PREVIOUS.
 
 The row owns its preceding separator and direct-reply context, so keyed
-projections can replace it as one unit."
+projections can replace it as one unit.  Return the post's start, excluding
+the separator so position anchors survive its insertion or removal."
   (when previous
     (chirp-render-insert-tweet-separator))
-  (if-let* ((reply-parent (chirp-render--list-reply-parent tweet previous)))
-      (chirp-render--insert-tweet
-       tweet
-       :prefix chirp-render-list-reply-prefix
-       :reply-parent reply-parent
-       :media-presentation 'carousel)
-    (chirp-render-insert-tweet tweet)))
+  (let ((start (point)))
+    (if-let* ((reply-parent (chirp-render--list-reply-parent tweet previous)))
+        (chirp-render--insert-tweet
+         tweet
+         :prefix chirp-render-list-reply-prefix
+         :reply-parent reply-parent
+         :media-presentation 'carousel)
+      (chirp-render-insert-tweet tweet))
+    start))
 
 ;;;; User Rows
 

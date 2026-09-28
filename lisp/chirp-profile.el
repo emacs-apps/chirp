@@ -110,6 +110,7 @@
 
 (defun chirp-profile--sync (surface _app state change)
   "Render committed STATE in SURFACE using native projection CHANGE."
+  (chirp-profile--bind-locals surface)
   (chirp-render-projection
       surface change
     (chirp-render-project-tweet-rows (plist-get state :items))
@@ -223,16 +224,14 @@ This runs inside the owning Surface's update, never in a transport callback."
          :page (list :next-cursor nil)
          :status
          (list :phase 'initial :message nil)
-         :timeline-ready nil :loading-more
-         nil :expanded-tweet-ids
-         (make-hash-table :test #'equal))
+         :timeline-ready nil :loading-more nil :profile-request nil
+         :expanded-tweet-ids (make-hash-table :test #'equal))
    :render-function #'chirp-profile--sync
    :printer #'chirp-render-print-tweet-row
    :select t))
 
 (defun chirp-profile--present (view)
   "Request a projection update for profile VIEW."
-  (chirp-profile--bind-locals view)
   (appkit-surface-post view
                        (appkit-projection-change-create
                         :full-p t
@@ -315,7 +314,6 @@ This runs inside the owning Surface's update, never in a transport callback."
           ((buffer (appkit-surface-buffer view))
            (handle (plist-get (plist-get state :user) :handle))
            (saved-mode (plist-get state :mode))
-           (current (plist-get state :items))
            (mode-label
             (downcase (chirp-profile--mode-label saved-mode)))
            (cursor (plist-get (plist-get state :page) :next-cursor))
@@ -330,7 +328,8 @@ This runs inside the owning Surface's update, never in a transport callback."
                                             (chirp-request-current-p
                                              buffer token)
                                           (let*
-                                              ((next-cursor
+                                              ((current (plist-get state :items))
+                                               (next-cursor
                                                 (chirp-backend-envelope-next-cursor
                                                  envelope))
                                                (merged
@@ -439,6 +438,7 @@ When TARGET is `:next', cycle through the available profile modes."
           (chirp-profile-open clean-handle mode)))
        (view
         (chirp-profile--ensure-view clean-handle title refresh mode))
+       (state (appkit-surface-model view))
        (buffer (appkit-surface-buffer view)) (token nil)
        (saved-user nil) (saved-tweets nil)
        (available-modes chirp-profile--base-modes)
@@ -448,21 +448,22 @@ When TARGET is `:next', cycle through the available profile modes."
     (cl-labels
         ((present-current nil
            (when user-ready
-             (let ((state (appkit-surface-model view)))
-               (setf (plist-get state :user) saved-user
-                     (plist-get state :items) saved-tweets
-                     (plist-get state :mode) mode
-                     (plist-get state :modes) available-modes
-                     (plist-get state :title) title
-                     (plist-get state :refresh) refresh
-                     (plist-get state :timeline-ready) timeline-ready
+             (setf (plist-get state :user) saved-user
+                   (plist-get state :mode) mode
+                   (plist-get state :modes) available-modes
+                   (plist-get state :title) title
+                   (plist-get state :refresh) refresh)
+             (when (and timeline-ready
+                        (not (plist-get state :timeline-ready)))
+               (setf (plist-get state :items) saved-tweets
+                     (plist-get state :timeline-ready) t
                      (plist-get (plist-get state :page) :next-cursor)
                      timeline-next-cursor
                      (plist-get (plist-get state :status) :phase)
                      (if timeline-error-message 'error 'idle)
                      (plist-get (plist-get state :status) :message)
-                     timeline-error-message)
-               (chirp-profile--present view)))
+                     timeline-error-message))
+             (chirp-profile--present view))
            (when
                (and user-ready timeline-ready (not content-prefetched))
              (setq content-prefetched t)
@@ -470,10 +471,16 @@ When TARGET is `:next', cycle through the available profile modes."
                (chirp-media-prefetch-tweets saved-tweets buffer)
                (chirp-enrich-quoted-tweets saved-tweets buffer)))
            (when (and user-ready timeline-ready whoami-ready)
+             (setf (plist-get state :profile-request) nil)
              (with-current-buffer buffer
-               (setq-local chirp--request-token nil))))
+               (when (eq chirp--request-token token)
+                 (setq-local chirp--request-token nil)))))
+         (current-request-p nil
+           (chirp-view-state-token-current-p
+            view state token :profile-request))
          (update-status nil
-           (cond
+           (unless (plist-get state :loading-more)
+             (cond
             (timeline-error-message
              (chirp-set-status buffer
                                (format "%s failed"
@@ -490,14 +497,14 @@ When TARGET is `:next', cycle through the available profile modes."
             (timeline-ready
              (chirp-set-status buffer
                                (format "%s ready · loading profile..."
-                                       (chirp-profile--mode-label mode)))))))
+                                       (chirp-profile--mode-label mode))))))))
       (setq token (chirp-begin-background-request buffer title))
+      (setf (plist-get state :profile-request) token)
       (chirp-set-status buffer "Loading profile...")
-      (chirp-profile--bind-locals view)
       (chirp-backend-user clean-handle
                           (lambda (user _envelope)
                             (when
-                                (chirp-request-current-p buffer token)
+                                (current-request-p)
                               (setq saved-user user user-ready t)
                               (plist-put saved-user :self-p
                                          (memq 'likes available-modes))
@@ -506,14 +513,15 @@ When TARGET is `:next', cycle through the available profile modes."
                                                          buffer)))
                           (lambda (message)
                             (when
-                                (chirp-request-current-p buffer token)
+                                (current-request-p)
+                              (setf (plist-get state :profile-request) nil)
                               (with-current-buffer buffer
                                 (setq-local chirp--request-token nil))
                               (chirp-show-error buffer title refresh
                                                 message))))
       (chirp-backend-whoami
        (lambda (user _envelope)
-         (when (chirp-request-current-p buffer token)
+         (when (current-request-p)
            (let*
                ((self-handle (plist-get user :handle))
                 (modes
@@ -533,13 +541,12 @@ When TARGET is `:next', cycle through the available profile modes."
                      (chirp-profile--title clean-handle mode)))
              (when user-ready (update-status) (present-current)))))
        (lambda (_message)
-         (when (chirp-request-current-p buffer token)
+         (when (current-request-p)
            (setq whoami-ready t) (present-current))))
       (chirp-profile--fetch-content mode clean-handle
                                     (lambda (tweets timeline-envelope)
                                       (when
-                                          (chirp-request-current-p
-                                           buffer token)
+                                          (current-request-p)
                                         (setq saved-tweets tweets
                                               timeline-ready t
                                               timeline-error-message
@@ -553,8 +560,7 @@ When TARGET is `:next', cycle through the available profile modes."
                                         (present-current)))
                                     (lambda (message)
                                       (when
-                                          (chirp-request-current-p
-                                           buffer token)
+                                          (current-request-p)
                                         (setq saved-tweets nil
                                               timeline-ready t
                                               timeline-next-cursor nil

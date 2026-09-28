@@ -313,7 +313,7 @@ protected."
    :state
    (list :type 'thread :query
          (list :focus-id focus-id) :items
-         nil :title title :refresh refresh
+         nil :all-items nil :title title :refresh refresh
          :status
          (list :phase 'initial :message nil)
          :expanded-tweet-ids
@@ -371,21 +371,23 @@ protected."
        (view
         (chirp-thread--ensure-view title refresh tweet-id
                                    (list 'thread tweet-id)))
-       (buffer (appkit-surface-buffer view)) (saved-ordered nil)
+       (state (appkit-surface-model view))
+       (buffer (appkit-surface-buffer view))
        (prefetched-article nil) (article-requested-p nil) (token nil))
     (cl-labels
         ((present-current (&optional position)
            (chirp-thread--present
-            view (chirp-thread--filter-spam-replies saved-ordered tweet-id)
+            view (chirp-thread--filter-spam-replies
+                  (plist-get state :all-items) tweet-id)
             position))
          (apply-prefetched-article nil
-           (setq saved-ordered
-                 (chirp-thread--maybe-apply-article saved-ordered
-                                                    prefetched-article)))
+           (setf (plist-get state :all-items)
+                 (chirp-thread--maybe-apply-article
+                  (plist-get state :all-items) prefetched-article)))
          (handle-article-success (article-tweet _envelope)
            (when (chirp-request-current-p buffer token)
              (setq prefetched-article article-tweet)
-             (when saved-ordered
+             (when (plist-get state :all-items)
                (apply-prefetched-article) (present-current 'preserve)
                (chirp-clear-status buffer))))
          (maybe-request-article (tweet)
@@ -406,11 +408,11 @@ protected."
       (with-current-buffer buffer
         (setq-local chirp-thread--refilter-function
                     (lambda ()
-                      (when (and saved-ordered
+                      (when (and (plist-get state :all-items)
                                  (chirp-request-current-p buffer token))
                         (present-current 'preserve)))))
       (when-let* ((seed (chirp-thread--seed-tweets seed-tweet)))
-        (setq saved-ordered seed)
+        (setf (plist-get state :all-items) seed)
         (present-current (list 'tweet tweet-id)))
       (when seed-tweet (maybe-request-article seed-tweet))
       (chirp-backend-thread tweet-id
@@ -418,7 +420,7 @@ protected."
                               (when
                                   (chirp-request-current-p buffer
                                                            token)
-                                (setq saved-ordered
+                                (setf (plist-get state :all-items)
                                       (chirp-thread--reorder tweets tweet-id))
                                 (apply-prefetched-article)
                                 (present-current
@@ -427,8 +429,8 @@ protected."
                                     ((focus
                                       (or
                                        (chirp-thread--find-tweet
-                                        saved-ordered tweet-id)
-                                       (car saved-ordered))))
+                                        (plist-get state :all-items) tweet-id)
+                                       (car (plist-get state :all-items)))))
                                     (progn
                                       (maybe-request-article focus)
                                       (unless article-requested-p
