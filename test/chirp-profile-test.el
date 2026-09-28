@@ -39,6 +39,67 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest chirp-profile-follow-toggle-refreshes-server-relationship ()
+  "Following and unfollowing must refresh the profile's actionable state."
+  (let ((chirp--app nil)
+        (chirp-backend-read-cache-ttl 15)
+        server-following buffer)
+    (unwind-protect
+        (cl-letf
+            (((symbol-function 'chirp-x-graphql-request)
+              (lambda (_operation _variables callback &rest _options)
+                (funcall
+                 callback
+                 `(("data" .
+                    (("user" .
+                      (("result" .
+                        (("rest_id" . "42")
+                         ("legacy" . (("screen_name" . "alice")
+                                      ("name" . "Alice")
+                                      ("following" . ,server-following)
+                                      ("followed_by" . t)
+                                      ("friends_count" . 23)))))))))))))
+             ((symbol-function 'chirp-x-api-request)
+              (lambda (_service path callback &rest _options)
+                (setq server-following
+                      (pcase path
+                        ("1.1/friendships/create.json" t)
+                        ("1.1/friendships/destroy.json" nil)
+                        (_ (error "Unexpected request: %s" path))))
+                (funcall callback `(("following" . ,server-following)))))
+             ((symbol-function 'chirp-backend-whoami)
+              (lambda (callback &optional _errback)
+                (funcall callback '(:kind user :handle "viewer") nil)))
+             ((symbol-function 'chirp-backend-user-posts)
+              (lambda (_handle callback &optional _errback _limit _cursor)
+                (funcall callback nil nil)))
+             ((symbol-function 'chirp-display-buffer) #'ignore)
+             ((symbol-function 'chirp-media-prefetch-user) #'ignore))
+          (setq buffer (chirp-profile-open "alice"))
+          (with-current-buffer buffer
+            (cl-labels
+                ((show-action ()
+                   (let ((loop (appkit-surface-loop (appkit-current-surface))))
+                     (while (> (appkit-loop-pending-count loop) 0)
+                       (appkit-loop-run-pass loop)))
+                   (goto-char
+                    (or (text-property-any
+                         (point-min) (point-max)
+                         'chirp-profile-action 'toggle-follow)
+                        (error "Profile has no follow action")))
+                   (chirp-entry-at-point)))
+              (should-not (plist-get (show-action) :viewer-following-p))
+              (chirp-open-at-point)
+              (should server-following)
+              (should (plist-get (show-action) :viewer-following-p))
+              (should (plist-get (chirp-entry-at-point) :viewer-followed-by-p))
+              (chirp-open-at-point)
+              (should-not server-following)
+              (should-not (plist-get (show-action) :viewer-following-p)))))
+      (chirp-stop)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest chirp-profile-open-followers-disables-wrap-navigation ()
   "Follower/following list buffers should stop at the ends instead of wrapping."
   (let ((chirp--app nil) (buffer (generate-new-buffer " *chirp-profile-followers-test*"))
