@@ -1344,15 +1344,12 @@ track; HEIGHT, GAP, WIDTHS, and FIT retain its presentation geometry."
                     session target-width (aref state 6)
                     :poster poster
                     :fit (or (aref state 8) 'contain)
-                    :buffer buffer
                     :canvas scene
                     :canvas-width scene-width
                     :canvas-height (aref state 6)
                     :destination-x target-x
                     :destination-y 0
-                    :background-function
-                    (lambda (_inline)
-                      (video-background-color buffer (car markers)))
+                    :anchor (car markers)
                     :visible-function
                     (lambda (_inline)
                       (chirp-render--media-track-markers-visible-p buffer markers))
