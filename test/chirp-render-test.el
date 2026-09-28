@@ -1994,7 +1994,7 @@
                   nil poster nil nil nil nil))
          draws)
     (cl-letf (((symbol-function 'video-canvas-create)
-               (lambda (width height)
+               (lambda (width height &optional _background)
                  `(image :type canvas :data-width ,width :data-height ,height)))
               ((symbol-function 'chirp-media--preview-file)
                (lambda (item) (plist-get item :file)))
