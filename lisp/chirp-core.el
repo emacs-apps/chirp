@@ -2074,6 +2074,24 @@ updates for the owning top-level rows visible in BUFFER."
      ((chirp-user-like-p direct) direct)
      (t (chirp-find-first-object object #'chirp-user-like-p)))))
 
+(defun chirp--user-relationship-p (user field &rest aliases)
+  "Return USER's viewer relationship FIELD as a boolean.
+Prefer ALIASES, then relationship perspectives, then legacy and REST fields.
+A present false value takes precedence over lower-priority representations."
+  (let* ((cell (or (cl-loop for alias in aliases
+                            for cell = (assoc-string alias user t)
+                            when cell return cell)
+                   (assoc-string field
+                                 (chirp-get user "relationship_perspectives") t)
+                   (assoc-string field (chirp-get user "legacy") t)))
+         (value (if cell
+                    (cdr cell)
+                  (let ((value (chirp-get user field)))
+                    ;; Flattened profiles also use `following' for a count.
+                    (unless (and (equal field "following") (numberp value))
+                      value)))))
+    (chirp-boolean-value value)))
+
 (defun chirp--user-from-x (object)
   "Return a Chirp user decoded from X OBJECT, or nil."
   (let* ((user (chirp--extract-user-object object))
@@ -2106,7 +2124,8 @@ updates for the owning top-level rows visible in BUFFER."
                         (chirp-get legacy "followers_count")))
          (following (or (chirp-get user "friends_count")
                         (chirp-get user "following_count")
-                        (chirp-get user "following")
+                        (let ((count (chirp-get user "following")))
+                          (and (numberp count) count))
                         (chirp-get-in user '("relationship_counts" "following"))
                         (chirp-get legacy "friends_count")))
          (posts (or (chirp-get user "statuses_count")
@@ -2127,18 +2146,18 @@ updates for the owning top-level rows visible in BUFFER."
                       (chirp-get user "profile_image_url")
                       (chirp-get-in user '("avatar" "image_url"))
                       (chirp-get legacy "profile_image_url_https" "profile_image_url")))
-         (viewer-following-p (chirp-boolean-value
-                              (or (chirp-get user "viewerFollowing" "viewer_following")
-                                  (chirp-get-in user '("relationship_perspectives" "following")))))
-         (viewer-followed-by-p (chirp-boolean-value
-                                (or (chirp-get user "viewerFollowedBy" "viewer_followed_by")
-                                    (chirp-get-in user '("relationship_perspectives" "followed_by")))))
-         (viewer-blocking-p (chirp-boolean-value
-                             (or (chirp-get user "viewerBlocking" "viewer_blocking")
-                                 (chirp-get-in user '("relationship_perspectives" "blocking")))))
-         (viewer-muting-p (chirp-boolean-value
-                           (or (chirp-get user "viewerMuting" "viewer_muting")
-                               (chirp-get-in user '("relationship_perspectives" "muting"))))))
+         (viewer-following-p
+          (chirp--user-relationship-p user "following"
+                                      "viewerFollowing" "viewer_following"))
+         (viewer-followed-by-p
+          (chirp--user-relationship-p user "followed_by"
+                                      "viewerFollowedBy" "viewer_followed_by"))
+         (viewer-blocking-p
+          (chirp--user-relationship-p user "blocking"
+                                      "viewerBlocking" "viewer_blocking"))
+         (viewer-muting-p
+          (chirp--user-relationship-p user "muting"
+                                      "viewerMuting" "viewer_muting")))
     (when (or handle id name)
       (list :kind 'user
             :id id

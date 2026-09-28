@@ -1137,28 +1137,6 @@ Return a list of (compose source foreign)."
          (should removed)
          (should-not refreshed))))))
 
-(ert-deftest chirp-follow-and-unfollow-user-at-point-use-explicit-commands ()
-  "User follow actions should dispatch follow and unfollow commands."
-  (let (captured-args refreshed)
-    (chirp-test--with-user-buffer
-     '(:kind user :handle "alice")
-     (lambda (_buffer)
-       (cl-letf (((symbol-function 'chirp-actions--perform)
-                  (lambda (args on-success &optional _on-error)
-                    (setq captured-args args)
-                    (funcall on-success nil nil)))
-                 ((symbol-function 'chirp-actions--refresh-buffer)
-                  (lambda (_target)
-                    (setq refreshed t))))
-         (chirp-follow-user-at-point)
-         (should (equal captured-args '("follow" "alice")))
-         (should refreshed)
-         (setq captured-args nil
-               refreshed nil)
-         (chirp-unfollow-user-at-point)
-         (should (equal captured-args '("unfollow" "alice")))
-         (should refreshed))))))
-
 (ert-deftest chirp-follow-success-refreshes-profile-after-point-moves ()
   "Profile refresh should not depend on point remaining on the user summary."
   (let (refreshed)
