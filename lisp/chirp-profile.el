@@ -160,6 +160,53 @@
       (setq-local chirp--timeline-loading-more
                   (plist-get state :loading-more)))))
 
+;;; Relationship Updates
+
+(defun chirp-profile--follow-update (model handle following payload)
+  "Commit HANDLE's confirmed relationship to MODEL and redraw only its summary.
+FOLLOWING is the successful action's state; REST PAYLOAD fields take precedence.
+This runs inside the owning Surface's update, never in a transport callback."
+  (let* ((handle (chirp-backend--normalize-handle handle))
+         (profile-p (eq (plist-get model :type) 'profile))
+         (users (pcase (plist-get model :type)
+                  ('profile (list (plist-get model :user)))
+                  ('users (plist-get model :items))))
+         (confirmed (assoc-string "following" payload t))
+         (following (if confirmed
+                        (chirp-boolean-value (cdr confirmed))
+                      following))
+         keys)
+    (dolist (user users)
+      (when (and user
+                 (equal handle
+                        (chirp-backend--normalize-handle
+                         (plist-get user :handle))))
+        (let ((old-state (plist-get user :viewer-following-p))
+              (followers (assoc-string "followers_count" payload t))
+              (followed-by (assoc-string "followed_by" payload t)))
+          (plist-put user :viewer-following-p following)
+          (cond
+           (followers
+            (plist-put user :followers (cdr followers)))
+           ((not (eq old-state following))
+            (plist-put user :followers
+                       (chirp-adjust-count (plist-get user :followers)
+                                           (if following 1 -1)))))
+          (when followed-by
+            (plist-put user :viewer-followed-by-p
+                       (chirp-boolean-value (cdr followed-by))))
+          (push (list 'user (or (plist-get user :id)
+                               (plist-get user :handle)))
+                keys))))
+    (if keys
+        (appkit-next
+         :model model
+         :render (appkit-projection-change-create
+                  :keys (unless profile-p keys)
+                  :frame-p profile-p
+                  :position 'preserve))
+      (appkit-next-reject 'unrelated-user))))
+
 ;;; Views
 
 (defun chirp-profile--ensure-view (handle title refresh mode)
@@ -336,7 +383,8 @@
                                                             'error)
                                           (message "%s"
                                                    (replace-regexp-in-string
-                                                    "[\n]+" "  "
+                                                    "[
+\n]+" "  "
                                                     message))))
                                       chirp-profile-post-limit cursor))))))
 

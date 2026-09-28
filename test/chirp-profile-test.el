@@ -39,63 +39,190 @@
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
-(ert-deftest chirp-profile-follow-toggle-refreshes-server-relationship ()
-  "Following and unfollowing must refresh the profile's actionable state."
+(ert-deftest chirp-profile-follow-toggle-preserves-loaded-content ()
+  "Follow actions must preserve loaded posts, pagination, and reader position."
   (let ((chirp--app nil)
         (chirp-backend-read-cache-ttl 15)
-        server-following buffer)
+        (post-requests 0)
+        (tweets (list '(:kind tweet :id "1" :text "Retained post"
+                       :author-handle "alice")))
+        server-following buffer callback errback path)
+    (cl-labels
+        ((raw-user ()
+           `(("id_str" . "42") ("screen_name" . "alice") ("name" . "Alice")
+             ("following" . ,server-following) ("followed_by" . t)
+             ("friends_count" . 23)
+             ("followers_count" . ,(if server-following 101 100))))
+         (complete ()
+           (setq server-following
+                 (pcase path
+                   ("1.1/friendships/create.json" t)
+                   ("1.1/friendships/destroy.json" nil)
+                   (_ (error "Unexpected request: %s" path))))
+           (funcall callback (raw-user))))
+      (unwind-protect
+          (save-window-excursion
+            (cl-letf
+                (((symbol-function 'chirp-x-graphql-request)
+                  (lambda (_operation _variables success &rest _options)
+                    (funcall success
+                             `(("data" . (("user" . (("result" . ,(raw-user))))))))))
+                 ((symbol-function 'chirp-x-api-request)
+                  (lambda (_service request-path success &rest options)
+                    (setq path request-path
+                          callback success
+                          errback (plist-get options :errback))))
+                 ((symbol-function 'chirp-backend-whoami)
+                  (lambda (success &optional _errback)
+                    (funcall success '(:kind user :handle "viewer") nil)))
+                 ((symbol-function 'chirp-backend-user-posts)
+                  (lambda (_handle success &optional _errback _limit _cursor)
+                    (cl-incf post-requests)
+                    (funcall success tweets
+                             '(("pagination" . (("nextCursor" . "older")))))))
+                 ((symbol-function 'chirp-display-buffer) #'ignore)
+                 ((symbol-function 'chirp-media-prefetch-user) #'ignore)
+                 ((symbol-function 'chirp-media-prefetch-tweets) #'ignore)
+                 ((symbol-function 'chirp-enrich-quoted-tweets) #'ignore))
+              (setq buffer (chirp-profile-open "alice"))
+              (switch-to-buffer buffer)
+              (cl-labels
+                  ((drain ()
+                     (let ((loop (appkit-surface-loop (appkit-current-surface))))
+                       (while (> (appkit-loop-pending-count loop) 0)
+                         (appkit-loop-run-pass loop))))
+                   (show-action ()
+                     (drain)
+                     (goto-char
+                      (or (text-property-any
+                           (point-min) (point-max)
+                           'chirp-profile-action 'toggle-follow)
+                          (error "Profile has no follow action")))
+                     (chirp-entry-at-point)))
+                (should-not (plist-get (show-action) :viewer-following-p))
+                (let ((page (copy-tree
+                             (plist-get (chirp--projection-state) :page))))
+                  (chirp-open-at-point)
+                  ;; The response arrives after the reader moves into a post.
+                  (search-forward "Retained post")
+                  (let* ((position (point-marker))
+                         (anchor (make-overlay (1- (point)) (point))))
+                    (overlay-put anchor 'evaporate t)
+                    (set-window-start (selected-window) (point) t)
+                    (should-not (plist-get chirp-profile--user :viewer-following-p))
+                    (complete)
+                    (should-not
+                     (plist-get (plist-get (chirp--projection-state) :user)
+                                :viewer-following-p))
+                    (drain)
+                    (should (equal (plist-get (chirp--projection-state) :items)
+                                   tweets))
+                    (should (equal (plist-get (chirp--projection-state) :page)
+                                   page))
+                    (should (equal chirp--timeline-next-cursor "older"))
+                    (should (= (point) (marker-position position)))
+                    (should (= (window-start) (marker-position position)))
+                    (should (eq (overlay-buffer anchor) buffer))
+                    (delete-overlay anchor)
+                    (set-marker position nil))
+                  (should (plist-get (show-action) :viewer-following-p))
+                  (should (= (plist-get chirp-profile--user :followers) 101))
+                  (should (plist-get chirp-profile--user :viewer-followed-by-p))
+                  ;; A failed unfollow must leave the confirmed relationship alone.
+                  (chirp-open-at-point)
+                  (funcall errback "Follow action rejected")
+                  (should (plist-get (show-action) :viewer-following-p))
+                  (should (= (plist-get chirp-profile--user :followers) 101))
+                  (chirp-open-at-point)
+                  (complete)
+                  (should-not server-following)
+                  (should-not (plist-get (show-action) :viewer-following-p))
+                  (should (= (plist-get chirp-profile--user :followers) 100))
+                  (should (equal (plist-get (chirp--projection-state) :items)
+                                 tweets))
+                  (should (equal (plist-get (chirp--projection-state) :page)
+                                 page))
+                  ;; A successful follow request can still await account approval.
+                  (chirp-open-at-point)
+                  (funcall callback (raw-user))
+                  (should-not (plist-get (show-action) :viewer-following-p))
+                  (should (= (plist-get chirp-profile--user :followers) 100))
+                  (should (= post-requests 1))
+                  ;; The same buffer can belong to a new Surface before completion.
+                  (chirp-open-at-point)
+                  (let* ((surface (appkit-current-surface))
+                         (type (appkit-surface-type surface))
+                         (input (copy-tree (chirp--projection-state))))
+                    (appkit-surface-stop surface)
+                    (let ((replacement
+                           (appkit-open-generated-surface
+                            type :app (chirp-app) :identity '(profile "alice")
+                            :input input :buffer buffer)))
+                      (funcall callback '(("following" . t)))
+                      (drain)
+                      (should-not
+                       (plist-get
+                        (plist-get (appkit-surface-model replacement) :user)
+                        :viewer-following-p))))))))
+        (chirp-stop)
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest chirp-profile-follow-updates-only-the-target-user-row ()
+  "A user-list follow must update its target even after point moves away."
+  (let* ((chirp--app nil)
+         (users (list (list :kind 'user :id "42" :handle "Alice"
+                            :viewer-following-p nil :followers 10)
+                      (list :kind 'user :id "43" :handle "bob"
+                            :viewer-following-p nil :followers 20)))
+         (requests 0)
+         buffer callback)
     (unwind-protect
         (cl-letf
-            (((symbol-function 'chirp-x-graphql-request)
-              (lambda (_operation _variables callback &rest _options)
-                (funcall
-                 callback
-                 `(("data" .
-                    (("user" .
-                      (("result" .
-                        (("rest_id" . "42")
-                         ("legacy" . (("screen_name" . "alice")
-                                      ("name" . "Alice")
-                                      ("following" . ,server-following)
-                                      ("followed_by" . t)
-                                      ("friends_count" . 23)))))))))))))
-             ((symbol-function 'chirp-x-api-request)
-              (lambda (_service path callback &rest _options)
-                (setq server-following
-                      (pcase path
-                        ("1.1/friendships/create.json" t)
-                        ("1.1/friendships/destroy.json" nil)
-                        (_ (error "Unexpected request: %s" path))))
-                (funcall callback `(("following" . ,server-following)))))
-             ((symbol-function 'chirp-backend-whoami)
-              (lambda (callback &optional _errback)
-                (funcall callback '(:kind user :handle "viewer") nil)))
-             ((symbol-function 'chirp-backend-user-posts)
-              (lambda (_handle callback &optional _errback _limit _cursor)
-                (funcall callback nil nil)))
+            (((symbol-function 'chirp-backend-followers)
+              (lambda (_handle success &optional _errback)
+                (cl-incf requests)
+                (funcall success users nil)))
+             ((symbol-function 'chirp-backend-request)
+              (lambda (_args success &optional _errback)
+                (setq callback success)))
              ((symbol-function 'chirp-display-buffer) #'ignore)
              ((symbol-function 'chirp-media-prefetch-user) #'ignore))
-          (setq buffer (chirp-profile-open "alice"))
+          (setq buffer (chirp-profile-open-followers "viewer"))
           (with-current-buffer buffer
             (cl-labels
-                ((show-action ()
+                ((drain ()
                    (let ((loop (appkit-surface-loop (appkit-current-surface))))
                      (while (> (appkit-loop-pending-count loop) 0)
-                       (appkit-loop-run-pass loop)))
-                   (goto-char
-                    (or (text-property-any
-                         (point-min) (point-max)
-                         'chirp-profile-action 'toggle-follow)
-                        (error "Profile has no follow action")))
-                   (chirp-entry-at-point)))
-              (should-not (plist-get (show-action) :viewer-following-p))
+                       (appkit-loop-run-pass loop)))))
+              (drain)
+              (goto-char
+               (text-property-any (point-min) (point-max)
+                                  'chirp-profile-action 'toggle-follow))
               (chirp-open-at-point)
-              (should server-following)
-              (should (plist-get (show-action) :viewer-following-p))
-              (should (plist-get (chirp-entry-at-point) :viewer-followed-by-p))
-              (chirp-open-at-point)
-              (should-not server-following)
-              (should-not (plist-get (show-action) :viewer-following-p)))))
+              (search-forward "@bob")
+              (let ((position (point-marker))
+                    (anchor (make-overlay (1- (point)) (point))))
+                (overlay-put anchor 'evaporate t)
+                (funcall callback '(("following" . t)) nil)
+                (should-not
+                 (plist-get (car (plist-get (chirp--projection-state) :items))
+                            :viewer-following-p))
+                (drain)
+                (should (= requests 1))
+                (let ((items (plist-get (chirp--projection-state) :items)))
+                  (should (plist-get (car items) :viewer-following-p))
+                  (should (= (plist-get (car items) :followers) 11))
+                  (should-not (plist-get (cadr items) :viewer-following-p))
+                  (should (= (plist-get (cadr items) :followers) 20)))
+                (should (= (point) (marker-position position)))
+                (should (eq (overlay-buffer anchor) buffer))
+                (delete-overlay anchor)
+                (set-marker position nil))
+              (goto-char
+               (text-property-any (point-min) (point-max)
+                                  'chirp-profile-action 'toggle-follow))
+              (should (plist-get (chirp-entry-at-point) :viewer-following-p)))))
       (chirp-stop)
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))

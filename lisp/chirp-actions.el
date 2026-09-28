@@ -327,14 +327,6 @@ Only `unknown' persists because it changes whether repeating a write is safe.")
     (with-current-buffer buffer
       (chirp-actions--refresh-current-view))))
 
-(defun chirp-actions--refresh-user-buffer-if-needed (buffer)
-  "Refresh BUFFER after a user action when it is a profile or user list."
-  (when (and (buffer-live-p buffer)
-             (with-current-buffer buffer
-               (or chirp--profile-handle
-                   (eq (plist-get (chirp-entry-at-point) :kind) 'user))))
-    (chirp-actions--refresh-buffer buffer)))
-
 ;;;; Dispatch
 
 (defun chirp-actions--perform (args on-success &optional on-error)
@@ -468,29 +460,29 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
    "Retweeted."
    "Retweet removed."))
 
+(defun chirp-actions--set-follow (following)
+  "Set the current user's relationship to FOLLOWING after server success."
+  (let* ((user (chirp-actions--user-at-point))
+         (handle (plist-get user :handle))
+         (surface (chirp--live-projection-view)))
+    (chirp-actions--perform
+     (list (if following "follow" "unfollow") handle)
+     (lambda (data _envelope)
+       (when (appkit-surface-live-p surface)
+         (appkit-surface-post
+          surface (list 'chirp-follow-result handle following data)))
+       (message (if following "Now following @%s." "Unfollowed @%s.")
+                handle)))))
+
 (defun chirp-follow-user-at-point ()
   "Follow the user at point."
   (interactive)
-  (let* ((user (chirp-actions--user-at-point))
-         (handle (plist-get user :handle))
-         (buffer (current-buffer)))
-    (chirp-actions--perform
-     (list "follow" handle)
-     (lambda (_data _envelope)
-       (chirp-actions--refresh-user-buffer-if-needed buffer)
-       (message "Now following @%s." handle)))))
+  (chirp-actions--set-follow t))
 
 (defun chirp-unfollow-user-at-point ()
   "Unfollow the user at point."
   (interactive)
-  (let* ((user (chirp-actions--user-at-point))
-         (handle (plist-get user :handle))
-         (buffer (current-buffer)))
-    (chirp-actions--perform
-     (list "unfollow" handle)
-     (lambda (_data _envelope)
-       (chirp-actions--refresh-user-buffer-if-needed buffer)
-       (message "Unfollowed @%s." handle)))))
+  (chirp-actions--set-follow nil))
 
 (defun chirp-toggle-follow-user-at-point ()
   "Toggle follow state for the user at point."
