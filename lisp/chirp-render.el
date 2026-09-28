@@ -1894,8 +1894,8 @@ tweet content and actions."
       (list 'tweet key))))
 
 (defun chirp-render--tweet-row-dependencies (tweet)
-  "Return presentation dependencies for a projected TWEET."
-  (cons (chirp-render--entry-key tweet)
+  "Return TWEET's content dependencies, independent of repost row identity."
+  (cons (list 'tweet (plist-get tweet :id))
         (chirp-media-resource-keys-for-tweet tweet)))
 
 (defun chirp-render-project-tweet-rows (tweets)

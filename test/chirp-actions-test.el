@@ -1387,6 +1387,38 @@ Return a list of (compose source foreign)."
       (when (appkit-app-live-p chirp--app)
         (appkit-app-close chirp--app)))))
 
+(ert-deftest chirp-translate-retweet-renders-original-post-result ()
+  "A repost keeps its row identity but redraws when its original is translated."
+  (let ((appkit-translate-target-language "zh")
+        (chirp-translation-backend-function #'chirp-translate-x-backend)
+        (state (list :type 'timeline :query '(:kind home)
+                     :items '((:kind tweet :id "123" :retweet-id "456"
+                               :retweeted-by "dhh" :retweeted-by-name "DHH"
+                               :text "Reposted original")
+                              (:kind tweet :id "789" :text "Unrelated post"))
+                     :status '(:phase idle)
+                     :refresh (lambda () (ert-fail "Unexpected feed reload"))))
+        requested-id callback)
+    (chirp-test--with-action-surface
+     state
+     (lambda (surface)
+       (cl-letf (((symbol-function 'chirp-backend-translate)
+                  (lambda (id _language success &optional _errback)
+                    (setq requested-id id callback success)
+                    nil)))
+         (goto-char (point-min))
+         (search-forward "Reposted original")
+         (chirp-translate-at-point)
+         (appkit-loop-run-pass (appkit-surface-loop surface))
+         (should (equal requested-id "123"))
+         (with-temp-buffer
+           (funcall callback '(("translation" . "转推的译文")) nil))
+         (appkit-loop-run-pass (appkit-surface-loop surface))
+         (goto-char (point-min))
+         (should (search-forward "Reposted original" nil t))
+         (should (search-forward "转推的译文" nil t))
+         (should (search-forward "Unrelated post" nil t)))))))
+
 (ert-deftest chirp-translate-quoted-tweet-rejects-edited-source-result ()
   "Quoted translations redraw their parent row and reject replaced sources."
   (let ((chirp--app nil)
