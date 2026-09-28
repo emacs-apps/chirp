@@ -44,6 +44,8 @@
 (declare-function chirp-backend-tweet "chirp-backend"
                   (tweet-id callback &optional errback))
 (declare-function chirp-profile-open "chirp-profile" (handle &optional mode))
+(declare-function chirp-profile--follow-update "chirp-profile"
+                  (model handle following payload))
 (declare-function chirp-thread-open "chirp-thread" (tweet-id))
 (declare-function chirp-thread-open-tweet "chirp-thread" (tweet))
 (declare-function chirp-thread-add-spam-rule "chirp-thread" (&optional authorp))
@@ -2822,7 +2824,7 @@ over the card's `t.co` permalink."
   "Keyed presentation cache owned by this generated renderer.")
 
 (defun chirp--surface-update (context model message)
-  "Accept projection work or media intent on the exact initiating Surface."
+  "Commit domain messages or projection work on the exact owning Surface."
   (cond
    ((appkit-projection-change-p message)
     (appkit-next
@@ -2842,6 +2844,11 @@ over the card's `t.co` permalink."
                        (appkit-command-cancel-effect 'chirp-media-present)))))
    ((eq (car-safe message) 'chirp-media)
     (chirp-media-view--update context model message))
+   ((eq (car-safe message) 'chirp-follow-result)
+    (if (memq (plist-get model :type) '(profile users))
+        (chirp-profile--follow-update
+         model (nth 1 message) (nth 2 message) (nth 3 message))
+      (appkit-next-reject 'no-user-summary)))
    (t (error "Unsupported Chirp Surface message: %S" message))))
 
 (defun chirp--geometry-changed (surface _width)

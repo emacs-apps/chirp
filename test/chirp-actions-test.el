@@ -1137,21 +1137,6 @@ Return a list of (compose source foreign)."
          (should removed)
          (should-not refreshed))))))
 
-(ert-deftest chirp-follow-success-refreshes-profile-after-point-moves ()
-  "Profile refresh should not depend on point remaining on the user summary."
-  (let (refreshed)
-    (chirp-test--with-tweet-buffer
-     '(:kind tweet :id "123")
-     (lambda (buffer)
-       (with-current-buffer buffer
-         (setq-local chirp--profile-handle "alice"))
-       (cl-letf (((symbol-function 'chirp-actions--refresh-buffer)
-                  (lambda (target)
-                    (should (eq target buffer))
-                    (setq refreshed t))))
-         (chirp-actions--refresh-user-buffer-if-needed buffer))))
-    (should refreshed)))
-
 (ert-deftest chirp-translate-at-point-renders-thread-result ()
   "An asynchronous translation must appear without refreshing the thread."
   (let ((chirp--app nil)

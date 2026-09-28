@@ -130,7 +130,9 @@ Direct-message reads never send read acknowledgments.  Text, replies, reactions,
 | ~o t~ | translate the tweet |
 | ~o o~ | open in a browser.  Evil: also ~g x~ |
 
-
+~Follow~ / ~Following~ updates only the matching profile summary or user-list
+row after X confirms the action.  Loaded posts, pagination, and the reading
+position stay intact; failed requests leave the displayed relationship unchanged.
 
 ** Compose
 
