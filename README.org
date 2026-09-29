@@ -1,6 +1,8 @@
 #+title: chirp.el
 #+options: toc:nil num:nil
 
+Repository: [[https://github.com/emacs-apps/chirp][emacs-apps/chirp]].
+
 * What it is
 
 ~chirp.el~ is an Emacs browser for X/Twitter.  Read timelines, search
