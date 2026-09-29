@@ -7,7 +7,7 @@
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "32.0") (appkit "0.3.0") (browser-session "0.1.0") (video "0.1.0") (plz "0.8") (transient "0.4.3") (websocket "1.16"))
 ;; Keywords: convenience, comm
-;; URL: https://github.com/LuciusChen/chirp
+;; URL: https://github.com/emacs-apps/chirp
 
 ;;; Commentary:
 

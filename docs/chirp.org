@@ -195,8 +195,8 @@ ancestor chain.  Press ~S~ on a reply to save a literal phrase.
 (setq chirp-spam-rules nil) ; disable filtering
 #+end_src
 
-To propose rules for everyone, use the
-[[https://github.com/LuciusChen/chirp/issues/new?template=spam-rule.yml][spam rule submission form]].
+To propose shared rules upstream, use the
+[[https://github.com/LuciusChen/chirp/issues/new?template=spam-rule.yml][upstream spam rule submission form]].
 
 * Appearance
 
