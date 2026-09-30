@@ -1543,8 +1543,15 @@ overrides item widths; FIT may be `cover' to crop into those boxes."
             dims)))
 
 (defun chirp-media--select-download-media ()
-  "Return the media item that should be downloaded from the current context."
-  (or (chirp-media-at-point)
+  "Return the currently selected media item for downloading."
+  (or (when-let* ((state
+                  (or (get-char-property (point) 'chirp-media-track-state)
+                      (and (> (point) (point-min))
+                           (not (get-text-property (point) 'chirp-media-item))
+                           (get-char-property
+                            (1- (point)) 'chirp-media-track-state)))))
+        (nth (aref state 0) (aref state 2)))
+      (chirp-media-at-point)
       (and chirp--media-list
            (nth chirp--media-index chirp--media-list))
       (let* ((entry (chirp-entry-at-point))

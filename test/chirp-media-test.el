@@ -10,6 +10,7 @@
 (require 'chirp-core)
 (require 'chirp-media)
 (require 'chirp-media-view)
+(require 'chirp-render)
 (require 'chirp-timeline)
 
 (ert-deftest chirp-media-prefetch-video-thumbnail-tries-remote-extraction-without-preview ()
@@ -694,6 +695,81 @@ rerender and creates a CPU loop."
                   (:url "https://example.com/high.mp4" :bitrate 4096000)
                   (:url "https://example.com/mid.mp4" :bitrate 2176000))))
     "https://example.com/high.mp4")))
+
+(ert-deftest chirp-media-download-at-point-follows-carousel-selection ()
+  "Save the selected original across carousel navigation and wraparound."
+  (let* ((chirp-cache-directory (make-temp-file "chirp-carousel-download-" t))
+         (chirp-media-prefetch-command nil)
+         (media
+          '((:type "photo" :url "https://pbs.twimg.com/media/first.svg?name=small")
+            (:type "photo" :url "https://pbs.twimg.com/media/second.svg?name=small")
+            (:type "video" :url "https://example.com/first-low.mp4"
+             :variants ((:url "https://example.com/first-low.mp4" :bitrate 100)
+                        (:url "https://example.com/first-high.mp4" :bitrate 200)))
+            (:type "video" :url "https://example.com/second-low.mp4"
+             :variants ((:url "https://example.com/second-low.mp4" :bitrate 100)
+                        (:url "https://example.com/second-high.mp4" :bitrate 200)))))
+         (urls '("https://pbs.twimg.com/media/first.svg?name=orig"
+                 "https://pbs.twimg.com/media/second.svg?name=orig"
+                 "https://example.com/first-high.mp4"
+                 "https://example.com/second-high.mp4"))
+         (contents '("<svg xmlns=\"http://www.w3.org/2000/svg\"><!-- first --></svg>"
+                     "<svg xmlns=\"http://www.w3.org/2000/svg\"><!-- second --></svg>"
+                     "first high-bitrate video"
+                     "second high-bitrate video"))
+         target)
+    (unwind-protect
+        (progn
+          (cl-mapc
+           (lambda (url content)
+             (with-temp-file (chirp-media--cache-file url "media" "bin")
+               (insert content)))
+           urls contents)
+          (with-temp-buffer
+            (cl-letf (((symbol-function 'chirp-media-carousel-image)
+                       (lambda (&rest _args)
+                         '(image :type svg :data "<svg/>"
+                           :appkit-media-nslices 2
+                           :appkit-media-strip-widths (40 40 40 40))))
+                      ((symbol-function 'image-size)
+                       (lambda (&rest _args) '(160 . 40)))
+                      ((symbol-function 'read-file-name)
+                       (lambda (&rest _args) target))
+                      ((symbol-function 'url-copy-file)
+                       (lambda (&rest _args)
+                         (ert-fail "Downloaded a preview or low-bitrate URL")))
+                      ((symbol-function 'completing-read)
+                       (lambda (&rest _args)
+                         (ert-fail "Asked for media already selected in the carousel"))))
+              (chirp-render--insert-media-track media nil nil 40 4
+                                                '(40 40 40 40) 'cover)
+              (goto-char (point-min))
+              (let ((state (chirp-render--media-track-state)))
+                (cl-loop
+                 for (command index) in
+                 '((nil 0)
+                   (chirp-render-media-track-next 1)
+                   (chirp-render-media-track-next 2)
+                   (chirp-render-media-track-next 3)
+                   (chirp-render-media-track-next 0)
+                   (chirp-render-media-track-previous 3)
+                   (chirp-render-media-track-previous 2)
+                   (chirp-render-media-track-previous 1))
+                 for step from 0
+                 do
+                 (when command (call-interactively command))
+                 (goto-char (if (= step 7)
+                                (point-max)
+                              (nth (mod step 2) (aref state 4))))
+                 (setq target (expand-file-name (format "saved-%d" step)
+                                                chirp-cache-directory))
+                 (call-interactively #'chirp-media-download-at-point)
+                 (should
+                  (equal (with-temp-buffer
+                           (insert-file-contents target)
+                           (buffer-string))
+                         (nth index contents))))))))
+      (delete-directory chirp-cache-directory t))))
 
 (ert-deftest chirp-media-download-at-point-starts-async-download ()
   "Downloading media should prompt for a target path and spawn curl asynchronously."
