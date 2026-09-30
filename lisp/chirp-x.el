@@ -20,6 +20,7 @@
 (require 'url-util)
 (require 'websocket)
 (require 'chirp-core)
+(require 'chirp-x-transaction-source)
 
 (declare-function plz "plz" (method url &rest options))
 (declare-function plz-error-curl-error "plz" (failure))
@@ -977,14 +978,16 @@ Return either `(:success PAYLOAD)' or `(:error MESSAGE)'."
                      "X request was canceled"))))))
 
 (defun chirp-x-cancel-request (request)
-  "Cancel active X retrieval buffer REQUEST exactly once."
-  (when (buffer-live-p request)
-    (with-current-buffer request
-      (if (and (appkit-handle-p chirp-x--request-handle)
-               (appkit-handle-alive-p chirp-x--request-handle))
-          (appkit-cancel-handle chirp-x--request-handle)
-        (kill-buffer request)))
-    t))
+  "Cancel REQUEST, a retrieval buffer or GraphQL write lifecycle handle."
+  (if (appkit-handle-p request)
+      (appkit-cancel-handle request)
+    (when (buffer-live-p request)
+      (with-current-buffer request
+        (if (and (appkit-handle-p chirp-x--request-handle)
+                 (appkit-handle-alive-p chirp-x--request-handle))
+            (appkit-cancel-handle chirp-x--request-handle)
+          (kill-buffer request)))
+      t)))
 
 (defun chirp-x--safe-error-message (error-data credentials)
   "Return ERROR-DATA's message with CREDENTIALS redacted."
@@ -1055,13 +1058,14 @@ preallocated `url-http' buffer so url.el cannot replay or orphan the write."
 
 (cl-defun chirp-x--request
     (request-url method callback
-                 &key data content-type errback allow-empty owner
+                 &key data content-type transaction-id errback allow-empty owner
                  settle-on-cancel cancel-message cookie-only timeout
                  timeout-message (response-type 'json))
   "Request trusted REQUEST-URL with METHOD and call CALLBACK.
 
 DATA is encoded as UTF-8 when needed.  CONTENT-TYPE adds its corresponding
-header.  When ALLOW-EMPTY is non-nil, a successful empty body reaches CALLBACK
+header.  TRANSACTION-ID supplies a prepared GraphQL write transaction header.
+When ALLOW-EMPTY is non-nil, a successful empty body reaches CALLBACK
 as an empty object.  ERRBACK receives setup, transport, HTTP, or response
 errors.  OWNER is the Appkit app or view whose lifecycle owns the retrieval.
 RESPONSE-TYPE selects `json', `json-stream', or `binary'.
@@ -1118,7 +1122,11 @@ TIMEOUT-MESSAGE describes that terminal failure."
                    (upcase (symbol-name method)) 'us-ascii))
                  (url-request-data encoded-data)
                  (url-request-extra-headers
-                  (chirp-x--headers credentials content-type cookie-only)))
+                  (append
+                   (chirp-x--headers credentials content-type cookie-only)
+                   (when transaction-id
+                     (list (chirp-x--ascii-header
+                            "X-Client-Transaction-Id" transaction-id))))))
             (let ((inhibit-quit t))
               (setq chirp-x--dispatch-attempted-p t
                     request-buffer
@@ -1202,7 +1210,9 @@ TIMEOUT-MESSAGE describes that terminal failure."
          (chirp-x--discard-request-buffer
           (or request-buffer chirp-x--dispatch-buffer))
          (if settled-p
-             (signal 'chirp-x--callback-error (list err))
+             (if (eq (car err) 'chirp-x--callback-error)
+                 (signal (car err) (cdr err))
+               (signal 'chirp-x--callback-error (list err)))
            (let* ((message (chirp-x--safe-error-message err credentials))
                   (failure
                    (if (and chirp-x--dispatch-attempted-p
@@ -1217,8 +1227,10 @@ TIMEOUT-MESSAGE describes that terminal failure."
                (condition-case callback-error
                    (funcall error-fn failure)
                  ((error quit)
-                  (signal 'chirp-x--callback-error
-                          (list callback-error)))))))
+                  (if (eq (car callback-error) 'chirp-x--callback-error)
+                      (signal (car callback-error) (cdr callback-error))
+                    (signal 'chirp-x--callback-error
+                            (list callback-error))))))))
          nil)))))
 
 ;;; REST and GraphQL Requests
@@ -1632,6 +1644,68 @@ reconnection and must close the returned websocket."
 
 ;;;; GraphQL Requests
 
+(defun chirp-x--graphql-write-request (request-url body callback errback owner)
+  "Prepare transaction metadata, then dispatch one GraphQL write.
+REQUEST-URL and BODY describe the write.  CALLBACK and ERRBACK settle once.
+OWNER owns a stable handle spanning metadata preparation and HTTP dispatch."
+  (let* ((request-owner (or owner (chirp-app)))
+         (credentials (chirp-x-credentials))
+         preparation request-buffer workflow settled-p)
+    (cl-labels
+        ((finish (listener value)
+           (unless settled-p
+             (setq settled-p t)
+             (when preparation (funcall preparation))
+             (when (appkit-handle-p workflow)
+               (appkit-retire-handle workflow))
+             (condition-case callback-error
+                 (funcall listener value)
+               ((error quit)
+                (signal 'chirp-x--callback-error (list callback-error))))))
+         (fail (message)
+           (finish errback message))
+         (cancel ()
+           (unless settled-p
+             (if (buffer-live-p request-buffer)
+                 (chirp-x-cancel-request request-buffer)
+               (fail "X GraphQL request was canceled before dispatch"))))
+         (dispatch (material)
+           (unless settled-p
+             (condition-case err
+                 (let ((transaction-id
+                        (chirp-x-transaction-id
+                         material "POST"
+                         (url-filename (url-generic-parse-url request-url)))))
+                   (setq request-buffer
+                         (chirp-x--request
+                          request-url 'post
+                          (lambda (payload) (finish callback payload))
+                          :data body :content-type "application/json"
+                          :transaction-id transaction-id
+                          :errback #'fail :owner request-owner)))
+               (chirp-x--callback-error
+                (signal (car err) (cdr err)))
+               ((error quit)
+                (fail (chirp-x--safe-error-message err credentials))
+                (when (eq (car err) 'quit)
+                  (signal 'quit nil)))))))
+      (condition-case err
+          (progn
+            (setq workflow
+                  (appkit-register-handle
+                   request-owner 'function #'cancel))
+            (setq preparation
+                  (chirp-x-transaction-source-prepare
+                   credentials chirp-x-user-agent #'dispatch #'fail))
+            (unless settled-p workflow))
+        (chirp-x--callback-error
+         (signal (car err) (cdr err)))
+        ((error quit)
+         (fail (chirp-x--safe-error-message err credentials))
+         (when (eq (car err) 'quit)
+           (signal 'quit nil))
+         nil)))))
+
 (cl-defun chirp-x--graphql-request-attempt
     (operation variables callback &key errback owner retried-p)
   "Issue one persisted GraphQL attempt for OPERATION.
@@ -1693,14 +1767,14 @@ failure."
                                "refresh retry")))
                      (t
                       (funcall error-fn message)))))))
-          (chirp-x--request
-           request-url method callback
-           :data (and (eq method 'post)
-                      (chirp-x--graphql-post-body
-                       query-id variables features field-toggles))
-           :content-type (and (eq method 'post) "application/json")
-           :errback request-error
-           :owner owner))
+          (if (eq method 'post)
+              (chirp-x--graphql-write-request
+               request-url
+               (chirp-x--graphql-post-body
+                query-id variables features field-toggles)
+               callback request-error owner)
+            (chirp-x--request
+             request-url method callback :errback request-error :owner owner)))
       (chirp-x--callback-error
        (chirp-x--resignal-callback-error err))
       (error
@@ -1716,8 +1790,10 @@ OPERATION is a plist containing `:query-id', `:name', and optional `:method',
 CALLBACK receives decoded JSON as an alist.  ERRBACK receives one readable
 error string.  A definitive stale read refreshes the public query-ID registry
 and retries the read once with the refreshed ID; writes and explicit overrides
-are never retried.  OWNER optionally owns the transport lifecycle.  Return the
-URL retrieval buffer when the request starts, or nil when setup fails."
+are never retried.  Writes prepare X client transaction metadata before
+dispatch.  OWNER optionally owns the transport lifecycle.  Return a retrieval
+buffer for reads, a stable Appkit lifecycle handle for writes, or nil when setup
+fails.  `chirp-x-cancel-request' cancels either kind of request."
   (unless (functionp callback)
     (error "X GraphQL callback is not callable"))
   (let ((error-fn (or errback (lambda (message) (message "%s" message)))))

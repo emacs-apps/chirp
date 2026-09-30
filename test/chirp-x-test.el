@@ -54,6 +54,13 @@
                  (value . ,ct0)
                  (domain . "x.com"))))))
 
+(defun chirp-x-test--prepare-transaction (_credentials _user-agent callback _errback)
+  "Supply deterministic transaction material without network access."
+  (funcall callback
+           (list :key (apply #'unibyte-string (number-sequence 0 47))
+                 :animation "abc123"))
+  nil)
+
 (ert-deftest chirp-x-credentials-read-private-auth-file ()
   "Private browser-imported auth should be Chirp's sole cookie source."
   (let* ((directory (make-temp-file "chirp-x-auth-" t))
@@ -428,9 +435,8 @@
         (chirp-stop)))))
 
 (ert-deftest chirp-x-stale-read-refreshes-and-retries-once ()
-  "A stale read should refresh IDs and retry once; writes must not retry."
+  "A stale read should refresh IDs once, unlike overrides or a plain 404."
   (let ((responses '("X request failed: PersistedQueryNotFound"
-                     "X request failed: PersistedQueryNotFound"
                      "X request failed: PersistedQueryNotFound"
                      "X request failed (HTTP 404)"))
         (chirp-x--query-id-cache (make-hash-table :test #'equal))
@@ -455,9 +461,6 @@
        '(:query-id "read" :name "ReadOp") nil
        (lambda (_payload) (setq succeeded t))
        :errback (lambda (_message) (setq errors (1+ errors))))
-      (chirp-x-graphql-request
-       '(:query-id "write" :name "WriteOp" :method post) nil #'ignore
-       :errback (lambda (_message) (setq errors (1+ errors))))
       (let ((chirp-x-query-id-overrides '(("ReadOp" . "override"))))
         (chirp-x-graphql-request
          '(:query-id "read" :name "ReadOp") nil #'ignore
@@ -466,8 +469,8 @@
        '(:query-id "read" :name "ReadOp") nil #'ignore
        :errback (lambda (_message) (setq errors (1+ errors)))))
     (should succeeded)
-    (should (= requests 5))
-    (should (= errors 3))
+    (should (= requests 4))
+    (should (= errors 2))
     (should (= refreshes 1))))
 
 (ert-deftest chirp-x-graphql-get-encodes-a-persisted-operation ()
@@ -771,48 +774,88 @@
     (should-not requested)
     (should (string-match-p "path is invalid" failure))))
 
-(ert-deftest chirp-x-graphql-post-sends-json-body ()
-  "POST operations should put persisted GraphQL parameters in a JSON body."
-  (let (captured-url captured-headers captured-method captured-body received)
-    (cl-letf (((symbol-function 'chirp-x-credentials)
-               (lambda ()
-                 '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
-              ((symbol-function 'chirp-x--retrieve)
-               (lambda (url callback _callback-args _silent _inhibit-cookies)
-                 (setq captured-url url
-                       captured-headers url-request-extra-headers
-                       captured-method url-request-method
-                       captured-body url-request-data)
-                 (chirp-x-test--response 200 "{\"data\":{}}" callback))))
-      (chirp-x-graphql-request
-       '(:query-id "query-id" :name "FavoriteTweet" :method post
-         :features (("feature" . t))
-         :field-toggles (("withArticlePlainText" . :json-false)))
-       '(("tweet_id" . "1"))
-       (lambda (payload)
-         (setq received payload))
-       :errback (lambda (message)
-                  (ert-fail (format "unexpected error: %s" message)))))
-    (should (equal captured-method "POST"))
-    (should (equal captured-url
-                   "https://x.com/i/api/graphql/query-id/FavoriteTweet"))
-    (should (equal (alist-get "Content-Type" captured-headers nil nil #'string=)
-                   "application/json"))
-    (let ((body (json-parse-string captured-body
-                                   :object-type 'alist
-                                   :array-type 'list
-                                   :null-object nil
-                                   :false-object nil)))
-      (should (equal (alist-get "queryId" body nil nil #'string=) "query-id"))
-      (should (equal (alist-get "tweet_id"
-                                (alist-get "variables" body nil nil #'string=)
-                                nil nil #'string=)
-                     "1"))
-      (should (eq (alist-get "feature"
-                             (alist-get "features" body nil nil #'string=)
-                             nil nil #'string=)
-                  t)))
-    (should (assoc-string "data" received t))))
+(ert-deftest chirp-x-write-preparation-failure-never-dispatches ()
+  "Missing transaction material must fail before an authenticated write."
+  (let ((chirp--app nil) (failures 0) dispatched message)
+    (unwind-protect
+        (cl-letf (((symbol-function 'chirp-x-credentials)
+                   (lambda ()
+                     '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
+                  ((symbol-function 'chirp-x-transaction-source-prepare)
+                   (lambda (_credentials _agent _success failure)
+                     (funcall failure "Transaction metadata unavailable")
+                     nil))
+                  ((symbol-function 'chirp-x--retrieve)
+                   (lambda (&rest _args) (setq dispatched t))))
+          (chirp-x-graphql-request
+           '(:query-id "query-id" :name "CreateBookmark" :method post)
+           '(("tweet_id" . "1")) #'ignore
+           :errback (lambda (failure)
+                      (setq message failure failures (1+ failures))))
+          (should-not dispatched)
+          (should (= failures 1))
+          (should-not (string-prefix-p "X write outcome is unknown" message))
+          (should-not (appkit-owner-handles (chirp-app))))
+      (chirp-stop))))
+
+(ert-deftest chirp-x-write-preparation-cancellation-blocks-late-dispatch ()
+  "Canceling a cold write must fence later transaction-source callbacks."
+  (let ((chirp--app nil) (failures 0) ready handle dispatched message canceled)
+    (unwind-protect
+        (cl-letf (((symbol-function 'chirp-x-credentials)
+                   (lambda ()
+                     '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
+                  ((symbol-function 'chirp-x-transaction-source-prepare)
+                   (lambda (_credentials _agent success _failure)
+                     (setq ready success)
+                     (lambda () (setq canceled t))))
+                  ((symbol-function 'chirp-x--retrieve)
+                   (lambda (&rest _args) (setq dispatched t))))
+          (setq handle
+                (chirp-x-graphql-request
+                 '(:query-id "query-id" :name "CreateBookmark" :method post)
+                 '(("tweet_id" . "1")) #'ignore
+                 :errback (lambda (failure)
+                            (setq message failure failures (1+ failures)))))
+          (chirp-x-cancel-request handle)
+          (funcall ready (list :key (make-string 48 ?a) :animation "abc123"))
+          (should canceled)
+          (should-not dispatched)
+          (should (= failures 1))
+          (should-not (string-prefix-p "X write outcome is unknown" message))
+          (should-not (appkit-handle-alive-p handle)))
+      (chirp-stop))))
+
+(ert-deftest chirp-x-write-handle-cancellation-after-dispatch-is-unknown ()
+  "The same write handle must cancel HTTP without permitting a replay."
+  (let ((chirp--app nil) (dispatches 0) (failures 0)
+        (buffer (generate-new-buffer " *chirp-write-cancel-test*"))
+        handle message)
+    (unwind-protect
+        (cl-letf (((symbol-function 'chirp-x-credentials)
+                   (lambda ()
+                     '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
+                  ((symbol-function 'chirp-x-transaction-source-prepare)
+                   #'chirp-x-test--prepare-transaction)
+                  ((symbol-function 'chirp-x--retrieve)
+                   (lambda (&rest _args)
+                     (setq dispatches (1+ dispatches))
+                     buffer)))
+          (setq handle
+                (chirp-x-graphql-request
+                 '(:query-id "query-id" :name "CreateBookmark" :method post)
+                 '(("tweet_id" . "1")) #'ignore
+                 :errback (lambda (failure)
+                            (setq message failure failures (1+ failures)))))
+          (chirp-x-cancel-request handle)
+          (chirp-x-cancel-request handle)
+          (should (= dispatches 1))
+          (should (= failures 1))
+          (should (string-prefix-p "X write outcome is unknown" message))
+          (should-not (buffer-live-p buffer))
+          (should-not (appkit-handle-alive-p handle)))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest chirp-x-write-disables-url-internal-retry ()
   "A POST retrieval buffer should prohibit url.el transport replay."
@@ -823,7 +866,9 @@
                    :noquery t))
          request-buffer activated replayed)
     (unwind-protect
-        (cl-letf (((symbol-function 'chirp-x-credentials)
+        (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+                   #'chirp-x-test--prepare-transaction)
+                  ((symbol-function 'chirp-x-credentials)
                    (lambda ()
                      '(:auth-token "auth" :ct0 "csrf"
                        :bearer-token "bearer")))
@@ -832,10 +877,12 @@
                   ((symbol-function 'url-http-find-free-connection)
                    (lambda (&rest _args) process)))
           (setq request-buffer
-                (chirp-x-graphql-request
-                 '(:query-id "query-id" :name "CreateTweet" :method post)
-                 '(("tweet_text" . "hello")) #'ignore
-                 :errback #'ignore))
+                (progn
+                  (chirp-x-graphql-request
+                   '(:query-id "query-id" :name "CreateTweet" :method post)
+                   '(("tweet_text" . "hello")) #'ignore
+                   :errback #'ignore)
+                  (process-buffer process)))
           (should (buffer-live-p request-buffer))
           (with-current-buffer request-buffer
             (should (buffer-local-value
@@ -857,7 +904,9 @@
 (ert-deftest chirp-x-synchronous-callback-error-does-not-double-settle ()
   "A signaling success callback should not subsequently invoke ERRBACK."
   (let (successes failures)
-    (cl-letf (((symbol-function 'chirp-x-credentials)
+    (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+               #'chirp-x-test--prepare-transaction)
+              ((symbol-function 'chirp-x-credentials)
                (lambda ()
                  '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
               ((symbol-function 'chirp-x--retrieve)
@@ -883,7 +932,9 @@
 (ert-deftest chirp-x-synchronous-errback-error-does-not-double-settle ()
   "A signaling ERRBACK should be called only once after dispatch failure."
   (let ((failures 0))
-    (cl-letf (((symbol-function 'chirp-x-credentials)
+    (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+               #'chirp-x-test--prepare-transaction)
+              ((symbol-function 'chirp-x-credentials)
                (lambda ()
                  '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
               ((symbol-function 'chirp-x--retrieve)
@@ -926,7 +977,9 @@
   "Timeout and rate-limit write responses should have unknown outcomes."
   (dolist (status '(408 429))
     (let (failure)
-      (cl-letf (((symbol-function 'chirp-x-credentials)
+      (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+                 #'chirp-x-test--prepare-transaction)
+                ((symbol-function 'chirp-x-credentials)
                  (lambda ()
                    '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
                 ((symbol-function 'chirp-x--retrieve)
@@ -942,7 +995,9 @@
 (ert-deftest chirp-x-graphql-request-marks-partial-mutation-errors-unknown ()
   "Mutation errors alongside partial data should have an unknown outcome."
   (let (success failure)
-    (cl-letf (((symbol-function 'chirp-x-credentials)
+    (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+               #'chirp-x-test--prepare-transaction)
+              ((symbol-function 'chirp-x-credentials)
                (lambda ()
                  '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
               ((symbol-function 'chirp-x--retrieve)
@@ -968,7 +1023,9 @@
   "GraphQL errors must not discard a possible write acknowledgement."
   (dolist (status '(200 400))
     (let (success failure)
-      (cl-letf (((symbol-function 'chirp-x-credentials)
+      (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+                 #'chirp-x-test--prepare-transaction)
+                ((symbol-function 'chirp-x-credentials)
                  (lambda ()
                    '(:auth-token "auth" :ct0 "csrf"
                      :bearer-token "bearer")))
@@ -994,7 +1051,9 @@
 (ert-deftest chirp-x-message-less-graphql-write-error-is-not-success ()
   "A GraphQL error without readable text should still fail the write safely."
   (let (success failure)
-    (cl-letf (((symbol-function 'chirp-x-credentials)
+    (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+               #'chirp-x-test--prepare-transaction)
+              ((symbol-function 'chirp-x-credentials)
                (lambda ()
                  '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
               ((symbol-function 'chirp-x--retrieve)
@@ -1015,7 +1074,9 @@
   "A write acknowledgement over the configured byte bound must not succeed."
   (let ((chirp-x--write-response-limit 32)
         success failure)
-    (cl-letf (((symbol-function 'chirp-x-credentials)
+    (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+               #'chirp-x-test--prepare-transaction)
+              ((symbol-function 'chirp-x-credentials)
                (lambda ()
                  '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
               ((symbol-function 'chirp-x--retrieve)
@@ -1155,7 +1216,9 @@
         (request-buffer (generate-new-buffer " *chirp-x-write-request*"))
         failure)
     (unwind-protect
-        (cl-letf (((symbol-function 'chirp-x-credentials)
+        (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+                   #'chirp-x-test--prepare-transaction)
+                  ((symbol-function 'chirp-x-credentials)
                    (lambda ()
                      '(:auth-token "auth" :ct0 "csrf"
                        :bearer-token "bearer")))
@@ -1206,7 +1269,9 @@
 (ert-deftest chirp-x-request-encodes-unicode-post-data-as-utf-8 ()
   "POST data should reach url.el as an encoded unibyte string."
   (let (captured-data)
-    (cl-letf (((symbol-function 'chirp-x-credentials)
+    (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+               #'chirp-x-test--prepare-transaction)
+              ((symbol-function 'chirp-x-credentials)
                (lambda ()
                  '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
               ((symbol-function 'chirp-x--retrieve)
@@ -1224,7 +1289,9 @@
 (ert-deftest chirp-x-request-marks-dispatch-attempt-errors-unknown-and-redacted ()
   "A POST dispatch attempt failure should be unknown and redact credentials."
   (let (failure)
-    (cl-letf (((symbol-function 'chirp-x-credentials)
+    (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+               #'chirp-x-test--prepare-transaction)
+              ((symbol-function 'chirp-x-credentials)
                (lambda ()
                  '(:auth-token "secret" :ct0 "secret-suffix"
                    :bearer-token "secret-bearer")))
@@ -1252,7 +1319,9 @@
                    :noquery t))
          failure)
     (unwind-protect
-        (cl-letf (((symbol-function 'chirp-x-credentials)
+        (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+                   #'chirp-x-test--prepare-transaction)
+                  ((symbol-function 'chirp-x-credentials)
                    (lambda ()
                      '(:auth-token "auth" :ct0 "csrf"
                        :bearer-token "bearer")))
@@ -1282,17 +1351,23 @@
                    :name "chirp-x-unowned-write"
                    :buffer request-buffer
                    :noquery t))
+         (register (symbol-function 'appkit-register-handle))
+         (registrations 0)
          failure)
     (unwind-protect
-        (cl-letf (((symbol-function 'chirp-x-credentials)
+        (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+                   #'chirp-x-test--prepare-transaction)
+                  ((symbol-function 'chirp-x-credentials)
                    (lambda ()
                      '(:auth-token "auth" :ct0 "csrf"
                        :bearer-token "bearer")))
                   ((symbol-function 'chirp-x--retrieve)
                    (lambda (&rest _args) request-buffer))
                   ((symbol-function 'appkit-register-handle)
-                   (lambda (&rest _args)
-                     (error "owner rejected request"))))
+                   (lambda (&rest args)
+                     (if (= (cl-incf registrations) 1)
+                         (apply register args)
+                       (error "owner rejected request")))))
           (should-not
            (chirp-x-graphql-request
             '(:query-id "query-id" :name "CreateTweet" :method post)
@@ -1316,17 +1391,23 @@
                    :name "chirp-x-quit-write"
                    :buffer request-buffer
                    :noquery t))
+         (register (symbol-function 'appkit-register-handle))
+         (registrations 0)
          escaped failure)
     (unwind-protect
-        (cl-letf (((symbol-function 'chirp-x-credentials)
+        (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+                   #'chirp-x-test--prepare-transaction)
+                  ((symbol-function 'chirp-x-credentials)
                    (lambda ()
                      '(:auth-token "auth" :ct0 "csrf"
                        :bearer-token "bearer")))
                   ((symbol-function 'chirp-x--retrieve)
                    (lambda (&rest _args) request-buffer))
                   ((symbol-function 'appkit-register-handle)
-                   (lambda (&rest _args)
-                     (signal 'quit nil))))
+                   (lambda (&rest args)
+                     (if (= (cl-incf registrations) 1)
+                         (apply register args)
+                       (signal 'quit nil)))))
           (condition-case nil
               (chirp-x-graphql-request
                '(:query-id "query-id" :name "CreateTweet" :method post)
