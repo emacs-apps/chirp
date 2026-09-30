@@ -1293,11 +1293,11 @@ track; HEIGHT, GAP, WIDTHS, and FIT retain its presentation geometry."
     (dolist (cell (plist-get plan :items))
       (let ((item (plist-get cell :item)))
         (when-let* ((file (plist-get item :file)))
-          (video-canvas-draw-uri
+          (video-canvas-draw-source
            canvas width height file
            (- (plist-get cell :x) offset) 0
            (plist-get cell :width) height
-           (or (plist-get item :fit) 'contain) background))))
+           :fit (or (plist-get item :fit) 'contain) :background background))))
     (dolist (property '(:appkit-media-nslices :map
                         :appkit-media-strip-widths
                         :appkit-media-strip-offset))

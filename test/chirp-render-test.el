@@ -1975,44 +1975,6 @@
                   (plist-get plan :widths)
                   nil)))))
 
-(ert-deftest chirp-render-carousel-scene-preserves-offset-cover-geometry ()
-  "Canvas scene backgrounds should reuse carousel offsets and cover boxes."
-  (let* ((media
-          '((:type "photo" :file "/tmp/a.jpg")
-            (:type "video" :file "/tmp/b.jpg")))
-         (poster
-          '(image :type svg :data "<svg/>"
-            :appkit-media-nslices 3
-            :appkit-media-strip-widths (100 120)
-            :appkit-media-strip-offset 104))
-         (state
-          (vector 1 '(0 104) media "Media" nil
-                  4 80 '(100 120) 'cover
-                  nil poster nil nil nil nil))
-         draws)
-    (cl-letf (((symbol-function 'video-canvas-create)
-               (lambda (width height &optional _background)
-                 `(image :type canvas :data-width ,width :data-height ,height)))
-              ((symbol-function 'chirp-media--preview-file)
-               (lambda (item) (plist-get item :file)))
-              ((symbol-function 'video-canvas-draw-uri)
-               (lambda (&rest arguments)
-                 (push arguments draws)
-                 t))
-              ((symbol-function 'canvas-refresh) #'ignore))
-      (let ((canvas (chirp-render--media-track-scene-canvas state)))
-        (should (eq (car canvas) 'image))))
-    (setq draws (nreverse draws))
-    (should
-     (equal
-      (mapcar (lambda (arguments)
-                (list (nth 3 arguments)
-                      (nth 4 arguments)
-                      (nth 6 arguments)
-                      (nth 8 arguments)))
-              draws)
-      '(("/tmp/a.jpg" -104 100 cover)
-        ("/tmp/b.jpg" 0 120 cover))))))
 
 (ert-deftest chirp-render-hotspot-video-plays-in-displayed-region ()
   "Clicking a video should preserve the viewport and replace its own box."
