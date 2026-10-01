@@ -22,7 +22,7 @@ use the platform's ~.dylib~ or ~.dll~ equivalent elsewhere.
 Chirp does not search source trees, build directories, or ~load-path~
 for this security-sensitive module.
 
-The crate requires Rust 1.98 or newer and uses the monorepo's shared toolchain.
+The crate requires Rust 1.99 or newer and uses the monorepo's shared toolchain.
 Trimmed source snapshots of ~chat-xdk~ and the
 Juicebox SDK are included under ~native/vendor/~ because their upstream Cargo
 workspaces require a sibling source layout.  Their exact upstream versions and
