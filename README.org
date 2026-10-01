@@ -14,6 +14,18 @@ through Emacs's ~url.el~.  Plz/curl is limited to the public,
 credential-free query-ID registry.  ~browser-session~ is used only
 for explicit browser login capture.
 
+* Data representation
+
+Decoded JSON uses symbol-key alists and list arrays.  Normalizers bind
+related fields with ~let-alist~; canonical entities and view models remain
+keyword plists, read with ~map-let~ or ~pcase~ map patterns.  Optional paths
+use ~map-nested-elt~, and alias selection distinguishes absent fields from
+present ~nil~ values.  There is no custom data-access layer.
+
+Appkit structs and shared session entities keep their existing identity
+and update ownership.  Outbound query/form/header alists, dynamic realm-ID
+maps, and internal card/entity dictionaries retain their string keys.
+
 * Install
 
 GNU Emacs 31.1, Appkit 0.3.0, Plz 0.8 with ~curl~, Transient 0.4.3, websocket 1.16, and browser-session 0.1.0 with its helper.
