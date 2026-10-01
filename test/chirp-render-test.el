@@ -1268,9 +1268,6 @@
       (search-forward "microsoft/RD-Agent")
       (let ((position (match-beginning 0))
             opened)
-        (should (chirp-test--face-member-p
-                 'chirp-quoted-tweet-block-face
-                 (get-text-property position 'face)))
         (should (stringp (get-text-property position 'line-prefix)))
         (cl-letf (((symbol-function 'browse-url)
                    (lambda (url &rest _args)
@@ -1524,7 +1521,11 @@
         (goto-char (point-min))
         (search-forward "Quoted body text")
         (goto-char (match-beginning 0))
-        (chirp-open-at-point)
+        (should-not (get-text-property (point) 'face))
+        (should-not (get-text-property (point) 'mouse-face))
+        (should-not (get-text-property (point) 'keymap))
+        (should-not (appkit-ui-action-at))
+        (call-interactively (key-binding (kbd "RET")))
         (should (equal opened-thread "456"))
         (search-forward (chirp-render--metric-string 'like nil))
         (goto-char (match-beginning 0))
@@ -1648,29 +1649,6 @@
       (search-forward "@bob")
       (should (eq (get-text-property (match-beginning 0) 'face)
                   'chirp-link-face)))))
-
-(ert-deftest chirp-render-insert-tweet-highlights-quoted-tweet-block ()
-  "Quoted tweet cards should carry a distinct block face and prefix."
-  (let ((tweet (chirp-test--sample-quoted-tweet)))
-    (with-temp-buffer
-      (chirp-view-mode)
-      (cl-letf (((symbol-function 'chirp-media-avatar-image) (lambda (&rest _args) nil))
-                ((symbol-function 'chirp-media-thumbnail-image) (lambda (&rest _args) nil)))
-        (let ((inhibit-read-only t))
-          (chirp-render-insert-tweet tweet)))
-      (goto-char (point-min))
-      (search-forward "Bob @bob")
-      (let ((heading-position (match-beginning 0)))
-        (should (chirp-test--face-member-p
-                 'chirp-quoted-tweet-block-face
-                 (get-text-property heading-position 'face)))
-        (should (stringp (get-text-property heading-position 'line-prefix))))
-      (goto-char (point-min))
-      (search-forward "Quoted body text")
-      (should (chirp-test--face-member-p
-               'chirp-quoted-tweet-block-face
-               (get-text-property (match-beginning 0) 'face)))
-      (should (stringp (get-text-property (match-beginning 0) 'line-prefix))))))
 
 (ert-deftest chirp-render-quoted-tweet-lines-use-wrap-prefix ()
   "Quoted tweet body lines should keep the card prefix on visual wraps."

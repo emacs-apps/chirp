@@ -77,7 +77,8 @@ Conversations decode signature-verified plain text through Appkit's semantic mar
 
 | Key | Action |
 |-----+--------|
-| ~RET~ / mouse-1 | activate an attachment or embedded post; otherwise move to the composer |
+| ~RET~ | activate an attachment or embedded post; otherwise move to the composer |
+| mouse-1 | activate a local link or attachment |
 | ~r~ | reply to the message at point |
 | ~!~ | add or remove a prompted reaction |
 | ~N~ | fetch older message history.  Evil: ~g n~ |
@@ -119,7 +120,8 @@ Direct-message reads never send read acknowledgments.  Text, replies, reactions,
 | ~n~ / ~p~ | next or previous entry.  Evil: ~g j~ / ~g k~ |
 | ~N~ | older posts, conversations, or message history.  Evil: ~g n~ |
 | ~q~ | close the window; Home and Following keep the buffer |
-| ~RET~ / mouse-1 | Appkit action at point, or open the tweet or profile |
+| ~RET~ | Appkit action at point, or open the tweet or profile |
+| mouse-1 | activate a local link or control |
 | ~m~ | first media item.  Evil: ~g m~ |
 | ~D~ | download current media.  Evil: ~g d~ |
 | ~A~ | author profile.  Evil: ~g u~ |

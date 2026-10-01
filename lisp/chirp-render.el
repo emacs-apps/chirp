@@ -24,7 +24,6 @@
 (declare-function chirp-toggle-like-at-point "chirp-actions" ())
 (declare-function chirp-toggle-bookmark-at-point "chirp-actions" ())
 (declare-function chirp-quote-at-point "chirp-actions" ())
-(declare-function chirp-thread-open-tweet "chirp-thread" (tweet))
 (declare-function chirp-edit-history-open-tweet "chirp-edit-history" (tweet))
 (declare-function chirp-media-open-dedicated "chirp-media-view"
                   (selection &optional title buffer external-fallback))
@@ -119,13 +118,6 @@ Set this to nil or an empty string to disable tweet separators."
 (defface chirp-link-card-description-face
   '((t :inherit shadow))
   "Face used for external link-card descriptions."
-  :group 'chirp)
-
-(defface chirp-quoted-tweet-block-face
-  '((t :inherit fringe
-     :foreground unspecified
-     :extend t))
-  "Face layered beneath Appkit card blocks."
   :group 'chirp)
 
 (defface chirp-quoted-tweet-border-face
@@ -731,8 +723,6 @@ and PROPERTIES apply to the finished card."
          (start (point)))
     (funcall inserter card-prefix)
     (when (< start (point))
-      (add-face-text-property start (point)
-                              'chirp-quoted-tweet-block-face 'append)
       (when properties
         (add-text-properties start (point) properties))
       (when action
@@ -804,10 +794,10 @@ Precede each card with PREFIX using PREFIX-FACE when provided."
 
 (cl-defun chirp-render-insert-tweet-card
     (tweet &key prefix write-actions-p)
-  "Insert normalized TWEET as an actionable nested card.
+  "Insert normalized TWEET as a nested card with ordinary body text.
 
 PREFIX supplies outer indentation.  WRITE-ACTIONS-P controls mutation actions.
-The card opens TWEET's Chirp thread while retaining its nested link actions."
+Only local links and controls are mouse actions; the body remains scrollable."
   (chirp-render--with-card
    prefix
    (lambda (card-prefix)
@@ -817,8 +807,6 @@ The card opens TWEET's Chirp thread while retaining its nested link actions."
         :show-reply-context t
         :write-actions-p write-actions-p)
        (appkit-ui-apply-line-prefix body-start (point) card-prefix)))
-   :action (lambda () (chirp-thread-open-tweet tweet))
-   :help-echo "Open tweet"
    :properties
    `(chirp-subentry-item ,tweet
      chirp-subentry-url ,(plist-get tweet :url))))

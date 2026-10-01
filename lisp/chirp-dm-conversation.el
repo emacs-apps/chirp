@@ -1357,10 +1357,13 @@ Disjoint focused fragments are bridged through older history before merging."
     (user-error "Current view is not a direct-message conversation")))
 
 (defun chirp-dm-return-dwim (arg)
-  "Move to the composer, send its text, or insert a newline with ARG."
+  "Open an embedded post, move to the composer, or send its text.
+With ARG in the composer, insert a newline instead."
   (interactive "P")
   (if (not (appkit-chatbuf-point-in-input-p))
-      (goto-char (or (appkit-chatbuf-input-logical-end-position) (point-max)))
+      (if (get-text-property (point) 'chirp-subentry-item)
+          (chirp-open-at-point)
+        (goto-char (or (appkit-chatbuf-input-logical-end-position) (point-max))))
     (if arg
         (insert "\n")
       (chirp-dm-submit))))
