@@ -6,6 +6,8 @@
 ;;; Commentary:
 
 ;; Shared bounded wire and normalized-event fixtures for direct-message tests.
+;; Decoded response objects use symbol keys; serialized crypto configuration
+;; and dynamic realm identifiers retain their native wire spelling.
 
 ;;; Code:
 
@@ -131,11 +133,11 @@
 
 (defun chirp-dm-test--user (id name handle)
   "Return one synthetic XChat user wrapper for ID, NAME, and HANDLE."
-  `(("rest_id" . ,id)
-    ("result" .
-     (("rest_id" . ,id)
-      ("core" . (("name" . ,name) ("screen_name" . ,handle)))
-      ("avatar" . (("image_url" . "https://example.invalid/avatar.jpg")))))))
+  `((rest_id . ,id)
+    (result .
+     ((rest_id . ,id)
+      (core . ((name . ,name) (screen_name . ,handle)))
+      (avatar . ((image_url . "https://example.invalid/avatar.jpg")))))))
 
 (cl-defun chirp-dm-test--conversation-item
     (&key (id "conversation-1") events (name "Alice")
@@ -143,23 +145,24 @@
   "Return a synthetic XChat inbox item carrying EVENTS."
   (let ((detail
          (append
-          `(("__typename" . ,(if group-p
-                                 "XChatGroupConversationDetail"
-                               "XChatDirectConversationDetail"))
-            ("conversation_id" . ,id)
-            ("participants_results" .
+          `((__typename . ,(if group-p
+                               "XChatGroupConversationDetail"
+                             "XChatDirectConversationDetail"))
+            (conversation_id . ,id)
+            (participants_results .
              (,(chirp-dm-test--user "42" name handle))))
           (when group-p
-            '(("group_metadata" . (("group_name" . "Test Group"))))))))
-    `(("conversation_detail" . ,detail)
-      ("latest_message_events" . ,events)
-      ("has_more" . ,(and has-more t))
-      ("is_deleted_by_viewer" . nil)
+            '((group_metadata . ((group_name . "Test Group"))))))))
+    `((conversation_detail . ,detail)
+      (latest_message_events . ,events)
+      (has_more . ,(and has-more t))
+      (is_deleted_by_viewer . nil)
       ,@(when message-request-p
-          `(("latest_notifiable_message_create_event" . ,(car events)))))))
+          `((latest_notifiable_message_create_event . ,(car events)))))))
 
 (defun chirp-dm-test--token-map (&optional address token)
-  "Return one synthetic bounded Juicebox token map using ADDRESS and TOKEN."
+  "Return decoded Juicebox token-map metadata using ADDRESS and TOKEN.
+The embedded SDK configuration remains serialized JSON with native field names."
   (let* ((realm-id "01010101010101010101010101010101")
          (realm-address (or address "https://realm.example/"))
          (realm-key (make-string 64 ?1))
@@ -175,19 +178,19 @@
             (cons "recover_threshold" 1)
             (cons "pin_hashing_mode" "Standard2019")))))
     (list
-     (cons "__typename" "KeyStoreTokenMap")
-     (cons "max_guess_count" 20)
-     (cons "recover_threshold" 1)
-     (cons "register_threshold" 1)
-     (cons "token_map"
+     (cons '__typename "KeyStoreTokenMap")
+     (cons 'max_guess_count 20)
+     (cons 'recover_threshold 1)
+     (cons 'register_threshold 1)
+     (cons 'token_map
            (list
             (list
-             (cons "key" realm-id)
-             (cons "value"
-                   (list (cons "token" (or token "realm-token"))
-                         (cons "address" realm-address)
-                         (cons "public_key" realm-key))))))
-     (cons "key_store_token_map_json" sdk-config))))
+             (cons 'key realm-id)
+             (cons 'value
+                   (list (cons 'token (or token "realm-token"))
+                         (cons 'address realm-address)
+                         (cons 'public_key realm-key))))))
+     (cons 'key_store_token_map_json sdk-config))))
 
 (defun chirp-dm-test--public-key-item (version token-map fill)
   "Return a synthetic XChat key VERSION with TOKEN-MAP and byte FILL."
@@ -195,15 +198,15 @@
         (signing (base64-encode-string (make-string 91 ?S) t))
         (binding (base64-encode-string (make-string 64 ?B) t)))
     (list
-     (cons "public_key_with_metadata"
+     (cons 'public_key_with_metadata
            (list
-            (cons "version" version)
-            (cons "public_key"
-                  (list (cons "public_key" identity)
-                        (cons "signing_public_key" signing)
-                        (cons "identity_public_key_signature" binding)
-                        (cons "registration_method" "CustomPin")))))
-     (cons "token_map" token-map))))
+            (cons 'version version)
+            (cons 'public_key
+                  (list (cons 'public_key identity)
+                        (cons 'signing_public_key signing)
+                        (cons 'identity_public_key_signature binding)
+                        (cons 'registration_method "CustomPin")))))
+     (cons 'token_map token-map))))
 
 (defun chirp-dm-test--public-key-payload (&optional latest-address)
   "Return a synthetic GetPublicKeys response using LATEST-ADDRESS."
@@ -215,33 +218,33 @@
            "2" (chirp-dm-test--token-map latest-address "new-token") ?C))))
     (list
      (cons
-      "data"
+      'data
       (list
        (cons
-        "user_results_by_rest_ids"
+        'user_results_by_rest_ids
         (list
          (list
-          (cons "rest_id" "42")
+          (cons 'rest_id "42")
           (cons
-           "result"
+           'result
            (list
-            (cons "__typename" "User")
+            (cons '__typename "User")
             (cons
-             "get_public_keys"
+             'get_public_keys
              (list
-              (cons "__typename" "GetPublicKeysResult")
-              (cons "public_keys_with_token_map" keys)))))))))))))
+              (cons '__typename "GetPublicKeysResult")
+              (cons 'public_keys_with_token_map keys)))))))))))))
 
 (defun chirp-dm-test--inbox-payload (items &optional cursor)
   "Return a synthetic initial inbox payload with ITEMS and CURSOR."
-  `(("data" .
-     (("get_initial_chat_page" .
-       (("__typename" . "XChatGetInboxPageResponse")
-        ("items" . ,items)
-        ("inboxCursor" .
+  `((data .
+     ((get_initial_chat_page .
+       ((__typename . "XChatGetInboxPageResponse")
+        (items . ,items)
+        (inboxCursor .
          ,(or cursor
-              '(("__typename" . "XChatGetInboxPageEndCursor")
-                ("graph_snapshot_id" . "snapshot"))))))))))
+              '((__typename . "XChatGetInboxPageEndCursor")
+                (graph_snapshot_id . "snapshot"))))))))))
 
 (defun chirp-dm-test--normalized-event
     (id sequence text &optional sender-id conversation-id)

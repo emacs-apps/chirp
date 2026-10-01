@@ -6,36 +6,31 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'map)
 (require 'chirp-notifications)
 
 (defun chirp-notifications-test--timeline-payload (entries)
   "Return a notification timeline payload containing ENTRIES."
-  (let ((value `(("instructions" . ((("entries" . ,entries)))))))
-    (dolist (key (reverse '("data" "viewer_v2" "user_results" "result"
-                            "notification_timeline" "timeline"))
+  (let ((value `((instructions . (((entries . ,entries)))))))
+    (dolist (key (reverse '(data viewer_v2 user_results result
+                                notification_timeline timeline))
                  value)
       (setq value (list (cons key value))))))
 
 (ert-deftest chirp-backend-notifications-use-direct-timeline ()
   "Notification requests should adapt X GraphQL activities and pagination."
   (let* ((notification
-          '(("entryId" . "notification-entry")
-            ("content" .
-             (("itemContent" .
-               (("id" . "notification-1")
-                ("notification_icon" . "heart_icon")
-                ("rich_message" . (("text" . "Alice liked your post")))
-                ("timestamp_ms" . "1700000000000")
-                ("template" .
-                 (("target_objects" .
-                   ((("tweet_results" .
-                      (("result" .
-                        (("rest_id" . "123")
-                         ("legacy" . (("full_text" . "Post"))))))))))))))))))
+          '((entryId . "notification-entry")
+            (content . ((itemContent . ((id . "notification-1")
+             (notification_icon . "heart_icon")
+             (rich_message . ((text . "Alice liked your post")))
+             (timestamp_ms . "1700000000000")
+             (template . ((target_objects . (((tweet_results . ((result . ((rest_id . "123")
+              (legacy . ((full_text . "Post"))))))))))))))))))
          (cursor
-          '(("entryId" . "cursor-bottom")
-            ("content" . (("cursorType" . "Bottom")
-                          ("value" . "next")))))
+          '((entryId . "cursor-bottom")
+            (content . ((cursorType . "Bottom")
+                          (value . "next")))))
          (payload (chirp-notifications-test--timeline-payload
                    (list notification cursor)))
          operation variables result envelope failure)
@@ -58,11 +53,11 @@
                    '(("timeline_type" . "All") ("count" . 12))))
     (should
      (equal result
-            '((("id" . "notification-1")
-               ("type" . "like")
-               ("message" . "Alice liked your post")
-               ("timestampMs" . "1700000000000")
-               ("tweetId" . "123")))))
+            '(((id . "notification-1")
+               (type . "like")
+               (message . "Alice liked your post")
+               (timestampMs . "1700000000000")
+               (tweetId . "123")))))
     (should (equal (chirp-backend-envelope-next-cursor envelope) "next"))))
 
 (ert-deftest chirp-notifications-first-check-is-baseline-and-new-items-notify-once ()
@@ -74,16 +69,16 @@
         notified)
     (cl-letf (((symbol-function 'chirp-notifications--notify)
                (lambda (notification)
-                 (push (chirp-get notification "id") notified))))
+                 (push (map-elt notification 'id) notified))))
       (chirp-notifications--handle-success
-       '((("id" . "n2")) (("id" . "n1"))) nil)
+       '(((id . "n2")) ((id . "n1"))) nil)
       (should-not notified)
       (should chirp-notifications--initialized)
       (chirp-notifications--handle-success
-       '((("id" . "n3")) (("id" . "n2"))) nil)
+       '(((id . "n3")) ((id . "n2"))) nil)
       (should (equal notified '("n3")))
       (chirp-notifications--handle-success
-       '((("id" . "n3")) (("id" . "n2"))) nil)
+       '(((id . "n3")) ((id . "n2"))) nil)
       (should (equal notified '("n3"))))))
 
 (ert-deftest chirp-notifications-platform-boundary-strips-text-properties ()
@@ -94,8 +89,8 @@
                (lambda (title body)
                  (setq captured (list title body)))))
       (chirp-notifications--notify
-       `(("type" . "reply")
-         ("message" . ,(propertize "hello" 'face 'bold)))))
+       `((type . "reply")
+         (message . ,(propertize "hello" 'face 'bold)))))
     (should (equal captured '("Chirp · Reply" "hello")))
     (should-not (text-properties-at 0 (cadr captured)))))
 

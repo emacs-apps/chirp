@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'subr-x)
+(require 'map)
 (require 'appkit-core)
 (require 'chirp-backend)
 (require 'chirp-core)
@@ -30,12 +31,13 @@
 
 (defun chirp-dm--unlock-result (result)
   "Report XChat unlock RESULT and open the inbox on success."
-  (pcase (plist-get result :status)
+  (map-let (:status (:guesses-remaining remaining)) result
+    (pcase status
     ('unlocked
      (message "XChat keys unlocked for this Chirp session")
      (chirp-dm--open-unlocked-inbox))
     ('incorrect-pin
-     (if-let* ((remaining (plist-get result :guesses-remaining)))
+     (if remaining
          (display-warning
           'chirp
           (format "Incorrect XChat PIN; %d attempt%s reported remaining"
@@ -66,7 +68,7 @@
       "XChat recovery outcome is uncertain; do not retry automatically"
       :warning))
     (_
-     (display-warning 'chirp "XChat key recovery failed" :error))))
+     (display-warning 'chirp "XChat key recovery failed" :error)))))
 
 (defun chirp-dm--unlock-error (message)
   "Report XChat unlock failure MESSAGE without placing it in a DM buffer."

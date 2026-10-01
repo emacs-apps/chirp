@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'map)
 (require 'subr-x)
 (require 'appkit-core)
 (require 'appkit-compose)
@@ -293,10 +294,10 @@ Only `unknown' persists because it changes whether repeating a write is safe.")
 
 (defun chirp-actions--user-at-point ()
   "Return the current user entry, or signal a user error."
-  (let* ((entry (chirp-entry-at-point))
-         (handle (or (plist-get entry :handle)
-                     (plist-get entry :author-handle)
-                     (chirp-author-handle-at-point))))
+  (pcase-let* ((entry (chirp-entry-at-point))
+               ((map :handle :author-handle) entry)
+               (handle (or handle author-handle
+                           (chirp-author-handle-at-point))))
     (if handle
         (list :kind 'user
               :handle (string-remove-prefix "@" handle)
@@ -642,18 +643,17 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
   "Update compose BUFFER operation OWNER from upload EVENT."
   (when (chirp-compose--operation-current-p buffer owner)
     (with-current-buffer buffer
-      (let* ((media-type (plist-get event :media-type))
-             (kind (pcase media-type
+      (pcase-let* (((map :media-type :phase :index :count :progress) event)
+                   (kind (pcase media-type
                      ("video/mp4" "video")
                      ("image/gif" "GIF")
                      (_ "media")))
              (label
-              (pcase (plist-get event :phase)
+              (pcase phase
                 ('init (format "Starting %s upload..." kind))
                 ('append
                  (format "Uploading %s %d/%d" kind
-                         (plist-get event :index)
-                         (plist-get event :count)))
+                         index count))
                 ('finalize (format "Finalizing %s upload..." kind))
                 ('status (format "Processing %s..." kind))
                 ('publish (chirp-compose--publish-label))
@@ -661,7 +661,7 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
         (appkit-compose-operation-update
          owner
          :label label
-         :progress (plist-get event :progress))
+         :progress progress)
         (when-let* ((text (appkit-compose-status-text)))
           (message "%s" text))
         (appkit-chat-compose-refresh)))))

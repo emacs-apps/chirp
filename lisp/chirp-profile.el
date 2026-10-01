@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'map)
 (require 'appkit-projection)
 (require 'chirp-core)
 (require 'chirp-backend)
@@ -78,88 +79,72 @@
   (appkit-projection-project
    users
    (lambda (user)
-     (list 'user (or (plist-get user :id) (plist-get user :handle))))))
+     (map-let (:id :handle) user
+       (list 'user (or id handle))))))
 
 (defun chirp-profile--header-text (state)
   "Return generated profile chrome and empty/error text for STATE."
-  (with-temp-buffer
-    (when-let* ((user (plist-get state :user)))
-      (chirp-render-insert-user-summary user)
-      (chirp-render-insert-profile-view-strip
-       (plist-get state :mode)
-       (plist-get state :modes)))
-    (let* ((status (plist-get state :status))
-           (phase (plist-get status :phase))
-           (message (plist-get status :message))
-           (mode (plist-get state :mode)))
+  (map-let (:user :mode :modes :items :timeline-ready
+                  (:status (map :phase :message))) state
+    (with-temp-buffer
+      (when user
+        (chirp-render-insert-user-summary user)
+        (chirp-render-insert-profile-view-strip mode modes))
       (cond
-       ((plist-get state :items) nil)
+       (items nil)
        ((eq phase 'error)
-        (insert (or message "Unable to load data."))
-        (insert "\n"))
-       ((plist-get state :timeline-ready)
+        (insert (or message "Unable to load data.") "\n"))
+       (timeline-ready
         (insert (format "No %s returned.\n"
                         (downcase (chirp-profile--mode-label mode)))))
-       ((plist-get state :user)
+       (user
         (insert (propertize
                  (format "Loading %s..."
                          (downcase (chirp-profile--mode-label mode)))
-                 'face 'shadow))
-        (insert "\n"))))
-    (buffer-string)))
+                 'face 'shadow)
+                "\n")))
+      (buffer-string))))
 
 (defun chirp-profile--sync (surface _app state change)
   "Render committed STATE in SURFACE using native projection CHANGE."
   (chirp-profile--bind-locals surface)
   (chirp-render-projection
       surface change
-    (chirp-render-project-tweet-rows (plist-get state :items))
+    (chirp-render-project-tweet-rows (map-elt state :items))
     (chirp-profile--header-text state)))
 
 (defun chirp-profile--users-sync (surface _app state change)
   "Render committed user-list STATE using native projection CHANGE."
-  (chirp-render-projection
-      surface change (chirp-profile--project-users (plist-get state :items))
-      (pcase (plist-get (plist-get state :status) :phase)
-        ('initial (format "Loading %s...\n" (plist-get state :title)))
-        ('error (format "Unable to load data.\n\n%s\n"
-                        (plist-get (plist-get state :status) :message)))
-        (_ (and (null (plist-get state :items)) "No users returned.\n")))))
+  (map-let (:items :title (:status (map :phase :message))) state
+    (chirp-render-projection
+        surface change (chirp-profile--project-users items)
+        (pcase phase
+          ('initial (format "Loading %s...\n" title))
+          ('error (format "Unable to load data.\n\n%s\n" message))
+          (_ (and (null items) "No users returned.\n"))))))
 
 (defun chirp-profile--bind-locals (view)
   "Mirror VIEW state into the profile buffer's command locals."
-  (let
-      ((state (appkit-surface-model view))
-       (buffer (appkit-surface-buffer view)))
+  (pcase-let* ((buffer (appkit-surface-buffer view))
+               ((map :user :items :mode :modes :timeline-ready :loading-more
+                     (:page (map :next-cursor))) (appkit-surface-model view)))
     (with-current-buffer buffer
-      (setq-local chirp-profile--user (plist-get state :user))
-      (setq-local chirp-profile--tweets (plist-get state :items))
-      (setq-local chirp--profile-view-mode (plist-get state :mode))
-      (setq-local chirp-profile--available-modes
-                  (plist-get state :modes))
-      (setq-local chirp--profile-handle
-                  (plist-get (plist-get state :user) :handle))
-      (setq-local chirp--profile-switch-mode-function
+      (setq-local chirp-profile--user user
+                  chirp-profile--tweets items
+                  chirp--profile-view-mode mode
+                  chirp-profile--available-modes modes
+                  chirp--profile-handle (map-elt user :handle)
+                  chirp--profile-switch-mode-function
                   (lambda (target)
                     (chirp-profile--switch-mode chirp--profile-handle
-                                                target buffer)))
-      (setq-local chirp--timeline-count
-                  (length (plist-get state :items)))
-      (setq-local chirp--timeline-next-cursor
-                  (plist-get (plist-get state :page) :next-cursor))
-      (setq-local chirp--timeline-load-more-function
-                  (and (plist-get state :timeline-ready)
-                       (chirp-profile--paginated-mode-p
-                        (plist-get state :mode))
-                       (plist-get (plist-get state :page) :next-cursor)
-                       #'chirp-profile-load-more))
-      (setq-local chirp--timeline-exhausted-p
-                  (and (plist-get state :timeline-ready)
-                       (not
-                        (plist-get (plist-get state :page)
-                                   :next-cursor))))
-      (setq-local chirp--timeline-loading-more
-                  (plist-get state :loading-more)))))
+                                                target buffer))
+                  chirp--timeline-count (length items)
+                  chirp--timeline-next-cursor next-cursor
+                  chirp--timeline-load-more-function
+                  (and timeline-ready (chirp-profile--paginated-mode-p mode)
+                       next-cursor #'chirp-profile-load-more)
+                  chirp--timeline-exhausted-p (and timeline-ready (not next-cursor))
+                  chirp--timeline-loading-more loading-more))))
 
 ;;; Relationship Updates
 
@@ -167,46 +152,46 @@
   "Commit HANDLE's confirmed relationship to MODEL and redraw only its summary.
 FOLLOWING is the successful action's state; REST PAYLOAD fields take precedence.
 This runs inside the owning Surface's update, never in a transport callback."
-  (let* ((handle (chirp-backend--normalize-handle handle))
-         (profile-p (eq (plist-get model :type) 'profile))
-         (users (pcase (plist-get model :type)
-                  ('profile (list (plist-get model :user)))
-                  ('users (plist-get model :items))))
-         (confirmed (assoc-string "following" payload t))
-         (following (if confirmed
-                        (chirp-boolean-value (cdr confirmed))
-                      following))
-         keys)
-    (dolist (user users)
-      (when (and user
-                 (equal handle
-                        (chirp-backend--normalize-handle
-                         (plist-get user :handle))))
-        (let ((old-state (plist-get user :viewer-following-p))
-              (followers (assoc-string "followers_count" payload t))
-              (followed-by (assoc-string "followed_by" payload t)))
-          (plist-put user :viewer-following-p following)
-          (cond
-           (followers
-            (plist-put user :followers (cdr followers)))
-           ((not (eq old-state following))
-            (plist-put user :followers
-                       (chirp-adjust-count (plist-get user :followers)
-                                           (if following 1 -1)))))
-          (when followed-by
-            (plist-put user :viewer-followed-by-p
-                       (chirp-boolean-value (cdr followed-by))))
-          (push (list 'user (or (plist-get user :id)
-                               (plist-get user :handle)))
-                keys))))
-    (if keys
-        (appkit-next
-         :model model
-         :render (appkit-projection-change-create
-                  :keys (unless profile-p keys)
-                  :frame-p profile-p
-                  :position 'preserve))
-      (appkit-next-reject 'unrelated-user))))
+  (map-let (:type :user :items) model
+    (let* ((handle (chirp-backend--normalize-handle handle))
+           (profile-p (eq type 'profile))
+           (users (pcase type
+                    ('profile (list user))
+                    ('users items)))
+           (confirmed (assq 'following payload))
+           (followers (assq 'followers_count payload))
+           (followed-by (assq 'followed_by payload))
+           (following (if confirmed
+                          (chirp-boolean-value (cdr confirmed))
+                        following))
+           keys)
+      (dolist (user users)
+        (map-let (:id (:handle user-handle)
+                      (:viewer-following-p old-state)
+                      (:followers follower-count)) user
+          (when (and user
+                     (equal handle
+                            (chirp-backend--normalize-handle user-handle)))
+            (plist-put user :viewer-following-p following)
+            (cond
+             (followers
+              (plist-put user :followers (cdr followers)))
+             ((not (eq old-state following))
+              (plist-put user :followers
+                         (chirp-adjust-count follower-count
+                                             (if following 1 -1)))))
+            (when followed-by
+              (plist-put user :viewer-followed-by-p
+                         (chirp-boolean-value (cdr followed-by))))
+            (push (list 'user (or id user-handle)) keys))))
+      (if keys
+          (appkit-next
+           :model model
+           :render (appkit-projection-change-create
+                    :keys (unless profile-p keys)
+                    :frame-p profile-p
+                    :position 'preserve))
+        (appkit-next-reject 'unrelated-user)))))
 
 ;;; Views
 
@@ -294,98 +279,53 @@ This runs inside the owning Surface's update, never in a transport callback."
 ;;; Pagination
 
 (defun chirp-profile-load-more (&optional _anchor-id)
-  "Load older items for the current profile view." (interactive)
-  (let*
-      ((view (chirp--live-projection-view))
-       (state (and view (appkit-surface-model view))))
-    (unless
-        (and state (eq (plist-get state :type) 'profile)
-             (plist-get (plist-get state :user) :handle))
+  "Load older items for the current profile view."
+  (interactive)
+  (pcase-let* ((view (chirp--live-projection-view))
+               (state (and view (appkit-surface-model view)))
+               ((map :type :loading-more (:user (map :handle))
+                     (:page (map :next-cursor))) state))
+    (unless (and state (eq type 'profile) handle)
       (user-error "Current view does not support loading more items"))
     (cond
-     ((plist-get state :loading-more)
+     (loading-more
       (message "Already loading older posts..."))
-     ((or (not (plist-get (plist-get state :page) :next-cursor))
-          (and (plist-get state :timeline-ready)
-               (not (plist-get (plist-get state :page) :next-cursor))))
+     ((not next-cursor)
       (message "No older posts."))
      (t
-      (let*
-          ((buffer (appkit-surface-buffer view))
-           (handle (plist-get (plist-get state :user) :handle))
-           (saved-mode (plist-get state :mode))
-           (mode-label
-            (downcase (chirp-profile--mode-label saved-mode)))
-           (cursor (plist-get (plist-get state :page) :next-cursor))
-           (token (chirp-begin-request buffer)))
+      (let* ((buffer (appkit-surface-buffer view))
+             (saved-mode (map-elt state :mode))
+             (mode-label (downcase (chirp-profile--mode-label saved-mode)))
+             (token (chirp-begin-request buffer)))
         (setf (plist-get state :loading-more) t)
-        (chirp-set-status buffer
-                          (format "Loading older %s..." mode-label))
+        (chirp-set-status buffer (format "Loading older %s..." mode-label))
         (message "Loading older %s..." mode-label)
-        (chirp-profile--fetch-content saved-mode handle
-                                      (lambda (tweets envelope)
-                                        (when
-                                            (chirp-request-current-p
-                                             buffer token)
-                                          (let*
-                                              ((current (plist-get state :items))
-                                               (next-cursor
-                                                (chirp-backend-envelope-next-cursor
-                                                 envelope))
-                                               (merged
-                                                (chirp-append-unique-tweets
-                                                 current tweets))
-                                               (added-p
-                                                (> (length merged)
-                                                   (length current))))
-                                            (setf
-                                             (plist-get state :items)
-                                             merged
-                                             (plist-get
-                                              (plist-get state :page)
-                                              :next-cursor)
-                                             next-cursor
-                                             (plist-get state
-                                                        :timeline-ready)
-                                             t
-                                             (plist-get state
-                                                        :loading-more)
-                                             nil)
-                                            (appkit-surface-post view
-                                                                 (appkit-projection-change-create
-                                                                  :position
-                                                                  (plist-get
-                                                                   (list
-                                                                    :position
-                                                                    'preserve)
-                                                                   :position)))
-                                            (chirp-profile--present
-                                             view)
-                                            (chirp-clear-status buffer)
-                                            (chirp-media-prefetch-tweets
-                                             tweets buffer)
-                                            (chirp-enrich-quoted-tweets
-                                             tweets buffer)
-                                            (unless added-p
-                                              (message "No older %s."
-                                                       mode-label)))))
-                                      (lambda (message)
-                                        (when
-                                            (chirp-request-current-p
-                                             buffer token)
-                                          (setf
-                                           (plist-get state
-                                                      :loading-more)
-                                           nil)
-                                          (chirp-set-status buffer
-                                                            "Load more failed"
-                                                            'error)
-                                          (message "%s"
-                                                   (replace-regexp-in-string
-                                                    "[
-\n]+" "  "
-                                                    message))))
-                                      chirp-profile-post-limit cursor))))))
+        (chirp-profile--fetch-content
+         saved-mode handle
+         (lambda (tweets envelope)
+           (when (chirp-request-current-p buffer token)
+             (map-let ((:items current) :page) state
+               (let* ((next-cursor (chirp-backend-envelope-next-cursor envelope))
+                      (merged (chirp-append-unique-tweets current tweets))
+                      (added-p (> (length merged) (length current))))
+                 (setf (plist-get state :items) merged
+                       (plist-get page :next-cursor) next-cursor
+                       (plist-get state :timeline-ready) t
+                       (plist-get state :loading-more) nil)
+                 (appkit-surface-post
+                  view (appkit-projection-change-create :position 'preserve))
+                 (chirp-profile--present view)
+                 (chirp-clear-status buffer)
+                 (chirp-media-prefetch-tweets tweets buffer)
+                 (chirp-enrich-quoted-tweets tweets buffer)
+                 (unless added-p
+                   (message "No older %s." mode-label))))))
+         (lambda (message)
+           (when (chirp-request-current-p buffer token)
+             (setf (plist-get state :loading-more) nil)
+             (chirp-set-status buffer "Load more failed" 'error)
+             (message "%s" (replace-regexp-in-string "[\r\n]+" "  " message))))
+         chirp-profile-post-limit next-cursor))))))
 
 ;;; Requests
 
@@ -454,15 +394,14 @@ When TARGET is `:next', cycle through the available profile modes."
                    (plist-get state :title) title
                    (plist-get state :refresh) refresh)
              (when (and timeline-ready
-                        (not (plist-get state :timeline-ready)))
-               (setf (plist-get state :items) saved-tweets
-                     (plist-get state :timeline-ready) t
-                     (plist-get (plist-get state :page) :next-cursor)
-                     timeline-next-cursor
-                     (plist-get (plist-get state :status) :phase)
-                     (if timeline-error-message 'error 'idle)
-                     (plist-get (plist-get state :status) :message)
-                     timeline-error-message))
+                        (not (map-elt state :timeline-ready)))
+               (map-let (:page :status) state
+                 (setf (plist-get state :items) saved-tweets
+                       (plist-get state :timeline-ready) t
+                       (plist-get page :next-cursor) timeline-next-cursor
+                       (plist-get status :phase)
+                       (if timeline-error-message 'error 'idle)
+                       (plist-get status :message) timeline-error-message)))
              (chirp-profile--present view))
            (when
                (and user-ready timeline-ready (not content-prefetched))
@@ -479,25 +418,25 @@ When TARGET is `:next', cycle through the available profile modes."
            (chirp-view-state-token-current-p
             view state token :profile-request))
          (update-status nil
-           (unless (plist-get state :loading-more)
+           (unless (map-elt state :loading-more)
              (cond
-            (timeline-error-message
-             (chirp-set-status buffer
-                               (format "%s failed"
-                                       (chirp-profile--mode-label mode))
-                               'error))
-            ((and user-ready timeline-ready)
-             (chirp-clear-status buffer))
-            (user-ready
-             (chirp-set-status buffer
-                               (format "Profile ready · loading %s..."
-                                       (downcase
-                                        (chirp-profile--mode-label
-                                         mode)))))
-            (timeline-ready
-             (chirp-set-status buffer
-                               (format "%s ready · loading profile..."
-                                       (chirp-profile--mode-label mode))))))))
+              (timeline-error-message
+               (chirp-set-status buffer
+				 (format "%s failed"
+					 (chirp-profile--mode-label mode))
+				 'error))
+              ((and user-ready timeline-ready)
+               (chirp-clear-status buffer))
+              (user-ready
+               (chirp-set-status buffer
+				 (format "Profile ready · loading %s..."
+					 (downcase
+                                          (chirp-profile--mode-label
+                                           mode)))))
+              (timeline-ready
+               (chirp-set-status buffer
+				 (format "%s ready · loading profile..."
+					 (chirp-profile--mode-label mode))))))))
       (setq token (chirp-begin-background-request buffer title))
       (setf (plist-get state :profile-request) token)
       (chirp-set-status buffer "Loading profile...")
@@ -523,7 +462,7 @@ When TARGET is `:next', cycle through the available profile modes."
        (lambda (user _envelope)
          (when (current-request-p)
            (let*
-               ((self-handle (plist-get user :handle))
+               ((self-handle (map-elt user :handle))
                 (modes
                  (if
                      (and self-handle

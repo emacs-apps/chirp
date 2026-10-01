@@ -11,6 +11,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'map)
 (require 'subr-x)
 (require 'appkit-core)
 (require 'appkit-presentation)
@@ -50,10 +51,10 @@
        (not (chirp-dm-live--service-stopped-p service))
        (appkit-app-live-p (chirp-dm-live--service-app service))
        (eq owner (chirp-dm-live--service-owner service))
-       (= (or (plist-get owner :generation) -1)
-          (chirp-dm-live--service-generation service))
-       (let ((owned (plist-get owner :socket)))
-         (or (null socket) (null owned) (eq socket owned)))))
+       (map-let (:generation (:socket owned)) owner
+         (and (= (or generation -1)
+                 (chirp-dm-live--service-generation service))
+              (or (null socket) (null owned) (eq socket owned))))))
 
 (defun chirp-dm-live--cancel-timer (timer)
   "Cancel TIMER when it remains live."
@@ -90,12 +91,12 @@
         (chirp-dm-live--service-app service)))
     (progn
       (when (appkit-surface-live-p view)
-        (let ((state (appkit-surface-model view)))
-          (pcase (plist-get state :type)
+        (map-let (:type :conversation) (appkit-surface-model view)
+          (pcase type
             ('dm-inbox
              (setf (chirp-dm-live--service-pending-inbox-p service) t))
             ('dm-conversation
-             (puthash (plist-get (plist-get state :conversation) :id)
+             (puthash (map-elt conversation :id)
                       t
                       (chirp-dm-live--service-pending-conversations
                        service)))))))))
@@ -185,10 +186,10 @@
   "Handle one live OPCODE and PAYLOAD for exact SERVICE OWNER and SOCKET."
   (when (chirp-dm-live--current-p service owner socket)
     (condition-case err
-        (let ((decoded (chirp-backend-dm-live-frame opcode payload)))
-          (pcase (plist-get decoded :kind)
+        (map-let (:kind :event) (chirp-backend-dm-live-frame opcode payload)
+          (pcase kind
             ('event
-             (chirp-dm-live--accept-event service (plist-get decoded :event)))
+             (chirp-dm-live--accept-event service event))
             ((or 'pull 'batch)
              (chirp-dm-live--collect-fallback service)
              (chirp-dm-live--dispatch-fallback service))

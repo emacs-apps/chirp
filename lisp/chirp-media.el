@@ -15,6 +15,7 @@
 (require 'cl-lib)
 (require 'image)
 (require 'subr-x)
+(require 'map)
 (require 'svg)
 (require 'url)
 (require 'url-parse)
@@ -512,13 +513,13 @@ Use FALLBACK-EXT when URL has no recognizable extension."
 
 (defun chirp-media--xchat-attachment-extension (attachment)
   "Return a safe cache extension hint for verified ATTACHMENT."
-  (let ((extension
-         (and-let* ((name (plist-get attachment :name)))
-           (downcase (or (file-name-extension name) "")))))
+  (pcase-let* (((map :name :kind) attachment)
+               (extension (and name
+                               (downcase (or (file-name-extension name) "")))))
     (if (and extension
              (string-match-p "\\`[[:alnum:]]\\{1,16\\}\\'" extension))
         extension
-      (pcase (plist-get attachment :kind)
+      (pcase kind
         ('image "jpg")
         ('gif "gif")
         ('svg "svg")
@@ -537,16 +538,13 @@ Use FALLBACK-EXT when URL has no recognizable extension."
 
 (defun chirp-media--load-xchat-attachment (_context input resolve reject)
   "Acquire and decrypt INPUT with revocable transport ownership."
-  (let* ((app (plist-get input :app))
-         (source (plist-get input :source))
-         (attachment (plist-get input :attachment))
-         (cache-base (plist-get input :cache-base))
-         (hint (chirp-media--xchat-attachment-extension attachment))
-         (hint-file (format "%s.%s" cache-base hint))
-         (cached (or (and (chirp-media--valid-cache-file-p hint-file) hint-file)
-                     (appkit-media-image-cache-existing-file cache-base)))
-         (active t)
-         request)
+  (pcase-let* (((map :app :source :attachment :cache-base) input)
+               (hint (chirp-media--xchat-attachment-extension attachment))
+               (hint-file (format "%s.%s" cache-base hint))
+               (cached (or (and (chirp-media--valid-cache-file-p hint-file) hint-file)
+                           (appkit-media-image-cache-existing-file cache-base)))
+               (active t)
+               (request nil))
     (if (and cached (chirp-media--valid-cache-file-p cached))
         (funcall resolve cached)
       (setq request
@@ -1016,25 +1014,23 @@ cached Open Graph fetches for tweets that have no card payload."
 
 (defun chirp-media--item-resource-keys (media)
   "Return cache resource keys represented by MEDIA."
-  (delq nil (list (plist-get media :url)
-                  (plist-get media :preview-url))))
+  (pcase-let (((map :url :preview-url) media))
+    (delq nil (list url preview-url))))
 
 (defun chirp-media-resource-keys-for-tweet (tweet)
   "Return media resource keys whose completion can change TWEET rendering."
-  (let ((keys
-         (append
-          (when chirp-show-avatars
-            (list (plist-get tweet :author-avatar-url)))
-          (when chirp-show-tweet-media
-            (mapcan #'chirp-media--item-resource-keys
-                    (append (plist-get tweet :media)
-                            (chirp-tweet-article-images tweet)))))))
+  (pcase-let* (((map :author-avatar-url :media :quoted-tweet) tweet)
+               (keys
+                (append
+                 (when chirp-show-avatars (list author-avatar-url))
+                 (when chirp-show-tweet-media
+                   (mapcan #'chirp-media--item-resource-keys
+                           (append media (chirp-tweet-article-images tweet)))))))
     (dolist (card (chirp-media-link-cards-for-tweet tweet))
-      (when-let* ((url (plist-get card :url)))
-        (push url keys))
-      (when-let* ((image-url (plist-get card :image-url)))
-        (push image-url keys)))
-    (when-let* ((quoted (plist-get tweet :quoted-tweet)))
+      (pcase-let (((map :url :image-url) card))
+        (when url (push url keys))
+        (when image-url (push image-url keys))))
+    (when-let* ((quoted quoted-tweet))
       (setq keys
             (append keys
                     (chirp-media-resource-keys-for-tweet quoted))))
@@ -1175,32 +1171,33 @@ When FALLBACK is non-nil, call it if remote extraction fails."
 
 (defun chirp-media-prefetch-media (media buffer)
   "Prefetch list-view MEDIA for BUFFER."
-  (when (and (stringp (plist-get media :url))
-             (not (string-empty-p (plist-get media :url))))
-    (cond
-     ((string= (plist-get media :type) "photo")
-      (chirp-media-prefetch-file (plist-get media :url) "media" "jpg"
-                                 (chirp-media--prefetch-callback buffer)))
-     ((chirp-media-video-like-p media)
-      (chirp-media-prefetch-video-thumbnail media buffer)))))
+  (pcase-let (((map :url :type) media))
+    (when (and (stringp url) (not (string-empty-p url)))
+      (cond
+       ((string= type "photo")
+        (chirp-media-prefetch-file url "media" "jpg"
+                                   (chirp-media--prefetch-callback buffer)))
+       ((chirp-media-video-like-p media)
+        (chirp-media-prefetch-video-thumbnail media buffer))))))
 
 (defun chirp-media-prefetch-tweet (tweet buffer)
   "Prefetch list-view assets for TWEET in BUFFER."
-  (when chirp-show-avatars
-    (chirp-media-prefetch-avatar (plist-get tweet :author-avatar-url) buffer))
-  (when chirp-show-tweet-media
-    (dolist (media (plist-get tweet :media))
-      (chirp-media-prefetch-media media buffer))
-    (dolist (media (chirp-tweet-article-images tweet))
-      (chirp-media-prefetch-media media buffer)))
-  (if-let* ((card (plist-get tweet :link-card)))
-      (when-let* ((image-url (plist-get card :image-url)))
-        (chirp-media-prefetch-file image-url "media" "jpg"
-                                   (chirp-media--prefetch-callback buffer)))
-    (dolist (url (chirp-media-link-card-urls tweet))
-      (chirp-media-prefetch-link-card url buffer)))
-  (when-let* ((quoted (plist-get tweet :quoted-tweet)))
-    (chirp-media-prefetch-tweet quoted buffer)))
+  (pcase-let (((map :author-avatar-url :media :link-card :quoted-tweet) tweet))
+    (when chirp-show-avatars
+      (chirp-media-prefetch-avatar author-avatar-url buffer))
+    (when chirp-show-tweet-media
+      (dolist (item media)
+        (chirp-media-prefetch-media item buffer))
+      (dolist (item (chirp-tweet-article-images tweet))
+        (chirp-media-prefetch-media item buffer)))
+    (if link-card
+        (when-let* ((image-url (map-elt link-card :image-url)))
+          (chirp-media-prefetch-file image-url "media" "jpg"
+                                     (chirp-media--prefetch-callback buffer)))
+      (dolist (url (chirp-media-link-card-urls tweet))
+        (chirp-media-prefetch-link-card url buffer)))
+    (when quoted-tweet
+      (chirp-media-prefetch-tweet quoted-tweet buffer))))
 
 (defun chirp-media-prefetch-tweets (tweets buffer)
   "Prefetch list-view assets for TWEETS in BUFFER."
@@ -1372,15 +1369,12 @@ and slice metadata come from `appkit-media-preview-image-from-file'."
   "Return a preview for FILE within MAX-WIDTH and MAX-HEIGHT.
 
 When CROP-SPEC is non-nil, center-crop to that fixed box instead."
-  (let* ((structuredp (and (listp crop-spec)
-                           (keywordp (car crop-spec))))
-         (width (if structuredp
-                    (plist-get crop-spec :width)
-                  (car-safe crop-spec)))
-         (height (if structuredp
-                     (plist-get crop-spec :height)
-                   (cdr-safe crop-spec)))
-         (insets (and structuredp (plist-get crop-spec :insets))))
+  (pcase-let* ((structuredp (and (listp crop-spec)
+                                (keywordp (car crop-spec))))
+               ((map (:width crop-width) (:height crop-height) :insets)
+                (and structuredp crop-spec))
+               (width (if structuredp crop-width (car-safe crop-spec)))
+               (height (if structuredp crop-height (cdr-safe crop-spec))))
     (or (and (numberp width)
              (numberp height)
              (if insets
@@ -1393,20 +1387,19 @@ When CROP-SPEC is non-nil, center-crop to that fixed box instead."
 
 (defun chirp-media--preview-file (media)
   "Return the local preview file for MEDIA, or nil."
-  (cond
-   ((string= (plist-get media :type) "photo")
-    (if chirp-media-render-from-cache-only
-        (chirp-media-cached-file (plist-get media :url) "media" "jpg")
-      (chirp-media-local-file (plist-get media :url) "media" "jpg")))
-   ((chirp-media-video-like-p media)
-    (if chirp-media-render-from-cache-only
-        (or (and-let* ((preview-url (plist-get media :preview-url)))
-              (chirp-media-cached-file
-               preview-url "video-thumbnails" "jpg"))
-            (let ((thumbnail-file
-                   (chirp-media--video-thumbnail-file media)))
-              (and (file-exists-p thumbnail-file) thumbnail-file)))
-      (chirp-media-video-thumbnail-file media)))))
+  (pcase-let (((map :type :url :preview-url) media))
+    (cond
+     ((string= type "photo")
+      (if chirp-media-render-from-cache-only
+          (chirp-media-cached-file url "media" "jpg")
+        (chirp-media-local-file url "media" "jpg")))
+     ((chirp-media-video-like-p media)
+      (if chirp-media-render-from-cache-only
+          (or (and preview-url
+                   (chirp-media-cached-file preview-url "video-thumbnails" "jpg"))
+              (let ((thumbnail-file (chirp-media--video-thumbnail-file media)))
+                (and (file-exists-p thumbnail-file) thumbnail-file)))
+        (chirp-media-video-thumbnail-file media))))))
 
 (defun chirp-media--preview-image
     (media crop-spec max-width max-height)
@@ -1439,14 +1432,13 @@ WIDTHS overrides item widths.  FIT may be `cover' to crop into those boxes."
   (cl-loop for media in media-list
            for index from 0
            collect
-           (append
-            (list :file (chirp-media--preview-file media)
-                  :width (plist-get media :width)
-                  :height (plist-get media :height)
-                  :id (intern (format "chirp-media-%d" index)))
-            (and widths
-                 (list :display-width (nth index widths)))
-            (and fit (list :fit fit)))))
+           (pcase-let (((map :width :height) media))
+             (append
+              (list :file (chirp-media--preview-file media)
+                    :width width :height height
+                    :id (intern (format "chirp-media-%d" index)))
+              (and widths (list :display-width (nth index widths)))
+              (and fit (list :fit fit))))))
 
 (defun chirp-media-carousel-plan
     (media-list height gap &optional offset widths fit)
@@ -1497,14 +1489,12 @@ overrides item widths; FIT may be `cover' to crop into those boxes."
 
 (defun chirp-media-download-url (media)
   "Return the best download URL for MEDIA."
-  (pcase (plist-get media :type)
-    ("photo"
-     (chirp-media--photo-original-url (plist-get media :url)))
-    ((or "video" "animated_gif")
-     (or (chirp-media--highest-bitrate-variant-url media)
-         (plist-get media :url)))
-    (_
-     (plist-get media :url))))
+  (pcase-let (((map :type :url) media))
+    (pcase type
+      ("photo" (chirp-media--photo-original-url url))
+      ((or "video" "animated_gif")
+       (or (chirp-media--highest-bitrate-variant-url media) url))
+      (_ url))))
 
 (defun chirp-media--download-filename (media)
   "Return a default download file name for MEDIA."
@@ -1532,15 +1522,11 @@ overrides item widths; FIT may be `cover' to crop into those boxes."
 
 (defun chirp-media--candidate-label (media index)
   "Return a minibuffer label for MEDIA at INDEX."
-  (let ((dims (if-let* ((width (plist-get media :width))
-                        (height (plist-get media :height)))
-                  (format " %sx%s" width height)
-                "")))
+  (pcase-let* (((map :width :height :type) media)
+               (dims (if (and width height) (format " %sx%s" width height) "")))
     (format "%d. %s %s%s"
-            (1+ index)
-            (or (plist-get media :type) "media")
-            (chirp-media--download-filename media)
-            dims)))
+            (1+ index) (or type "media")
+            (chirp-media--download-filename media) dims)))
 
 (defun chirp-media--select-download-media ()
   "Return the currently selected media item for downloading."
@@ -1668,34 +1654,33 @@ overrides item widths; FIT may be `cover' to crop into those boxes."
 
 (defun chirp-media-playback-url (media)
   "Return the preferred playback URL for video-like MEDIA."
-  (if-let* (((chirp-media-video-like-p media))
-            (variants
-             (cl-remove-if-not
-              (lambda (variant)
-                (let ((url (plist-get variant :url)))
-                  (and (stringp url)
-                       (not (string-empty-p url)))))
-              (copy-sequence (plist-get media :variants)))))
-      (let* ((sorted
-              (sort variants
-                    (lambda (left right)
-                      (< (chirp-media--variant-bitrate left)
-                         (chirp-media--variant-bitrate right)))))
-             (capped
-              (and chirp-video-playback-max-bitrate
-                   (cl-remove-if
-                    (lambda (variant)
-                      (> (chirp-media--variant-bitrate variant)
-                         chirp-video-playback-max-bitrate))
-                    sorted)))
-             (selected
-              (if chirp-video-playback-max-bitrate
-                  (or (car (last capped))
-                      (car sorted))
-                (car (last sorted)))))
-        (or (plist-get selected :url)
-            (plist-get media :url)))
-    (plist-get media :url)))
+  (pcase-let (((map :url (:variants media-variants)) media))
+    (if-let* (((chirp-media-video-like-p media))
+              (variants
+               (cl-remove-if-not
+                (lambda (variant)
+                  (let ((variant-url (map-elt variant :url)))
+                    (and (stringp variant-url)
+                         (not (string-empty-p variant-url)))))
+                (copy-sequence media-variants))))
+        (let* ((sorted
+                (sort variants
+                      (lambda (left right)
+                        (< (chirp-media--variant-bitrate left)
+                           (chirp-media--variant-bitrate right)))))
+               (capped
+                (and chirp-video-playback-max-bitrate
+                     (cl-remove-if
+                      (lambda (variant)
+                        (> (chirp-media--variant-bitrate variant)
+                           chirp-video-playback-max-bitrate))
+                      sorted)))
+               (selected
+                (if chirp-video-playback-max-bitrate
+                    (or (car (last capped)) (car sorted))
+                  (car (last sorted)))))
+          (or (map-elt selected :url) url))
+      url)))
 
 (defun chirp-media--video-cache-key (media)
   "Return a stable Appkit playback cache key for video-like MEDIA."

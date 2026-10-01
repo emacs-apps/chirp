@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'seq)
+(require 'map)
 (require 'appkit-core)
 (require 'chirp-core)
 
@@ -33,6 +34,8 @@
   "Maximum number of notification ids retained for deduplication.")
 
 ;;; Variables
+
+(defvar chirp-notifications-mode)
 
 (defvar chirp-notifications--timer nil
   "Timer used by `chirp-notifications-mode'.")
@@ -71,7 +74,7 @@
 
 (defun chirp-notifications--kind-label (notification)
   "Return a display label for NOTIFICATION's activity type."
-  (pcase (chirp-get notification "type")
+  (pcase (map-nested-elt notification '(type))
     ("like" "Like")
     ("follow" "Follow")
     ("retweet" "Repost")
@@ -82,7 +85,7 @@
 
 (defun chirp-notifications--body (notification)
   "Return the best desktop notification body for NOTIFICATION."
-  (or (chirp-first-nonblank (chirp-get notification "message"))
+  (or (chirp-first-nonblank (map-nested-elt notification '(message)))
       "New X activity."))
 
 ;;; Delivery
@@ -141,16 +144,16 @@
   (when chirp-notifications-mode
     (let* ((with-ids (seq-filter
                       (lambda (notification)
-                        (chirp-get notification "id"))
+                        (map-nested-elt notification '(id)))
                       notifications))
            (new (and chirp-notifications--initialized
                      (seq-filter
                       (lambda (notification)
-                        (not (member (chirp-get notification "id")
+                        (not (member (map-nested-elt notification '(id))
                                      chirp-notifications--seen-ids)))
                       with-ids)))
            (ids (mapcar (lambda (notification)
-                          (chirp-get notification "id"))
+                          (map-nested-elt notification '(id)))
                         with-ids)))
       (chirp-notifications--remember ids)
       (setq chirp-notifications--initialized t)

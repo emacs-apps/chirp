@@ -49,10 +49,10 @@
         server-following buffer callback errback path)
     (cl-labels
         ((raw-user ()
-           `(("id_str" . "42") ("screen_name" . "alice") ("name" . "Alice")
-             ("following" . ,server-following) ("followed_by" . t)
-             ("friends_count" . 23)
-             ("followers_count" . ,(if server-following 101 100))))
+           `((id_str . "42") (screen_name . "alice") (name . "Alice")
+             (following . ,server-following) (followed_by . t)
+             (friends_count . 23)
+             (followers_count . ,(if server-following 101 100))))
          (complete ()
            (setq server-following
                  (pcase path
@@ -66,7 +66,7 @@
                 (((symbol-function 'chirp-x-graphql-request)
                   (lambda (_operation _variables success &rest _options)
                     (funcall success
-                             `(("data" . (("user" . (("result" . ,(raw-user))))))))))
+                             `((data . ((user . ((result . ,(raw-user))))))))))
                  ((symbol-function 'chirp-x-api-request)
                   (lambda (_service request-path success &rest options)
                     (setq path request-path
@@ -79,7 +79,7 @@
                   (lambda (_handle success &optional _errback _limit _cursor)
                     (cl-incf post-requests)
                     (funcall success tweets
-                             '(("pagination" . (("nextCursor" . "older")))))))
+                             '((pagination . ((nextCursor . "older")))))))
                  ((symbol-function 'chirp-display-buffer) #'ignore)
                  ((symbol-function 'chirp-media-prefetch-user) #'ignore)
                  ((symbol-function 'chirp-media-prefetch-tweets) #'ignore)
@@ -158,7 +158,7 @@
                            (appkit-open-generated-surface
                             type :app (chirp-app) :identity '(profile "alice")
                             :input input :buffer buffer)))
-                      (funcall callback '(("following" . t)))
+                      (funcall callback '((following . t)))
                       (drain)
                       (should-not
                        (plist-get
@@ -204,7 +204,7 @@
               (let ((position (point-marker))
                     (anchor (make-overlay (1- (point)) (point))))
                 (overlay-put anchor 'evaporate t)
-                (funcall callback '(("following" . t)) nil)
+                (funcall callback '((following . t)) nil)
                 (should-not
                  (plist-get (car (plist-get (chirp--projection-state) :items))
                             :viewer-following-p))
@@ -298,7 +298,7 @@
           (funcall whoami-callback '(:kind user :handle "alice") nil)
           (funcall posts-callback
                    (list '(:kind tweet :id "1" :text "hello" :author-handle "alice"))
-                   '(("pagination" . (("nextCursor" . "cursor-next")))))
+                   '((pagination . ((nextCursor . "cursor-next")))))
           (with-current-buffer buffer
             (let ((loop (appkit-surface-loop (appkit-current-surface))))
               (while (> (appkit-loop-pending-count loop) 0)
@@ -351,7 +351,7 @@
           (funcall initial-callback
                    (list '(:kind tweet :id "1" :text "first"
                            :author-handle "alice"))
-                   '(("pagination" . (("nextCursor" . "cursor-prev")))))
+                   '((pagination . ((nextCursor . "cursor-prev")))))
           (with-current-buffer buffer
             (let ((loop (appkit-surface-loop (appkit-current-surface))))
               (while (> (appkit-loop-pending-count loop) 0)
@@ -360,7 +360,7 @@
             (funcall older-callback
                      (list '(:kind tweet :id "2" :text "second"
                              :author-handle "alice"))
-                     '(("pagination" . (("nextCursor" . "cursor-next")))))
+                     '((pagination . ((nextCursor . "cursor-next")))))
             (let ((loop (appkit-surface-loop (appkit-current-surface))))
               (while (> (appkit-loop-pending-count loop) 0)
                 (appkit-loop-run-pass loop)))
@@ -415,7 +415,7 @@
           (funcall initial-callback
                    (list '(:kind tweet :id "1" :text "first reply"
                            :author-handle "alice"))
-                   '(("pagination" . (("nextCursor" . "cursor-prev")))))
+                   '((pagination . ((nextCursor . "cursor-prev")))))
           (with-current-buffer buffer
             (let ((loop (appkit-surface-loop (appkit-current-surface))))
               (while (> (appkit-loop-pending-count loop) 0)
@@ -424,7 +424,7 @@
             (funcall older-callback
                      (list '(:kind tweet :id "2" :text "second reply"
                              :author-handle "alice"))
-                     '(("pagination" . (("nextCursor" . "cursor-next")))))
+                     '((pagination . ((nextCursor . "cursor-next")))))
             (let ((loop (appkit-surface-loop (appkit-current-surface))))
               (while (> (appkit-loop-pending-count loop) 0)
                 (appkit-loop-run-pass loop)))

@@ -535,11 +535,10 @@ Return a list of (compose source foreign)."
                          (funcall
                           callback
                           (pcase (cl-incf request-count)
-                            (1 '(("media_id_string" . "7")))
+                            (1 '((media_id_string . "7")))
                             (2 (make-hash-table :test #'equal))
-                            (_ '(("processing_info" .
-                                  (("state" . "pending")
-                                   ("check_after_secs" . 30)))))))))
+                            (_ '((processing_info . ((state . "pending")
+                             (check_after_secs . 30)))))))))
                       ((symbol-function 'chirp-actions-show-error)
                        (lambda (message)
                          (setq reported message))))
@@ -925,7 +924,7 @@ Return a list of (compose source foreign)."
                 ;; Simulate another in-memory edit while the request is pending.
                 (let ((inhibit-read-only t))
                   (appkit-chat-compose-set-items '((:text "later edit")))))
-              (funcall complete '(("data" . nil)))
+              (funcall complete '((data . nil)))
               (with-current-buffer source
                 (let ((entry (car chirp-unsent-entries)))
                   (should (equal (plist-get entry :texts) '("first" "second")))
@@ -953,7 +952,7 @@ Return a list of (compose source foreign)."
         (unwind-protect
             (cl-letf (((symbol-function 'chirp-x-graphql-request)
                        (lambda (_operation _variables callback &rest _options)
-                         (funcall callback '(("data" . nil)))))
+                         (funcall callback '((data . nil)))))
                       ((symbol-function 'chirp-backend-delete-unsent)
                        (lambda (&rest args) (setq deleted args))))
               (with-current-buffer compose
@@ -1069,15 +1068,13 @@ Return a list of (compose source foreign)."
 
 (defun chirp-test--created-reply-result ()
   "Return a complete server reply result for publication reconciliation."
-  '(("rest_id" . "11")
-    ("legacy" . (("full_text" . "server reply")
-                 ("in_reply_to_status_id_str" . "10")
-                 ("conversation_id_str" . "10")))
-    ("core" . (("user_results" .
-                (("result" .
-                  (("rest_id" . "42")
-                   ("legacy" . (("screen_name" . "writer")
-                                ("name" . "Writer")))))))))))
+  '((rest_id . "11")
+    (legacy . ((full_text . "server reply")
+                 (in_reply_to_status_id_str . "10")
+                 (conversation_id_str . "10")))
+    (core . ((user_results . ((result . ((rest_id . "42")
+     (legacy . ((screen_name . "writer")
+                  (name . "Writer")))))))))))
 
 (ert-deftest chirp-compose-published-results-reconcile-only-original-model ()
   "Full creates insert locally; ID-only reads are bounded and lifetime fenced."
@@ -1106,11 +1103,7 @@ Return a list of (compose source foreign)."
               (chirp-compose-send)
               (funcall complete "11"
                        (when (eq scenario 'complete)
-                         `(("data" .
-                            (("create_tweet" .
-                              (("tweet_results" .
-                                (("result" .
-                                  ,(chirp-test--created-reply-result)))))))))))
+                         `((data . ((create_tweet . ((tweet_results . ((result . ,(chirp-test--created-reply-result)))))))))))
               (should-not (buffer-live-p compose))
               (should (= reads (if (eq scenario 'complete) 0 1)))
               (when (eq scenario 'switched-after-read)
@@ -1121,10 +1114,7 @@ Return a list of (compose source foreign)."
                 (appkit-surface-stop surface))
               (when read-complete
                 (funcall read-complete
-                         `(("data" .
-                            (("tweetResult" .
-                              (("result" .
-                                ,(chirp-test--created-reply-result)))))))))
+                         `((data . ((tweetResult . ((result . ,(chirp-test--created-reply-result)))))))))
               (when (appkit-surface-live-p surface)
                 (appkit-loop-run-pass (appkit-surface-loop surface)))
               (let ((items (plist-get model :items)))
@@ -1375,8 +1365,8 @@ Return a list of (compose source foreign)."
               (appkit-loop-run-pass (appkit-surface-loop surface))
               ;; Network completion runs outside the originating view.
               (with-temp-buffer
-                (funcall callback '(("translation" . "你好")
-                                    ("destinationLanguage" . "zh")) nil))
+                (funcall callback '((translation . "你好")
+                                    (destinationLanguage . "zh")) nil))
               (appkit-loop-run-pass (appkit-surface-loop surface))
               (with-current-buffer buffer
                 (goto-char (point-min))
@@ -1412,7 +1402,7 @@ Return a list of (compose source foreign)."
          (appkit-loop-run-pass (appkit-surface-loop surface))
          (should (equal requested-id "123"))
          (with-temp-buffer
-           (funcall callback '(("translation" . "转推的译文")) nil))
+           (funcall callback '((translation . "转推的译文")) nil))
          (appkit-loop-run-pass (appkit-surface-loop surface))
          (goto-char (point-min))
          (should (search-forward "Reposted original" nil t))
@@ -1466,14 +1456,14 @@ Return a list of (compose source foreign)."
                 (should (equal (caar requests) "456"))
                 (with-temp-buffer
                   (funcall old-callback
-                           '(("translation" . "Obsolete translation")) nil))
+                           '((translation . "Obsolete translation")) nil))
                 (appkit-loop-run-pass (appkit-surface-loop surface))
                 (with-current-buffer buffer
                   (should-not (string-match-p "Obsolete translation"
                                               (buffer-string))))
                 (with-temp-buffer
                   (funcall (cdar requests)
-                           '(("translation" . "Current translation")) nil))
+                           '((translation . "Current translation")) nil))
                 (appkit-loop-run-pass (appkit-surface-loop surface))
                 (with-current-buffer buffer
                   (goto-char (point-min))

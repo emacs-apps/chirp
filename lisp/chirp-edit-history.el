@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'map)
 (require 'appkit-projection)
 (require 'chirp-core)
 (require 'chirp-backend)
@@ -47,13 +48,12 @@
 
 (defun chirp-edit-history--frame-text (state)
   "Return header text representing edit-history STATE."
-  (let* ((status (plist-get state :status))
-         (phase (plist-get status :phase))
-         (message (plist-get status :message)))
+  (pcase-let* (((map :status :items) state)
+               ((map :phase :message) status))
     (pcase phase
       ('initial "Loading edit history...\n\n")
       ('error (format "Unable to load edit history.\n\n%s\n\n" message))
-      (_ (and (null (plist-get state :items))
+      (_ (and (null items)
               "No edit history returned.\n")))))
 
 (defun chirp-edit-history--sync (surface _app state change)

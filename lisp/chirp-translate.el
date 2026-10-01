@@ -6,6 +6,7 @@
 ;;; Code:
 
 (require 'appkit-translate)
+(require 'map)
 (require 'chirp-core)
 (require 'chirp-backend)
 
@@ -27,9 +28,9 @@ The target language is shared through `appkit-translate-target-language'."
   "Translate SOURCE through X into LANGUAGE, calling RESOLVE or REJECT."
   (let ((request
           (chirp-backend-translate
-           (plist-get (plist-get source :data) :tweet-id) language
+           (map-nested-elt source '(:data :tweet-id)) language
            (lambda (data _envelope)
-             (funcall resolve (chirp-get data "translation")))
+             (funcall resolve (map-elt data 'translation)))
            reject)))
     ;; X returns its URL retrieval buffer, not an AppKit handle.  The public
     ;; cancellation API stops that retrieval; nil permits logical revocation.
@@ -39,13 +40,12 @@ The target language is shared through `appkit-translate-target-language'."
 (defun chirp-translate-source (tweet)
   "Return the exact displayed translation source for TWEET, or nil.
 The X ID is the actual revision, not the initial edit-history or repost ID."
-  (when-let* ((id (plist-get tweet :id)))
-    (list :key (list 'chirp-tweet id)
-          :version (list id
-                         (plist-get tweet :text)
-                         (plist-get tweet :edit-history-ids))
-          :text (or (plist-get tweet :text) "")
-          :data (list :tweet-id id))))
+  (map-let (:id :text :edit-history-ids) tweet
+    (when id
+      (list :key (list 'chirp-tweet id)
+            :version (list id text edit-history-ids)
+            :text (or text "")
+            :data (list :tweet-id id)))))
 
 (defun chirp-translate--notify (surface key)
   "Invalidate the visible top-level rows in SURFACE containing source KEY."
@@ -58,9 +58,9 @@ The X ID is the actual revision, not the initial edit-history or repost ID."
            (lambda (tweet)
              (let ((nested tweet) found)
                (while (and nested (not found))
-                 (setq found (equal key (list 'chirp-tweet
-                                              (plist-get nested :id)))
-                       nested (plist-get nested :quoted-tweet)))
+                 (map-let (:id :quoted-tweet) nested
+                   (setq found (equal key (list 'chirp-tweet id))
+                         nested quoted-tweet)))
                (when found
                  (cl-pushnew (list 'tweet (plist-get tweet :id)) resources
                              :test #'equal)))))

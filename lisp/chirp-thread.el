@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'map)
 (require 'subr-x)
 (require 'appkit-projection)
 (require 'chirp-core)
@@ -30,16 +31,15 @@
 
 When AUTHORP is non-nil, prefer the current author's display name or handle.
 Otherwise prefer the active region and then the current reply text."
-  (let ((entry (chirp-entry-at-point)))
+  (pcase-let* ((entry (chirp-entry-at-point))
+               ((map :author-name :author-handle :kind :text) entry))
     (chirp-spam-normalize
      (cond
       (authorp
-       (or (plist-get entry :author-name)
-           (plist-get entry :author-handle)))
+       (or author-name author-handle))
       ((use-region-p)
        (buffer-substring-no-properties (region-beginning) (region-end)))
-      ((eq (plist-get entry :kind) 'tweet)
-       (plist-get entry :text))))))
+      ((eq kind 'tweet) text)))))
 
 (defun chirp-thread-add-spam-rule (&optional authorp)
   "Persist one literal spam rule and locally refilter the current thread.
@@ -245,18 +245,17 @@ protected."
 
 (defun chirp-thread--seed-tweets (tweet)
   "Return TWEET as a renderable seed list, or nil."
-  (when (and tweet
-             (eq (plist-get tweet :kind) 'tweet)
-             (plist-get tweet :id))
-    (list tweet)))
+  (pcase-let (((map :kind :id) tweet))
+    (when (and tweet (eq kind 'tweet) id)
+      (list tweet))))
 
 (defun chirp-thread--article-fetch-needed-p (tweet)
   "Return non-nil when TWEET needs direct article enrichment."
-  (and (plist-get tweet :id)
-       (not (chirp-first-nonblank (plist-get tweet :article-text)))
-       (or (chirp-first-nonblank (plist-get tweet :article-title))
-           (and (string-empty-p (or (plist-get tweet :text) ""))
-                (plist-get tweet :urls)))))
+  (pcase-let (((map :id :article-text :article-title :text :urls) tweet))
+    (and id
+         (not (chirp-first-nonblank article-text))
+         (or (chirp-first-nonblank article-title)
+             (and (string-empty-p (or text "")) urls)))))
 
 (defun chirp-thread--maybe-apply-article (tweets article-tweet)
   "Return TWEETS with ARTICLE-TWEET replacing the matching tweet when ids match."
@@ -287,22 +286,19 @@ protected."
 
 (defun chirp-thread--frame-text (state)
   "Return header text representing thread STATE."
-  (let* ((status (plist-get state :status))
-         (phase (plist-get status :phase))
-         (message (plist-get status :message)))
+  (map-let (:items (:status (map :phase :message))) state
     (pcase phase
       ('initial "Loading thread...\n\n")
       ('error (format "Unable to load data.\n\n%s\n\n" message))
-      (_ (and (null (plist-get state :items))
-              "No thread data returned.\n")))))
+      (_ (and (null items) "No thread data returned.\n")))))
 
 (defun chirp-thread--sync (surface _app state change)
   "Render committed STATE in SURFACE using native projection CHANGE."
-  (chirp-render-projection
-      surface change
-    (chirp-thread--project-rows (plist-get state :items)
-                                (plist-get (plist-get state :query) :focus-id))
-    (chirp-thread--frame-text state)))
+  (map-let (:items (:query (map :focus-id))) state
+    (chirp-render-projection
+        surface change
+      (chirp-thread--project-rows items focus-id)
+      (chirp-thread--frame-text state))))
 
 (defun chirp-thread--ensure-view (title refresh focus-id &optional id)
   "Open or reuse a thread view titled TITLE focused on FOCUS-ID.\nREFRESH reloads the thread; optional ID overrides its Appkit identity."
@@ -332,14 +328,7 @@ protected."
           (plist-get (plist-get state :status) :message) nil)
     (appkit-surface-post view
                          (appkit-projection-change-create
-                          :position
-                          (plist-get
-                           (list
-                            :position
-                            (or
-                             position
-                             'first))
-                           :position)))
+                          :position (or position 'first)))
     (appkit-surface-post view
                          (appkit-projection-change-create
                           :full-p t

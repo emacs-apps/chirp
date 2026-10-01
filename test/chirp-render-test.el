@@ -54,144 +54,141 @@
 (defun chirp-test--sample-article-tweet ()
   "Return a normalized tweet payload with article metadata."
   (chirp--tweet-from-x
-   '(("id" . "123")
-     ("text" . "Read this https://t.co/demo")
-     ("urls" . ("https://example.com/article"))
-     ("articleTitle" . "Longform title")
-     ("articleText" . "First paragraph with [details](https://example.com/article).\n\nSecond paragraph.")
-     ("author" . (("screenName" . "alice")
-                  ("name" . "Alice"))))))
+   '((id . "123")
+     (text . "Read this https://t.co/demo")
+     (urls . ("https://example.com/article"))
+     (articleTitle . "Longform title")
+     (articleText . "First paragraph with [details](https://example.com/article).\n\nSecond paragraph.")
+     (author . ((screenName . "alice")
+                (name . "Alice"))))))
 
 (defun chirp-test--sample-article-tweet-with-image ()
   "Return a normalized article tweet that includes one inline image."
   (chirp--tweet-from-x
-   '(("id" . "124")
-     ("text" . "Longform https://t.co/demo")
-     ("urls" . ("https://example.com/article"))
-     ("articleTitle" . "Longform title")
-     ("articleText" . "First paragraph.\n\n![Cover](https://example.com/cover.jpg)\n\nSecond paragraph.")
-     ("author" . (("screenName" . "alice")
-                  ("name" . "Alice"))))))
+   '((id . "124")
+     (text . "Longform https://t.co/demo")
+     (urls . ("https://example.com/article"))
+     (articleTitle . "Longform title")
+     (articleText . "First paragraph.\n\n![Cover](https://example.com/cover.jpg)\n\nSecond paragraph.")
+     (author . ((screenName . "alice")
+                (name . "Alice"))))))
 
 (defun chirp-test--sample-quoted-tweet ()
   "Return a normalized tweet payload with a quoted tweet."
   (chirp--tweet-from-x
-   '(("id" . "999")
-     ("text" . "Commentary https://t.co/quoted")
-     ("urls" . ("https://x.com/bob/status/456"))
-     ("author" . (("screenName" . "alice")
-                  ("name" . "Alice")))
-     ("quotedTweet" . (("id" . "456")
-                       ("text" . "Quoted body text that is intentionally long enough to be shown as a short preview instead of the entire post verbatim.")
-                       ("createdAt" . "QUOTE-TIME")
-                       ("inReplyToScreenName" . "parent")
-                       ("author" . (("screenName" . "bob")
-                                    ("name" . "Bob"))))))))
+   '((id . "999")
+     (text . "Commentary https://t.co/quoted")
+     (urls . ("https://x.com/bob/status/456"))
+     (author . ((screenName . "alice")
+                (name . "Alice")))
+     (quotedTweet . ((id . "456")
+                     (text . "Quoted body text that is intentionally long enough to be shown as a short preview instead of the entire post verbatim.")
+                     (createdAt . "QUOTE-TIME")
+                     (inReplyToScreenName . "parent")
+                     (author . ((screenName . "bob")
+                                (name . "Bob"))))))))
 
 (defun chirp-test--sample-quoted-tweet-with-media ()
   "Return a normalized tweet payload whose quoted tweet has media."
   (chirp--tweet-from-x
-   '(("id" . "998")
-     ("text" . "Commentary https://t.co/quoted")
-     ("urls" . ("https://x.com/bob/status/456"))
-     ("author" . (("screenName" . "alice")
-                  ("name" . "Alice")))
-     ("quotedTweet" . (("id" . "456")
-                       ("text" . "")
-                       ("author" . (("screenName" . "bob")
-                                    ("name" . "Bob")))
-                       ("media" . ((("type" . "photo")
-                                    ("url" . "https://example.com/quoted.jpg")))))))))
+   '((id . "998")
+     (text . "Commentary https://t.co/quoted")
+     (urls . ("https://x.com/bob/status/456"))
+     (author . ((screenName . "alice")
+                (name . "Alice")))
+     (quotedTweet . ((id . "456")
+                     (text . "")
+                     (author . ((screenName . "bob")
+                                (name . "Bob")))
+                     (media . (((type . "photo")
+                                (url . "https://example.com/quoted.jpg")))))))))
 
 (defun chirp-test--sample-retweeted-tweet ()
   "Return a normalized tweet payload with retweet social context."
   (chirp--tweet-from-x
-   '(("id" . "321")
-     ("text" . "Boosted post")
-     ("retweetedBy" . "dotey")
-     ("author" . (("screenName" . "alice")
-                  ("name" . "Alice"))))))
+   '((id . "321")
+     (text . "Boosted post")
+     (retweetedBy . "dotey")
+     (author . ((screenName . "alice")
+                (name . "Alice"))))))
 
 (defun chirp-test--sample-adjacent-reply-tweets ()
   "Return two tweets where the second replies to the first."
   (list
    (chirp--tweet-from-x
-    '(("id" . "100")
-      ("text" . "Parent body text")
-      ("author" . (("screenName" . "dingyi")
-                   ("name" . "Ding")))))
+    '((id . "100")
+      (text . "Parent body text")
+      (author . ((screenName . "dingyi")
+                 (name . "Ding")))))
    (chirp--tweet-from-x
-    '(("id" . "101")
-      ("text" . "Reply body text")
-      ("inReplyToStatusId" . "100")
-      ("inReplyToScreenName" . "dingyi")
-      ("author" . (("screenName" . "nowazhu")
-                   ("name" . "Nowa")))))))
+    '((id . "101")
+      (text . "Reply body text")
+      (inReplyToStatusId . "100")
+      (inReplyToScreenName . "dingyi")
+      (author . ((screenName . "nowazhu")
+                 (name . "Nowa")))))))
 
 (defun chirp-test--sample-adjacent-reply-tweets-with-handle-fallback ()
   "Return two tweets linked by handle and conversation metadata."
   (list
    (chirp--tweet-from-x
-    '(("id" . "200")
-      ("conversationId" . "200")
-      ("text" . "Parent body text")
-      ("author" . (("screenName" . "dingyi")
-                   ("name" . "Ding")))))
+    '((id . "200")
+      (conversationId . "200")
+      (text . "Parent body text")
+      (author . ((screenName . "dingyi")
+                 (name . "Ding")))))
    (chirp--tweet-from-x
-    '(("id" . "201")
-      ("conversationId" . "200")
-      ("text" . "Reply body text")
-      ("inReplyToScreenName" . "dingyi")
-      ("author" . (("screenName" . "nowazhu")
-                   ("name" . "Nowa")))))))
+    '((id . "201")
+      (conversationId . "200")
+      (text . "Reply body text")
+      (inReplyToScreenName . "dingyi")
+      (author . ((screenName . "nowazhu")
+                 (name . "Nowa")))))))
 
 (defun chirp-test--sample-note-tweet-with-entity-links ()
   "Return a normalized note tweet whose expanded URLs live in entity metadata."
   (chirp--tweet-from-x
-   '(("id" . "777")
-     ("author" . (("screenName" . "alice")
-                  ("name" . "Alice")))
-     ("note_tweet" . (("note_tweet_results" . (("result" . (("text" . "GitHub仓库 https://t.co/repo\n在线阅读 https://t.co/read")
-                                                            ("entity_set" . (("urls" . ((("expanded_url" . "https://github.com/example/project"))
-                                                                                        (("expanded_url" . "https://example.com/read")))))))))))))))
+   '((id . "777")
+     (author . ((screenName . "alice")
+                (name . "Alice")))
+     (note_tweet . ((note_tweet_results . ((result . ((text . "GitHub仓库 https://t.co/repo\n在线阅读 https://t.co/read")
+                                                      (entity_set . ((urls . (((expanded_url . "https://github.com/example/project"))
+                                                                              ((expanded_url . "https://example.com/read")))))))))))))))
 
 (defun chirp-test--sample-tweet-with-incomplete-expanded-urls ()
   "Return a normalized tweet whose short links outnumber expanded URLs."
   (chirp--tweet-from-x
-   '(("id" . "778")
-     ("text" . "GitHub仓库 https://t.co/repo 在线阅读 https://t.co/read")
-     ("urls" . ("https://github.com/example/project"))
-     ("author" . (("screenName" . "alice")
-                  ("name" . "Alice"))))))
+   '((id . "778")
+     (text . "GitHub仓库 https://t.co/repo 在线阅读 https://t.co/read")
+     (urls . ("https://github.com/example/project"))
+     (author . ((screenName . "alice")
+                (name . "Alice"))))))
 
 (ert-deftest chirp-tweet-from-x-handles-x-web-graphql-shape ()
   "X web timeline results should retain authors and legacy media."
   (let* ((media
-          '(("type" . "photo")
-            ("url" . "https://t.co/photo-link")
-            ("media_url_https" .
-             "https://pbs.twimg.com/media/photo.jpg?format=jpg")
-            ("ext_alt_text" . "Alt text")
-            ("original_info" . (("width" . 1200)
-                                ("height" . 800)))))
+          '((type . "photo")
+            (url . "https://t.co/photo-link")
+            (media_url_https . "https://pbs.twimg.com/media/photo.jpg?format=jpg")
+            (ext_alt_text . "Alt text")
+            (original_info . ((width . 1200)
+                              (height . 800)))))
          (author
-          '(("id" . "VXNlcjo0Mg==")
-            ("rest_id" . "42")
-            ("core" . (("name" . "Alice")
-                       ("screen_name" . "alice")))
-            ("avatar" .
-             (("image_url" .
-               "https://pbs.twimg.com/profile_images/alice.jpg")))))
+          '((id . "VXNlcjo0Mg==")
+            (rest_id . "42")
+            (core . ((name . "Alice")
+                     (screen_name . "alice")))
+            (avatar . ((image_url . "https://pbs.twimg.com/profile_images/alice.jpg")))))
          (tweet
           (chirp--tweet-from-x
-           `(("id" . "VHdlZXQ6MTIz")
-             ("rest_id" . "123")
-             ("legacy" . (("full_text" . "Direct GraphQL payload")
-                          ("bookmark_count" . 16)
-                          ("extended_entities" . (("media" . (,media))))))
-             ("views" . (("count" . 10286969)
-                         ("state" . "EnabledWithCount")))
-             ("core" . (("user_results" . (("result" . ,author)))))))))
+           `((id . "VHdlZXQ6MTIz")
+             (rest_id . "123")
+             (legacy . ((full_text . "Direct GraphQL payload")
+                        (bookmark_count . 16)
+                        (extended_entities . ((media . (,media))))))
+             (views . ((count . 10286969)
+                       (state . "EnabledWithCount")))
+             (core . ((user_results . ((result . ,author)))))))))
     (should (equal (plist-get tweet :id) "123"))
     (should (equal (plist-get tweet :text) "Direct GraphQL payload"))
     (should (equal (plist-get tweet :author-name) "Alice"))
@@ -210,13 +207,11 @@
 (ert-deftest chirp-tweet-from-x-preserves-reply-control-envelope ()
   "Tweet visibility wrappers should retain reply-control metadata."
   (let* ((raw
-          '(("__typename" . "TweetWithVisibilityResults")
-            ("tweet" . (("rest_id" . "123")
-                        ("legacy" . (("full_text" . "Restricted")
-                                     ("conversation_control" .
-                                      (("mode" . "ByInvitation")))))))
-            ("limitedActionResults" .
-             (("limited_actions" . ((("action" . "Reply"))))))))
+          '((__typename . "TweetWithVisibilityResults")
+            (tweet . ((rest_id . "123")
+                      (legacy . ((full_text . "Restricted")
+                                 (conversation_control . ((mode . "ByInvitation")))))))
+            (limitedActionResults . ((limited_actions . (((action . "Reply"))))))))
          (tweet (chirp--tweet-from-x raw)))
     (should (chirp-tweet-like-p raw))
     (should (equal (plist-get tweet :reply-control-mode) "ByInvitation"))
@@ -226,28 +221,24 @@
   "Edited tweets should expose stable version IDs from both X shapes."
   (let ((latest
          (chirp--tweet-from-x
-          '(("rest_id" . "200")
-            ("legacy" . (("full_text" . "Latest")))
-            ("edit_control" .
-             (("edit_control_initial" .
-               (("edit_tweet_ids" . ("100" "200"))))
-              ("initial_tweet_id" . "100"))))))
+          '((rest_id . "200")
+            (legacy . ((full_text . "Latest")))
+            (edit_control . ((edit_control_initial . ((edit_tweet_ids . ("100" "200"))))
+                             (initial_tweet_id . "100"))))))
         (initial
          (chirp--tweet-from-x
-          '(("rest_id" . "100")
-            ("legacy" . (("full_text" . "Initial")))
-            ("edit_control" .
-             (("edit_tweet_ids" . ("100" "200")))))))
+          '((rest_id . "100")
+            (legacy . ((full_text . "Initial")))
+            (edit_control . ((edit_tweet_ids . ("100" "200")))))))
         (single-version
          (chirp--tweet-from-x
-          '(("rest_id" . "300")
-            ("legacy" . (("full_text" . "Original")))
-            ("edit_control" .
-             (("edit_tweet_ids" . ("300")))))))
+          '((rest_id . "300")
+            (legacy . ((full_text . "Original")))
+            (edit_control . ((edit_tweet_ids . ("300")))))))
         (unedited
          (chirp--tweet-from-x
-          '(("rest_id" . "400")
-            ("legacy" . (("full_text" . "No metadata")))))))
+          '((rest_id . "400")
+            (legacy . ((full_text . "No metadata")))))))
     (dolist (tweet (list latest initial))
       (should (equal (plist-get tweet :edit-history-ids)
                      '("100" "200")))
@@ -272,46 +263,29 @@
 (ert-deftest chirp-tweet-from-x-renders-x-article-rich-content ()
   "Direct X article content should preserve structure, links, and images."
   (let* ((raw
-          '(("rest_id" . "123")
-            ("legacy" . (("full_text" . "Article preview")))
-            ("article" .
-             (("article_results" .
-               (("result" .
-                 (("title" . "Longform title")
-                  ("content_state" .
-                   (("blocks" .
-                     ((("type" . "header-one") ("text" . "Introduction"))
-                      (("type" . "unstyled")
-                       ("text" . "Read docs")
-                       ("entityRanges" .
-                        ((("key" . 0) ("offset" . 5) ("length" . 4)))))
-                      (("type" . "unordered-list-item")
-                       ("text" . "First item"))
-                      (("type" . "atomic")
-                       ("text" . "")
-                       ("entityRanges" .
-                        ((("key" . 1) ("offset" . 0) ("length" . 0)))))))
-                    ("entityMap" .
-                     (("0" . (("type" . "LINK")
-                              ("data" .
-                               (("url" . "https://example.com/docs")))))
-                      ("1" . (("type" . "IMAGE")
-                              ("data" .
-                               (("caption" . "Cover")
-                                ("mediaItems" .
-                                 ((("mediaId" . "media-1"))
-                                  (("mediaId" . "media-2")
-                                   ("caption" . "Detail"))))))))))))
-                  ("media_entities" .
-
-                   ((("media_id" . "media-1")
-                     ("media_info" .
-                      (("original_img_url" .
-                        "https://pbs.twimg.com/media/cover.jpg"))))
-                    (("media_id" . "media-2")
-                     ("media_info" .
-                      (("original_img_url" .
-                        "https://pbs.twimg.com/media/detail.jpg"))))))))))))))
+          '((rest_id . "123")
+            (legacy . ((full_text . "Article preview")))
+            (article . ((article_results . ((result . ((title . "Longform title")
+                                                       (content_state . ((blocks . (((type . "header-one") (text . "Introduction"))
+                                                                                    ((type . "unstyled")
+                                                                                     (text . "Read docs")
+                                                                                     (entityRanges . (((key . 0) (offset . 5) (length . 4)))))
+                                                                                    ((type . "unordered-list-item")
+                                                                                     (text . "First item"))
+                                                                                    ((type . "atomic")
+                                                                                     (text . "")
+                                                                                     (entityRanges . (((key . 1) (offset . 0) (length . 0)))))))
+                                                                         (entityMap . ((\0 . ((type . "LINK")
+                                                                                              (data . ((url . "https://example.com/docs")))))
+                                                                                       (\1 . ((type . "IMAGE")
+                                                                                              (data . ((caption . "Cover")
+                                                                                                       (mediaItems . (((mediaId . "media-1"))
+                                                                                                                      ((mediaId . "media-2")
+                                                                                                                       (caption . "Detail"))))))))))))
+                                                       (media_entities . (((media_id . "media-1")
+                                                                           (media_info . ((original_img_url . "https://pbs.twimg.com/media/cover.jpg"))))
+                                                                          ((media_id . "media-2")
+                                                                           (media_info . ((original_img_url . "https://pbs.twimg.com/media/detail.jpg"))))))))))))))
          (tweet (chirp--tweet-from-x raw)))
     (should (equal (plist-get tweet :article-title) "Longform title"))
     (should
@@ -346,46 +320,46 @@
 (ert-deftest chirp-tweet-from-x-hides-leading-reply-mentions ()
   "Reply-chain @handles should not appear in the visible tweet text."
   (let ((tweet (chirp--tweet-from-x
-                '(("id" . "1")
-                  ("text" . "@alice @bob hello there")
-                  ("inReplyToStatusId" . "0")
-                  ("inReplyToScreenName" . "alice")))))
+                '((id . "1")
+                  (text . "@alice @bob hello there")
+                  (inReplyToStatusId . "0")
+                  (inReplyToScreenName . "alice")))))
     (should (equal (plist-get tweet :text) "hello there"))
     (should (equal (plist-get tweet :raw-text) "@alice @bob hello there"))))
 
 (ert-deftest chirp-tweet-from-x-uses-display-text-range ()
   "X display_text_range should win over stripping every leading mention."
   (let ((tweet (chirp--tweet-from-x
-                '(("id" . "1")
-                  ("full_text" . "@alice @bob check this")
-                  ("display_text_range" . (7 22))
-                  ("inReplyToScreenName" . "alice")))))
+                '((id . "1")
+                  (full_text . "@alice @bob check this")
+                  (display_text_range . (7 22))
+                  (inReplyToScreenName . "alice")))))
     (should (equal (plist-get tweet :text) "@bob check this"))))
 
 (ert-deftest chirp-tweet-from-x-keeps-leading-mention-on-original-posts ()
   "An original post may start with an @mention that the author typed."
   (let ((tweet (chirp--tweet-from-x
-                '(("id" . "1")
-                  ("text" . "@alice hello")))))
+                '((id . "1")
+                  (text . "@alice hello")))))
     (should (equal (plist-get tweet :text) "@alice hello"))))
 
 (ert-deftest chirp-tweet-from-x-preserves-related-timeline-context-only ()
   "Known timeline context should normalize without interning arbitrary values."
   (let ((related
          (chirp--tweet-from-x
-          '(("id" . "123")
-            ("text" . "Related body")
-            ("timelineContext" . "related"))))
+          '((id . "123")
+            (text . "Related body")
+            (timelineContext . "related"))))
         (snake-related
          (chirp--tweet-from-x
-          '(("id" . "234")
-            ("text" . "Related body")
-            ("timeline_context" . "related"))))
+          '((id . "234")
+            (text . "Related body")
+            (timeline_context . "related"))))
         (unknown
          (chirp--tweet-from-x
-          '(("id" . "456")
-            ("text" . "Unknown body")
-            ("timelineContext" . "future-context")))))
+          '((id . "456")
+            (text . "Unknown body")
+            (timelineContext . "future-context")))))
     (should (eq (plist-get related :timeline-context) 'related))
     (should (eq (plist-get snake-related :timeline-context) 'related))
     (should-not (plist-get unknown :timeline-context))))
@@ -395,28 +369,28 @@
   (dolist (permalink '("https://twitter.com/alice/status/123?ref_src=twsrc"
                        "https://x.com/i/web/status/123"))
     (let ((tweet (chirp--tweet-from-x
-                  `(("id" . "123")
-                    ("text" . "Original body https://t.co/self")
-                    ("urls" . (,permalink))
-                    ("author" . (("screenName" . "alice")
-                                 ("name" . "Alice")))))))
+                  `((id . "123")
+                    (text . "Original body https://t.co/self")
+                    (urls . (,permalink))
+                    (author . ((screenName . "alice")
+                               (name . "Alice")))))))
       (should (equal (plist-get tweet :text) "Original body"))
       (should-not (plist-get tweet :urls)))))
 
 (ert-deftest chirp-tweet-from-x-hides-photo-and-video-links ()
   "Media placeholders and resource URLs should not be displayed as links."
-  (dolist (media '((("type" . "photo")
-                    ("url" . "https://pbs.twimg.com/media/example.jpg"))
-                   (("type" . "video")
-                    ("url" . "https://video.twimg.com/ext_tw_video/example.mp4"))))
+  (dolist (media '(((type . "photo")
+                    (url . "https://pbs.twimg.com/media/example.jpg"))
+                   ((type . "video")
+                    (url . "https://video.twimg.com/ext_tw_video/example.mp4"))))
     (let* ((media-url (cdr (assoc "url" media)))
            (tweet (chirp--tweet-from-x
-                   `(("id" . "123")
-                     ("text" . "External https://t.co/site Media https://t.co/media")
-                     ("urls" . ("https://example.com/article" ,media-url))
-                     ("media" . (,media))
-                     ("author" . (("screenName" . "alice")
-                                  ("name" . "Alice")))))))
+                   `((id . "123")
+                     (text . "External https://t.co/site Media https://t.co/media")
+                     (urls . ("https://example.com/article" ,media-url))
+                     (media . (,media))
+                     (author . ((screenName . "alice")
+                                (name . "Alice")))))))
       (should (equal (plist-get tweet :text) "External Media"))
       (should (equal (plist-get tweet :urls)
                      '("https://example.com/article"))))))
@@ -424,23 +398,23 @@
 (ert-deftest chirp-tweet-from-x-strips-unexpanded-media-placeholder ()
   "A rendered media item should cover its otherwise unexpanded short URL."
   (let ((tweet (chirp--tweet-from-x
-                '(("id" . "123")
-                  ("text" . "Photo https://t.co/media")
-                  ("media" . ((("type" . "photo")
-                               ("url" . "https://pbs.twimg.com/media/example.jpg"))))
-                  ("author" . (("screenName" . "alice")
-                               ("name" . "Alice")))))))
+                '((id . "123")
+                  (text . "Photo https://t.co/media")
+                  (media . (((type . "photo")
+                             (url . "https://pbs.twimg.com/media/example.jpg"))))
+                  (author . ((screenName . "alice")
+                             (name . "Alice")))))))
     (should (equal (plist-get tweet :text) "Photo"))
     (should-not (plist-get tweet :urls))))
 
 (ert-deftest chirp-tweet-from-x-hides-known-media-host-without-metadata ()
   "A known media host should stay hidden without structured media metadata."
   (let ((tweet (chirp--tweet-from-x
-                '(("id" . "123")
-                  ("text" . "Photo https://t.co/media")
-                  ("urls" . ("https://pic.x.com/example"))
-                  ("author" . (("screenName" . "alice")
-                               ("name" . "Alice")))))))
+                '((id . "123")
+                  (text . "Photo https://t.co/media")
+                  (urls . ("https://pic.x.com/example"))
+                  (author . ((screenName . "alice")
+                             (name . "Alice")))))))
     (should (equal (plist-get tweet :text) "Photo"))
     (should-not (plist-get tweet :urls))))
 
@@ -468,25 +442,24 @@
 (ert-deftest chirp-tweet-from-x-unwraps-x-retweet-results ()
   "X retweet wrappers should render the original tweet with social context."
   (let* ((retweeter
-          '(("rest_id" . "10")
-            ("legacy" . (("screen_name" . "alice")
-                         ("name" . "Alice")))))
+          '((rest_id . "10")
+            (legacy . ((screen_name . "alice")
+                       (name . "Alice")))))
          (author
-          '(("rest_id" . "20")
-            ("legacy" . (("screen_name" . "bob")
-                         ("name" . "Bob")))))
+          '((rest_id . "20")
+            (legacy . ((screen_name . "bob")
+                       (name . "Bob")))))
          (original
-          `(("rest_id" . "200")
-            ("core" . (("user_results" . (("result" . ,author)))))
-            ("legacy" . (("full_text" . "Original post")))))
+          `((rest_id . "200")
+            (core . ((user_results . ((result . ,author)))))
+            (legacy . ((full_text . "Original post")))))
          (tweet
           (chirp--tweet-from-x
-           `(("rest_id" . "100")
-             ("isPromoted" . t)
-             ("core" . (("user_results" . (("result" . ,retweeter)))))
-             ("legacy" .
-              (("full_text" . "RT @bob: Original post")
-               ("retweeted_status_result" . (("result" . ,original)))))))))
+           `((rest_id . "100")
+             (isPromoted . t)
+             (core . ((user_results . ((result . ,retweeter)))))
+             (legacy . ((full_text . "RT @bob: Original post")
+                        (retweeted_status_result . ((result . ,original)))))))))
     (should (equal (plist-get tweet :id) "200"))
     (should (equal (plist-get tweet :text) "Original post"))
     (should (equal (plist-get tweet :author-handle) "bob"))
@@ -497,16 +470,16 @@
 (ert-deftest chirp-user-from-x-parses-structured-profile-payload-with-blank-name ()
   "Structured profile payloads should survive blank display-name fields."
   (let ((user (chirp--user-from-x
-               '(("id" . "50683")
-                 ("name" . "")
-                 ("screenName" . "dingyi")
-                 ("bio" . "promote")
-                 ("followers" . 148033)
-                 ("following" . 4908)
-                 ("tweets" . 59745)
-                 ("profileImageUrl" . "")
-                 ("viewerFollowing" . t)
-                 ("viewerFollowedBy" . chirp-json-false)))))
+               '((id . "50683")
+                 (name . "")
+                 (screenName . "dingyi")
+                 (bio . "promote")
+                 (followers . 148033)
+                 (following . 4908)
+                 (tweets . 59745)
+                 (profileImageUrl . "")
+                 (viewerFollowing . t)
+                 (viewerFollowedBy . chirp-json-false)))))
     (should user)
     (should (equal (plist-get user :handle) "dingyi"))
     (should (equal (plist-get user :name) "dingyi"))
@@ -520,17 +493,17 @@
   "Current X profile fields should retain biography and account counts."
   (let ((user
          (chirp--user-from-x
-          '(("id" . "VXNlcjo0Mg==")
-            ("rest_id" . "42")
-            ("core" . (("name" . "Alice")
-                       ("screen_name" . "alice")
-                       ("created_at" . "Mon Jan 01 00:00:00 +0000 2024")))
-            ("profile_bio" . (("description" . "Emacs user")))
-            ("relationship_counts" . (("followers" . 120)
-                                      ("following" . 30)))
-            ("tweet_counts" . (("tweets" . 450)))
-            ("avatar" . (("image_url" . "https://example.com/avatar.jpg")))
-            ("relationship_perspectives" . (("following" . t)))))))
+          '((id . "VXNlcjo0Mg==")
+            (rest_id . "42")
+            (core . ((name . "Alice")
+                     (screen_name . "alice")
+                     (created_at . "Mon Jan 01 00:00:00 +0000 2024")))
+            (profile_bio . ((description . "Emacs user")))
+            (relationship_counts . ((followers . 120)
+                                    (following . 30)))
+            (tweet_counts . ((tweets . 450)))
+            (avatar . ((image_url . "https://example.com/avatar.jpg")))
+            (relationship_perspectives . ((following . t)))))))
     (should (equal (plist-get user :id) "42"))
     (should (equal (plist-get user :handle) "alice"))
     (should (equal (plist-get user :bio) "Emacs user"))
@@ -567,7 +540,9 @@
                             :status '(:phase idle)
                             :expanded-tweet-ids (make-hash-table :test #'equal)))
                (view (chirp-open-projection-view
-                      :id 'article-test :title "Articles" :state state
+                      :id 'article-test
+                      :title "Articles"
+                      :state state
                       :render-function #'chirp-timeline--sync
                       :printer #'chirp-render-print-tweet-row)))
           (setq buffer (appkit-surface-buffer view))
@@ -621,11 +596,11 @@
 (ert-deftest chirp-render-insert-tweet-highlights-genuine-external-links ()
   "Genuine external links should highlight on hover and open themselves."
   (let ((tweet (chirp--tweet-from-x
-                '(("id" . "123")
-                  ("text" . "Read https://t.co/article")
-                  ("urls" . ("https://example.com/article"))
-                  ("author" . (("screenName" . "alice")
-                               ("name" . "Alice")))))))
+                '((id . "123")
+                  (text . "Read https://t.co/article")
+                  (urls . ("https://example.com/article"))
+                  (author . ((screenName . "alice")
+                             (name . "Alice")))))))
     (with-temp-buffer
       (chirp-view-mode)
       (cl-letf (((symbol-function 'chirp-media-avatar-image) (lambda (&rest _args) nil))
@@ -677,20 +652,18 @@
          (first (string-match "https://t.co/aaa" text))
          (second (string-match "https://t.co/bbb" text)))
     (chirp--tweet-from-x
-     `(("id" . "2087")
-       ("text" . ,text)
-       ("entities" .
-        (("urls" .
-          ((("url" . "https://t.co/aaa")
-            ("expanded_url" . "https://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html")
-            ("display_url" . "tbaggery.com/2008/04/19/a-n...")
-            ("indices" . (,first ,(+ first (length "https://t.co/aaa")))))
-           (("url" . "https://t.co/bbb")
-            ("expanded_url" . "https://cbea.ms/git-commit/")
-            ("display_url" . "cbea.ms/git-commit/")
-            ("indices" . (,second ,(+ second (length "https://t.co/bbb")))))))))
-       ("author" . (("screenName" . "zackkanter")
-                    ("name" . "Zack Kanter")))))))
+     `((id . "2087")
+       (text . ,text)
+       (entities . ((urls . (((url . "https://t.co/aaa")
+                              (expanded_url . "https://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html")
+                              (display_url . "tbaggery.com/2008/04/19/a-n...")
+                              (indices . (,first ,(+ first (length "https://t.co/aaa")))))
+                             ((url . "https://t.co/bbb")
+                              (expanded_url . "https://cbea.ms/git-commit/")
+                              (display_url . "cbea.ms/git-commit/")
+                              (indices . (,second ,(+ second (length "https://t.co/bbb")))))))))
+       (author . ((screenName . "zackkanter")
+                  (name . "Zack Kanter")))))))
 
 (ert-deftest chirp-tweet-from-x-uses-code-point-entity-indices ()
   "GraphQL entity indices are Unicode code points, not UTF-16 units."
@@ -701,33 +674,28 @@
                        "#Rule34 #Minecraft #FuckCraft #PinkeAnims #NSFW "
                        "https://t.co/YqNlKANgce"))
          (tweet (chirp--tweet-from-x
-                 `(("id" . "2087131921880871390")
-                   ("full_text" . ,text)
-                   ("display_text_range" . (0 217))
-                   ("entities" .
-                    (("urls" .
-                      ((("url" . "https://t.co/ZC1eHiIdEj")
-                        ("expanded_url" . "https://t.me/r34videoss")
-                        ("display_url" . "t.me/r34videoss")
-                        ("indices" . (145 168)))))
-                     ("hashtags" .
-                      ((("text" . "Rule34") ("indices" . (170 177)))
-                       (("text" . "Minecraft") ("indices" . (178 188)))
-                       (("text" . "FuckCraft") ("indices" . (189 199)))
-                       (("text" . "PinkeAnims") ("indices" . (200 211)))
-                       (("text" . "NSFW") ("indices" . (212 217)))))
-                     ("timestamps" .
-                      ((("text" . "30:06")
-                        ("seconds" . 1806)
-                        ("indices" . (109 114)))))
-                     ("media" .
-                      ((("url" . "https://t.co/YqNlKANgce")
-                        ("expanded_url" . "https://x.com/Rule34XXX34/status/2087131921880871390/video/1")
-                        ("display_url" . "pic.x.com/YqNlKANgce")
-                        ("indices" . (218 241))
-                        ("type" . "video"))))))
-                   ("author" . (("screenName" . "Rule34XXX34")
-                                ("name" . "Rule34XXX")))))))
+                 `((id . "2087131921880871390")
+                   (full_text . ,text)
+                   (display_text_range . (0 217))
+                   (entities . ((urls . (((url . "https://t.co/ZC1eHiIdEj")
+                                          (expanded_url . "https://t.me/r34videoss")
+                                          (display_url . "t.me/r34videoss")
+                                          (indices . (145 168)))))
+                                (hashtags . (((text . "Rule34") (indices . (170 177)))
+                                             ((text . "Minecraft") (indices . (178 188)))
+                                             ((text . "FuckCraft") (indices . (189 199)))
+                                             ((text . "PinkeAnims") (indices . (200 211)))
+                                             ((text . "NSFW") (indices . (212 217)))))
+                                (timestamps . (((text . "30:06")
+                                                (seconds . 1806)
+                                                (indices . (109 114)))))
+                                (media . (((url . "https://t.co/YqNlKANgce")
+                                           (expanded_url . "https://x.com/Rule34XXX34/status/2087131921880871390/video/1")
+                                           (display_url . "pic.x.com/YqNlKANgce")
+                                           (indices . (218 241))
+                                           (type . "video"))))))
+                   (author . ((screenName . "Rule34XXX34")
+                              (name . "Rule34XXX")))))))
     (should (string-match-p "Full uncut here" (plist-get tweet :text)))
     (should (string-match-p "t\\.me/r34videoss" (plist-get tweet :text)))
     (should-not (string-match-p "het\\.me" (plist-get tweet :text)))
@@ -893,16 +861,15 @@
 (ert-deftest chirp-tweet-from-x-extracts-mentions-and-hashtags ()
   "Tweet entities should keep mentions and hashtags for inline actions."
   (let ((tweet (chirp--tweet-from-x
-                '(("id" . "55")
-                  ("text" . "Hi @bob see #emacs")
-                  ("author" . (("screenName" . "alice")
-                               ("name" . "Alice")))
-                  ("entities" .
-                   (("user_mentions" . ((("screen_name" . "bob")
-                                         ("name" . "Bob")
-                                         ("indices" . (3 7)))))
-                    ("hashtags" . ((("text" . "emacs")
-                                    ("indices" . (12 18)))))))))))
+                '((id . "55")
+                  (text . "Hi @bob see #emacs")
+                  (author . ((screenName . "alice")
+                             (name . "Alice")))
+                  (entities . ((user_mentions . (((screen_name . "bob")
+                                                  (name . "Bob")
+                                                  (indices . (3 7)))))
+                               (hashtags . (((text . "emacs")
+                                             (indices . (12 18)))))))))))
     (should (equal (plist-get (car (plist-get tweet :mentions)) :handle) "bob"))
     (should (equal (plist-get (car (plist-get tweet :mentions)) :name) "Bob"))
     (should (equal (plist-get tweet :hashtags) '("emacs")))
@@ -1316,14 +1283,12 @@
          (url-end (+ url-beg (length "https://t.co/aaa")))
          (tweet
           (chirp--tweet-from-x
-           `(("id" . "amp")
-             ("text" . ,raw)
-             ("entities"
-              . (("urls"
-                  . ((("url" . "https://t.co/aaa")
-                      ("expanded_url" . "https://example.com/x")
-                      ("display_url" . "example.com/x")
-                      ("indices" . (,url-beg ,url-end)))))))))))
+           `((id . "amp")
+             (text . ,raw)
+             (entities . ((urls . (((url . "https://t.co/aaa")
+                                    (expanded_url . "https://example.com/x")
+                                    (display_url . "example.com/x")
+                                    (indices . (,url-beg ,url-end)))))))))))
     (should (string-match-p "Scala & Java" (plist-get tweet :text)))
     (should-not (string-match-p "&amp;" (plist-get tweet :text)))
     (let ((entity (car (plist-get tweet :text-entities))))
@@ -1562,11 +1527,11 @@
   "Related context should precede the original author heading."
   (let ((tweet
          (chirp--tweet-from-x
-          '(("id" . "related-1")
-            ("text" . "Related body")
-            ("timelineContext" . "related")
-            ("author" . (("screenName" . "alice")
-                         ("name" . "Alice")))))))
+          '((id . "related-1")
+            (text . "Related body")
+            (timelineContext . "related")
+            (author . ((screenName . "alice")
+                       (name . "Alice")))))))
     (with-temp-buffer
       (chirp-view-mode)
       (cl-letf (((symbol-function 'chirp-media-avatar-image)
@@ -1587,10 +1552,10 @@
   "Pinned context should precede the tweet author."
   (let ((tweet
          (chirp--tweet-from-x
-          '(("id" . "pinned-1")
-            ("text" . "Pinned body")
-            ("author" . (("screenName" . "alice")
-                         ("name" . "Alice")))))))
+          '((id . "pinned-1")
+            (text . "Pinned body")
+            (author . ((screenName . "alice")
+                       (name . "Alice")))))))
     (plist-put tweet :timeline-context 'pinned)
     (with-temp-buffer
       (chirp-view-mode)
@@ -1952,7 +1917,6 @@
                   4
                   (plist-get plan :widths)
                   nil)))))
-
 
 (ert-deftest chirp-render-hotspot-video-plays-in-displayed-region ()
   "Clicking a video should preserve the viewport and replace its own box."
@@ -2426,7 +2390,9 @@
           (let* ((state (list :type 'collection :query '(:kind bookmarks)
                               :items (list tweet) :status '(:phase idle)))
                  (view (chirp-open-projection-view
-                        :id 'quote-test :title "Quotes" :state state
+                        :id 'quote-test
+                        :title "Quotes"
+                        :state state
                         :render-function #'chirp-timeline--sync
                         :printer #'chirp-render-print-tweet-row)))
             (setq buffer (appkit-surface-buffer view))

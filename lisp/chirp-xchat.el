@@ -12,6 +12,8 @@
 
 (require 'cl-lib)
 (require 'json)
+(require 'map)
+(require 'let-alist)
 (require 'subr-x)
 (require 'url-parse)
 (require 'appkit-markup-codec)
@@ -356,9 +358,10 @@ stable event identity."
 
 (defun chirp-xchat-live-token (payload)
   "Return the bounded websocket token from XChat GraphQL PAYLOAD."
-  (let ((token
-         (chirp-get-in
-          payload '("data" "user_get_x_chat_auth_token" "token"))))
+  (let* ((data (and (chirp-object-p payload) (alist-get 'data payload)))
+         (result (and (chirp-object-p data)
+                      (alist-get 'user_get_x_chat_auth_token data)))
+         (token (and (chirp-object-p result) (alist-get 'token result))))
     (unless (and (stringp token)
                  (<= 1 (length token) 8192)
                  (string-match-p
@@ -476,11 +479,12 @@ or `batch'.  An `event' result also carries the normalized MessageEvent under
 (defun chirp-xchat-send-result
     (payload conversation-id sender-id message-id)
   "Validate send PAYLOAD for CONVERSATION-ID, SENDER-ID, and MESSAGE-ID."
-  (let* ((root
-          (chirp-get-in payload
-                        '("data" "xchat_send_create_message_event")))
-         (typename (chirp-get root "__typename"))
-         (encoded (chirp-get root "encoded_message_event")))
+  (let* ((data (and (chirp-object-p payload) (alist-get 'data payload)))
+         (root (and (chirp-object-p data)
+                    (alist-get 'xchat_send_create_message_event data)))
+         (typename (and (chirp-object-p root) (alist-get '__typename root)))
+         (encoded (and (chirp-object-p root)
+                       (alist-get 'encoded_message_event root))))
     (unless (and (equal typename "XChatSendMessageCreateEventResponse")
                  (chirp-xchat--send-base64-p
                   encoded chirp-xchat--max-send-event-bytes))
@@ -547,36 +551,34 @@ or `batch'.  An `event' result also carries the normalized MessageEvent under
 
 (defun chirp-xchat--decode-user (wrapper)
   "Decode one XChat user result WRAPPER."
-  (let* ((result (and (chirp-object-p wrapper)
-                      (chirp-get wrapper "result")))
-         (core (and (chirp-object-p result) (chirp-get result "core")))
-         (id (chirp-first-nonblank
-              (and (chirp-object-p result) (chirp-get result "rest_id"))
-              (and (chirp-object-p wrapper) (chirp-get wrapper "rest_id"))))
-         (name (and (chirp-object-p core)
-                    (chirp-first-nonblank (chirp-get core "name"))))
-         (handle (and (chirp-object-p core)
-                      (chirp-first-nonblank
-                       (chirp-get core "screen_name")))))
-    (unless id
-      (error "XChat participant has no identity"))
-    (list :id id
-          :name name
-          :handle handle
-          :avatar-url
-          (and (chirp-object-p result)
-               (chirp-first-nonblank
-                (chirp-get-in result '("avatar" "image_url")))))))
+  (unless (chirp-object-p wrapper)
+    (error "XChat participant has no identity"))
+  (let-alist wrapper
+    (let* ((result .result)
+           (core (and (chirp-object-p result) (alist-get 'core result)))
+           (avatar (and (chirp-object-p result) (alist-get 'avatar result)))
+           (id (chirp-first-nonblank
+                (and (chirp-object-p result) (alist-get 'rest_id result))
+                .rest_id)))
+      (unless id
+        (error "XChat participant has no identity"))
+      (list :id id
+            :name (and (chirp-object-p core)
+                       (chirp-first-nonblank (alist-get 'name core)))
+            :handle (and (chirp-object-p core)
+                         (chirp-first-nonblank (alist-get 'screen_name core)))
+            :avatar-url (and (chirp-object-p avatar)
+                             (chirp-first-nonblank
+                              (alist-get 'image_url avatar)))))))
 
 (defun chirp-xchat-event-label (event)
   "Return a one-line preview label for normalized XChat EVENT."
-  (let ((text (plist-get event :text))
-        (kind (plist-get event :kind)))
+  (cl-destructuring-bind (&key text kind attachment-count &allow-other-keys)
+      event
     (cond
      ((and (stringp text) (not (string-empty-p text)))
       (replace-regexp-in-string "[[:space:]\n\r]+" " " text))
-     ((and (eq kind 'message)
-           (> (or (plist-get event :attachment-count) 0) 0))
+     ((and (eq kind 'message) (> (or attachment-count 0) 0))
       "[Attachment message]")
      ((eq kind 'message) "[Message content unavailable]")
      (t (format "[XChat event: %s]" kind)))))
@@ -602,14 +604,14 @@ or `batch'.  An `event' result also carries the normalized MessageEvent under
 (defun chirp-xchat--item-encoded-events (item)
   "Return ITEM's required encoded XChat preview events."
   (let ((cell (and (chirp-object-p item)
-                   (assoc-string "latest_message_events" item t))))
+                   (assq 'latest_message_events item))))
     (unless (and cell (listp (cdr cell)))
       (error "XChat inbox item has invalid preview events"))
     (cdr cell)))
 
 (defun chirp-xchat--required-boolean (object key label)
   "Return OBJECT's required Boolean KEY described by LABEL."
-  (let ((cell (and (chirp-object-p object) (assoc-string key object t))))
+  (let ((cell (and (chirp-object-p object) (assq key object))))
     (unless (and cell (memq (cdr cell) '(nil t)))
       (error "XChat %s is missing or not Boolean" label))
     (cdr cell)))
@@ -638,7 +640,7 @@ or `batch'.  An `event' result also carries the normalized MessageEvent under
 
 (defun chirp-xchat--conversation-type (detail)
   "Return normalized conversation type from XChat DETAIL."
-  (pcase (chirp-get detail "__typename")
+  (pcase (alist-get '__typename detail)
     ("XChatDirectConversationDetail" 'direct)
     ("XChatGroupConversationDetail" 'group)
     (typename
@@ -649,24 +651,22 @@ or `batch'.  An `event' result also carries the normalized MessageEvent under
   "Decode one XChat conversation ITEM, or return nil when deleted.
 
 REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
-  (let ((detail (chirp-get item "conversation_detail")))
+  (let ((detail (and (chirp-object-p item)
+                     (alist-get 'conversation_detail item))))
     (unless (and detail (chirp-object-p detail))
       (error "XChat conversation is missing its detail"))
+    (let-alist detail
     (let* ((type (chirp-xchat--conversation-type detail))
            (has-more
-            (chirp-xchat--required-boolean item "has_more"
-                                           "conversation history flag"))
+            (chirp-xchat--required-boolean item 'has_more "conversation history flag"))
            (deletion-cell
-            (assoc-string "is_deleted_by_viewer" item t))
+            (assq 'is_deleted_by_viewer item))
            (deleted
             (and (or deletion-cell require-deletion-flag-p)
-                 (chirp-xchat--required-boolean
-                  item "is_deleted_by_viewer"
-                  "conversation deletion flag"))))
+                 (chirp-xchat--required-boolean item 'is_deleted_by_viewer "conversation deletion flag"))))
       (unless deleted
-        (let* ((id (chirp-first-nonblank
-                    (chirp-get detail "conversation_id")))
-               (raw-participants (chirp-get detail "participants_results"))
+        (let* ((id (chirp-first-nonblank .conversation_id))
+               (raw-participants .participants_results)
                (_ (unless (listp raw-participants)
                     (error "XChat conversation has invalid participants")))
                (participants
@@ -682,7 +682,7 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
                       events)))
                (latest (car (last events)))
                (older-cursor (chirp-xchat--older-cursor events))
-               (group-metadata (chirp-get detail "group_metadata"))
+               (group-metadata .group_metadata)
                (participant-title
                 (string-join
                  (delq nil
@@ -695,7 +695,8 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
                  ", "))
                (title
                 (or (chirp-first-nonblank
-                     (chirp-get group-metadata "group_name")
+                     (and (chirp-object-p group-metadata)
+                          (alist-get 'group_name group-metadata))
                      participant-title)
                     (if (eq type 'group)
                         "Group conversation"
@@ -715,30 +716,28 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
                 :preview (and latest (chirp-xchat-event-label latest))
                 :updated-at-msec
                 (and latest (plist-get latest :created-at-msec))
-                :muted-p (and (chirp-get detail "is_muted") t)
+                :muted-p (and .is_muted t)
                 :message-request-p
                 (and latest (plist-get latest :message-request-p))
                 :has-more has-more
-                :older-cursor older-cursor))))))
+                :older-cursor older-cursor)))))))
 
 (defun chirp-xchat--inbox-cursor (raw-cursor)
   "Normalize documented RAW-CURSOR from an XChat inbox page."
   (unless (chirp-object-p raw-cursor)
     (error "XChat inbox page has no cursor"))
-  (let ((typename (chirp-get raw-cursor "__typename"))
+  (let ((typename (alist-get '__typename raw-cursor))
         (snapshot-id (chirp-first-nonblank
-                      (chirp-get raw-cursor "graph_snapshot_id"))))
+                      (alist-get 'graph_snapshot_id raw-cursor))))
     (pcase typename
       ("XChatGetInboxPageContinueCursor"
        (let* ((cursor-id (chirp-first-nonblank
-                          (chirp-get raw-cursor "cursor_id")))
+                          (alist-get 'cursor_id raw-cursor)))
               (restarted-cell
-               (assoc-string "graph_snapshot_restarted" raw-cursor t))
+               (assq 'graph_snapshot_restarted raw-cursor))
               (restarted
                (and restarted-cell
-                    (chirp-xchat--required-boolean
-                     raw-cursor "graph_snapshot_restarted"
-                     "inbox snapshot restart flag"))))
+                    (chirp-xchat--required-boolean raw-cursor 'graph_snapshot_restarted "inbox snapshot restart flag"))))
          (unless (and cursor-id snapshot-id)
            (error "XChat inbox continuation cursor is incomplete"))
          (list :cursor-id cursor-id
@@ -746,8 +745,8 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
                :graph-snapshot-restarted-p restarted)))
       ("XChatGetInboxPageEndCursor"
        (let ((exhausted-cell
-              (or (assoc-string "inbox_exhausted" raw-cursor t)
-                  (assoc-string "inboxExhausted" raw-cursor t))))
+              (or (assq 'inbox_exhausted raw-cursor)
+                  (assq 'inboxExhausted raw-cursor))))
          (unless snapshot-id
            (error "XChat inbox end cursor is incomplete"))
          (when (and exhausted-cell
@@ -758,13 +757,13 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
 
 (defun chirp-xchat-inbox-page (payload)
   "Normalize one modern XChat inbox page from GraphQL PAYLOAD."
-  (let ((page (or (chirp-get-in payload '("data" "get_initial_chat_page"))
-                  (chirp-get-in payload '("data" "get_inbox_page")))))
+  (let ((page (or (map-nested-elt payload '(data get_initial_chat_page))
+                  (map-nested-elt payload '(data get_inbox_page)))))
     (unless (and page (chirp-object-p page))
       (error "X did not return an XChat inbox page"))
-    (let* ((items-cell (assoc-string "items" page t))
-           (cursor-cell (or (assoc-string "inboxCursor" page t)
-                            (assoc-string "cursor" page t))))
+    (let* ((items-cell (assq 'items page))
+           (cursor-cell (or (assq 'inboxCursor page)
+                            (assq 'cursor page))))
       (unless (and items-cell cursor-cell)
         (error "XChat inbox page is missing required fields"))
       (let* ((items (chirp-xchat--validate-inbox-items (cdr items-cell)))
@@ -776,16 +775,15 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
                         item
                         :require-deletion-flag-p t))
                      items))
-              `(("pagination" .
-                 (,@(when cursor `(("nextCursor" . ,cursor)))
-                  ("complete" . ,(not cursor))))))))))
+              `((pagination . (,@(when cursor `((nextCursor . ,cursor)))
+               (complete . ,(not cursor))))))))))
 
 ;;; Recovery
 
 (defun chirp-xchat--required (object key label)
   "Return OBJECT's required KEY described by LABEL."
   (let ((cell (and (chirp-object-p object)
-                   (assoc-string key object t))))
+                   (assq key object))))
     (unless cell
       (error "XChat %s is missing" label))
     (cdr cell)))
@@ -848,13 +846,10 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
              config '("realms" "register_threshold" "recover_threshold"
                       "pin_hashing_mode"))
       (error "XChat Juicebox SDK configuration is invalid"))
-    (let* ((realms (chirp-xchat--required config "realms" "realm list"))
-           (register (chirp-xchat--required
-                      config "register_threshold" "register threshold"))
-           (recover (chirp-xchat--required
-                     config "recover_threshold" "recover threshold"))
-           (hashing (chirp-xchat--required
-                     config "pin_hashing_mode" "PIN hashing mode"))
+    (let* ((realms (chirp-xchat--required config 'realms "realm list"))
+           (register (chirp-xchat--required config 'register_threshold "register threshold"))
+           (recover (chirp-xchat--required config 'recover_threshold "recover threshold"))
+           (hashing (chirp-xchat--required config 'pin_hashing_mode "PIN hashing mode"))
            (realm-count (length realms))
            (realm-table (make-hash-table :test #'equal)))
       (unless (and (listp realms)
@@ -868,10 +863,9 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
         (unless (chirp-xchat--known-fields-p
                  realm '("id" "address" "public_key"))
           (error "XChat Juicebox realm is invalid"))
-        (let ((id (chirp-xchat--required realm "id" "realm identity"))
-              (address (chirp-xchat--required
-                        realm "address" "realm address"))
-              (public-key (chirp-get realm "public_key")))
+        (let ((id (chirp-xchat--required realm 'id "realm identity"))
+              (address (chirp-xchat--required realm 'address "realm address"))
+              (public-key (alist-get 'public_key realm)))
           (unless (and (chirp-xchat--hex-p id 32)
                        (chirp-xchat--https-realm-p address)
                        (or (null public-key)
@@ -888,15 +882,14 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
   (unless (chirp-object-p raw)
     (error "XChat Juicebox token map is missing"))
   (let* ((max-guesses
-          (chirp-xchat--required raw "max_guess_count" "guess limit"))
+          (chirp-xchat--required raw 'max_guess_count "guess limit"))
          (recover
-          (chirp-xchat--required raw "recover_threshold" "recover threshold"))
+          (chirp-xchat--required raw 'recover_threshold "recover threshold"))
          (register
-          (chirp-xchat--required raw "register_threshold" "register threshold"))
-         (entries (chirp-xchat--required raw "token_map" "realm tokens"))
+          (chirp-xchat--required raw 'register_threshold "register threshold"))
+         (entries (chirp-xchat--required raw 'token_map "realm tokens"))
          (encoded
-          (chirp-xchat--required
-           raw "key_store_token_map_json" "SDK configuration"))
+          (chirp-xchat--required raw 'key_store_token_map_json "SDK configuration"))
          (sdk (chirp-xchat--sdk-config encoded))
          (realm-table (plist-get sdk :realm-table))
          (seen (make-hash-table :test #'equal))
@@ -908,11 +901,11 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
                  (= (length entries) (hash-table-count realm-table)))
       (error "XChat Juicebox token-map policy is invalid"))
     (dolist (entry entries)
-      (let* ((id (chirp-xchat--required entry "key" "token realm identity"))
-             (value (chirp-xchat--required entry "value" "realm token"))
-             (token (chirp-xchat--required value "token" "realm token"))
-             (address (chirp-xchat--required value "address" "realm address"))
-             (public-key (chirp-get value "public_key"))
+      (let* ((id (chirp-xchat--required entry 'key "token realm identity"))
+             (value (chirp-xchat--required entry 'value "realm token"))
+             (token (chirp-xchat--required value 'token "realm token"))
+             (address (chirp-xchat--required value 'address "realm address"))
+             (public-key (alist-get 'public_key value))
              (realm (and (stringp id) (gethash id realm-table))))
         (unless (and realm
                      (not (gethash id seen))
@@ -929,16 +922,14 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
 (defun chirp-xchat--public-key-record (raw)
   "Normalize one registered XChat public-key record RAW."
   (let* ((metadata
-          (chirp-xchat--required
-           raw "public_key_with_metadata" "public-key metadata"))
-         (version (chirp-xchat--required metadata "version" "key version"))
-         (key (chirp-xchat--required metadata "public_key" "public key"))
-         (identity (chirp-xchat--required key "public_key" "identity key"))
+          (chirp-xchat--required raw 'public_key_with_metadata "public-key metadata"))
+         (version (chirp-xchat--required metadata 'version "key version"))
+         (key (chirp-xchat--required metadata 'public_key "public key"))
+         (identity (chirp-xchat--required key 'public_key "identity key"))
          (signing
-          (chirp-xchat--required key "signing_public_key" "signing key"))
+          (chirp-xchat--required key 'signing_public_key "signing key"))
          (binding
-          (chirp-xchat--required
-           key "identity_public_key_signature" "key binding")))
+          (chirp-xchat--required key 'identity_public_key_signature "key binding")))
     (unless (and (stringp version)
                  (<= (length version) 128)
                  (string-match-p "\\`\\(?:0\\|[1-9][0-9]*\\)\\'" version)
@@ -950,36 +941,32 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
           :identity-public-key identity
           :signing-public-key signing
           :identity-public-key-signature binding
-          :token-map (chirp-get raw "token_map"))))
+          :token-map (alist-get 'token_map raw))))
 
 (defun chirp-xchat--newer-public-key (left right)
   "Return the newer registered key from LEFT and RIGHT."
-  (let ((left-version (plist-get left :version))
-        (right-version (plist-get right :version)))
-    (if (or (> (length left-version) (length right-version))
-            (and (= (length left-version) (length right-version))
-                 (string> left-version right-version)))
-        left
-      right)))
+  (let ((left-version (map-elt left :version)) (right-version (map-elt right :version))) (if (or (> (length left-version) (length right-version))
+          (and (= (length left-version) (length right-version))
+               (string> left-version right-version)))
+      left
+    right)))
 
 (defun chirp-xchat--user-public-keys (wrapper user-id)
   "Return USER-ID's strict public-key records from GraphQL WRAPPER."
   (let* ((returned-id (chirp-first-nonblank
-                       (chirp-get wrapper "rest_id" "id")))
-         (user (chirp-get wrapper "result"))
+                       (alist-get 'rest_id wrapper (alist-get 'id wrapper))))
+         (user (alist-get 'result wrapper))
          (get-public-keys (and (chirp-object-p user)
-                               (chirp-get user "get_public_keys"))))
+                               (alist-get 'get_public_keys user))))
     (unless (and (equal returned-id user-id)
-                 (equal (chirp-get user "__typename") "User")
+                 (equal (alist-get '__typename user) "User")
                  (chirp-object-p get-public-keys))
       (error "XChat did not return the requested user's public keys"))
-    (unless (equal (chirp-get get-public-keys "__typename")
+    (unless (equal (alist-get '__typename get-public-keys)
                    "GetPublicKeysResult")
       (error "XChat public-key lookup failed"))
     (let ((raw-keys
-           (chirp-xchat--required
-            get-public-keys "public_keys_with_token_map"
-            "registered public keys")))
+           (chirp-xchat--required get-public-keys 'public_keys_with_token_map "registered public keys")))
       (unless (and (listp raw-keys)
                    (<= 1 (length raw-keys) chirp-xchat--max-public-keys))
         (error "XChat registered public-key count is invalid"))
@@ -993,7 +980,7 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
 (defun chirp-xchat-recovery-input (payload user-id)
   "Return strict native recovery input for USER-ID from GraphQL PAYLOAD."
   (let ((results
-         (chirp-get-in payload '("data" "user_results_by_rest_ids"))))
+         (map-nested-elt payload '(data user_results_by_rest_ids))))
     (unless (and (listp results) (= (length results) 1))
       (error "XChat public-key response has invalid user results"))
     (let* ((keys (chirp-xchat--user-public-keys (car results) user-id))
@@ -1024,13 +1011,13 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
                          user-ids))
     (error "XChat signing-key user IDs are invalid"))
   (let ((results
-         (chirp-get-in payload '("data" "user_results_by_rest_ids")))
+         (map-nested-elt payload '(data user_results_by_rest_ids)))
         (table (make-hash-table :test #'equal)))
     (unless (and (listp results) (= (length results) (length user-ids)))
       (error "XChat signing-key response has invalid user results"))
     (dolist (wrapper results)
       (let ((user-id (chirp-first-nonblank
-                      (chirp-get wrapper "rest_id" "id"))))
+                      (alist-get 'rest_id wrapper (alist-get 'id wrapper)))))
         (unless (and (member user-id user-ids)
                      (not (gethash user-id table)))
           (error "XChat signing-key response has an unexpected user"))
@@ -1084,10 +1071,9 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
 (defun chirp-xchat-conversation-data (payload conversation-id)
   "Return CONVERSATION-ID's normalized conversation from GraphQL PAYLOAD."
   (let* ((result
-          (chirp-get-in payload
-                        '("data" "get_inbox_page_conversation_data")))
+          (map-nested-elt payload '(data get_inbox_page_conversation_data)))
          (items-cell (and (chirp-object-p result)
-                          (assoc-string "items" result t))))
+                          (assq 'items result))))
     (unless items-cell
       (error "XChat conversation data is missing items"))
     (let* ((items (chirp-xchat--validate-inbox-items (cdr items-cell)))
@@ -1105,13 +1091,13 @@ REQUIRE-DELETION-FLAG-P rejects responses that omit the deletion flag."
   "Normalize XChat history PAYLOAD for CONVERSATION-ID.
 
 PREVIOUS-KEY-VERSION is retained when the page contains no older key version."
-  (let ((page (chirp-get-in payload '("data" "get_conversation_page"))))
+  (let ((page (map-nested-elt payload '(data get_conversation_page))))
     (unless (and page (chirp-object-p page))
       (error "X did not return an XChat conversation page"))
-    (let ((events-cell (assoc-string "encoded_message_events" page t))
+    (let ((events-cell (assq 'encoded_message_events page))
           (key-events-cell
-           (assoc-string "missing_conversation_key_change_events" page t))
-          (has-more-cell (assoc-string "has_more" page t)))
+           (assq 'missing_conversation_key_change_events page))
+          (has-more-cell (assq 'has_more page)))
       (unless (and events-cell has-more-cell
                    (memq (cdr has-more-cell) '(nil t)))
         (error "XChat conversation page is missing required fields"))
@@ -1156,17 +1142,14 @@ PREVIOUS-KEY-VERSION is retained when the page contains no older key version."
         (when (and has-more (null cursor))
           (error "XChat history has more events but no continuation cursor"))
         (cons events
-              `(("pagination" .
-                 (,@(when cursor `(("nextCursor" . ,cursor)))
-                  ("complete" . ,(not has-more))
-                  ("hasMore" . ,has-more)))
-                ("keyEvents" . ,key-events)
-                ("encodedKeyEvents" .
-                 ,(mapcar (lambda (event)
-                            (plist-get event :encoded-event))
-                          key-events))
-                ("messageRequestState" .
-                 ,(chirp-get page "message_request_state"))))))))
+              `((pagination . (,@(when cursor `((nextCursor . ,cursor)))
+               (complete . ,(not has-more))
+               ("hasMore" . ,has-more)))
+                (keyEvents . ,key-events)
+                (encodedKeyEvents . ,(mapcar (lambda (event)
+                           (plist-get event :encoded-event))
+                         key-events))
+                (messageRequestState . ,(alist-get 'message_request_state page))))))))
 
 (provide 'chirp-xchat)
 

@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'map)
 (require 'appkit-core)
 (require 'appkit-projection)
 (require 'appkit-surface)
@@ -155,16 +156,15 @@ Set this to nil to disable automatic pagination.  Manual loading with
 
 (defun chirp-timeline--frame-text (state)
   "Return generated frame text representing timeline STATE."
-  (let* ((status (plist-get state :status))
-         (phase (plist-get status :phase))
-         (message (plist-get status :message))
-         (title (downcase (or (plist-get state :title) "timeline"))))
+  (pcase-let* (((map :status :title :items) state)
+               ((map :phase :message) status)
+               (title (downcase (or title "timeline"))))
     (pcase phase
       ('initial (format "Loading %s...\n\n" title))
       ('refresh "Checking for new posts...\n\n")
       ('older "Loading older posts...\n\n")
       ('error (format "Unable to load data.\n\n%s\n\n" message))
-      (_ (and (null (plist-get state :items)) "No posts returned.\n")))))
+      (_ (and (null items) "No posts returned.\n")))))
 
 (defun chirp-timeline--header-line ()
   "Return the pending-new-posts header line for the current timeline."
@@ -220,17 +220,14 @@ Set this to nil to disable automatic pagination.  Manual loading with
            (numberp chirp-timeline-auto-load-threshold)
            (appkit-scroll-near-end-p position end
                                      chirp-timeline-auto-load-threshold))
-    (let*
+    (pcase-let*
         ((state (chirp-timeline--view-state view))
-         (page (plist-get state :page))
-         (status (plist-get state :status)))
+         ((map :page :status :loaded-p :generation) state)
+         ((map :phase) status)
+         ((map :next-cursor :auto-load-paused-p :exhausted-p) page))
       (when
-          (and (plist-get state :loaded-p)
-               (eq (plist-get status :phase) 'idle)
-               (null (plist-get state :generation))
-               (plist-get page :next-cursor)
-               (not (plist-get page :auto-load-paused-p))
-               (not (plist-get page :exhausted-p)))
+          (and loaded-p (eq phase 'idle) (null generation)
+               next-cursor (not auto-load-paused-p) (not exhausted-p))
         (setq-local chirp-timeline--auto-load-pending-recheck-p t)
         (chirp-timeline--load-more-primary view t)))))
 
@@ -284,14 +281,12 @@ Set this to nil to disable automatic pagination.  Manual loading with
 (defun chirp-timeline--settle-success
     (view state generation tweets envelope)
   "Settle GENERATION in VIEW and merge TWEETS from ENVELOPE into STATE."
-  (let*
+  (pcase-let*
       ((phase (chirp-timeline--generation-phase generation))
        (quiet (chirp-timeline--generation-quiet-p generation))
-       (query (plist-get state :query)) (page (plist-get state :page))
-       (status (plist-get state :status))
-       (current (plist-get state :items))
+       ((map :query :page :status (:items current)) state)
        (next-cursor (chirp-backend-envelope-next-cursor envelope))
-       (position-intent 'preserve) new-count)
+       (position-intent 'preserve) (new-count nil))
     (pcase phase
       ('older
        (let*
@@ -565,17 +560,14 @@ Set this to nil to disable automatic pagination.  Manual loading with
               ("subscribed" "subscribed")
               ("member" "member")
               (_ source)))
-          (or (chirp-get list-info "sources") '())))
+          (or (alist-get 'sources list-info) '())))
 
 (defun chirp-timeline--list-candidate (list-info)
   "Return a minibuffer display candidate for LIST-INFO."
-  (let* ((name (or (chirp-get list-info "name")
-                   (chirp-get list-info "fullName")
-                   (chirp-get list-info "id")))
-         (owner (chirp-get-in list-info '("owner" "screenName")))
-         (mode (chirp-get list-info "mode"))
-         (sources (chirp-timeline--list-source-labels list-info))
-         (list-id (chirp-get list-info "id"))
+  (pcase-let* (((map name fullName ('id list-id) mode) list-info)
+               (name (or name fullName list-id))
+               (owner (map-nested-elt list-info '(owner screenName)))
+               (sources (chirp-timeline--list-source-labels list-info))
          (parts (delq nil
                       (list (and owner (format "@%s" owner))
                             (and mode (not (string-empty-p mode)) mode)
@@ -589,7 +581,7 @@ Set this to nil to disable automatic pagination.  Manual loading with
   "Prompt for one accessible list from LISTS and return its id."
   (let ((choices (mapcar (lambda (list-info)
                            (cons (chirp-timeline--list-candidate list-info)
-                                 (chirp-get list-info "id")))
+                                 (alist-get 'id list-info)))
                          lists)))
     (unless choices
       (user-error "No accessible lists found"))
@@ -749,14 +741,14 @@ REFRESH reloads the collection."
   "Load an older page for primary timeline VIEW.
 
 When QUIET is non-nil, suppress status messages for automatic pagination."
-  (let* ((state (chirp-timeline--view-state view))
-         (page (plist-get state :page))
-         (phase (plist-get (plist-get state :status) :phase)))
+  (pcase-let* ((state (chirp-timeline--view-state view))
+               ((map :page :status) state)
+               ((map :phase) status)
+               ((map :exhausted-p :next-cursor) page))
     (cond
      ((memq phase '(initial refresh poll older))
       (unless quiet (message "Timeline request already in progress...")))
-     ((or (plist-get page :exhausted-p)
-          (not (plist-get page :next-cursor)))
+     ((or exhausted-p (not next-cursor))
       (unless quiet (message "No older posts.")))
      (t
       (chirp-timeline--request view 'older quiet)))))

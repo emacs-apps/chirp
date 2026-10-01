@@ -10,48 +10,43 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'map)
 (require 'chirp-backend)
 
 (defun chirp-backend-test--timeline-entry (tweet &optional promoted-p)
   "Return one HomeTimeline entry carrying raw TWEET.
 
 When PROMOTED-P is non-nil, include the item-level promoted marker used by X."
-  (let ((item `(("tweet_results" . (("result" . ,tweet))))))
+  (let ((item `((tweet_results . ((result . ,tweet))))))
     (when promoted-p
-      (push '("promotedMetadata" . t) item))
-    `(("entryId" . "tweet-1")
-      ("content" . (("itemContent" . ,item))))))
+      (push '(promotedMetadata . t) item))
+    `((entryId . "tweet-1")
+      (content . ((itemContent . ,item))))))
 
 (defun chirp-backend-test--module-entry (tweet &optional nested-entry-id)
   "Return one nested timeline module entry carrying TWEET.
 
 NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
-  (let ((item-content `(("tweet_results" . (("result" . ,tweet))))))
-    `(("entryId" . "conversation-thread-1")
-      ("content" .
-       (("items" .
-         ((("entryId" .
-            ,(or nested-entry-id "conversation-thread-1-tweet-1"))
-           ("item" . (("itemContent" . ,item-content)))))))))))
+  (let ((item-content `((tweet_results . ((result . ,tweet))))))
+    `((entryId . "conversation-thread-1")
+      (content . ((items . (((entryId . ,(or nested-entry-id "conversation-thread-1-tweet-1"))
+                             (item . ((itemContent . ,item-content)))))))))))
 
 (defun chirp-backend-test--module-item (tweet)
   "Return one instruction-level module item carrying TWEET."
-  `(("entryId" . "module-item-1")
-    ("item" .
-     (("itemContent" .
-       (("tweet_results" . (("result" . ,tweet)))))))))
+  `((entryId . "module-item-1")
+    (item . ((itemContent . ((tweet_results . ((result . ,tweet)))))))))
 
 (defun chirp-backend-test--bottom-cursor (cursor)
   "Return an X timeline bottom cursor carrying CURSOR."
-  `(("entryId" . "cursor-bottom")
-    ("content" . (("cursorType" . "Bottom")
-                  ("value" . ,cursor)))))
+  `((entryId . "cursor-bottom")
+    (content . ((cursorType . "Bottom")
+                (value . ,cursor)))))
 
 (defun chirp-backend-test--instructions (entries)
   "Return minimal X timeline instructions containing ENTRIES."
-  `(("instructions" .
-     ((("type" . "TimelineAddEntries")
-       ("entries" . ,entries))))))
+  `((instructions . (((type . "TimelineAddEntries")
+                      (entries . ,entries))))))
 
 (defun chirp-backend-test--payload-at-path (path value)
   "Return a JSON-style payload containing VALUE at PATH."
@@ -66,51 +61,40 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
 (defun chirp-backend-test--home-timeline-payload (entries)
   "Return a minimal HomeTimeline GraphQL payload containing ENTRIES."
   (chirp-backend-test--timeline-payload
-   '("data" "home" "home_timeline_urt") entries))
+   '(data home home_timeline_urt) entries))
 
 (defun chirp-backend-test--user-payload (&optional handle user-id)
   "Return a minimal profile payload for HANDLE and USER-ID."
-  `(("data" .
-     (("user" .
-       (("result" .
-         (("rest_id" . ,(or user-id "42"))
-          ("legacy" . (("screen_name" . ,(or handle "alice"))
-                       ("name" . "Alice")))))))))))
+  `((data . ((user . ((result . ((rest_id . ,(or user-id "42"))
+                                 (legacy . ((screen_name . ,(or handle "alice"))
+                                            (name . "Alice")))))))))))
 
 (defun chirp-backend-test--viewer-payload (&optional handle user-id)
   "Return a minimal Viewer payload for HANDLE and USER-ID."
-  `(("data" .
-     (("viewer" .
-       (("user_results" .
-         (("result" .
-           (("rest_id" . ,(or user-id "42"))
-            ("core" . (("screen_name" . ,(or handle "alice"))
-                       ("name" . "Alice")))))))))))))
+  `((data . ((viewer . ((user_results . ((result . ((rest_id . ,(or user-id "42"))
+                                                    (core . ((screen_name . ,(or handle "alice"))
+                                                             (name . "Alice")))))))))))))
 
 (defun chirp-backend-test--user-timeline-payload (entries)
   "Return a minimal user timeline payload containing ENTRIES."
   (chirp-backend-test--timeline-payload
-   '("data" "user" "result" "timeline" "timeline") entries))
+   '(data user result timeline timeline) entries))
 
 (defun chirp-backend-test--thread-payload (entries)
   "Return a minimal TweetDetail payload containing ENTRIES."
   (chirp-backend-test--timeline-payload
-   '("data" "threaded_conversation_with_injections_v2") entries))
+   '(data threaded_conversation_with_injections_v2) entries))
 
 (defun chirp-backend-test--edit-history-entry (entry-id tweet)
   "Return edit-history ENTRY-ID carrying raw TWEET."
-  `(("entryId" . ,entry-id)
-    ("content" .
-     (("items" .
-       ((("item" .
-          (("itemContent" .
-            (("tweet_results" . (("result" . ,tweet))))))))))))))
+  `((entryId . ,entry-id)
+    (content . ((items . (((item . ((itemContent . ((tweet_results . ((result . ,tweet))))))))))))))
 
 (defun chirp-backend-test--edit-history-payload (entries)
   "Return a minimal TweetEditHistory payload containing ENTRIES."
   (chirp-backend-test--timeline-payload
-   '("data" "tweet_result_by_rest_id" "result"
-     "edit_history_timeline" "timeline")
+   '(data tweet_result_by_rest_id result
+     edit_history_timeline timeline)
    entries))
 
 (ert-deftest chirp-stop-discards-session-owned-backend-state ()
@@ -176,8 +160,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                         (chirp-backend-test--thread-payload
                          (list
                           (chirp-backend-test--timeline-entry
-                           '(("rest_id" . "123")
-                             ("legacy" . (("full_text" . "hello")))))))))))
+                           '((rest_id . "123")
+                             (legacy . ((full_text . "hello")))))))))))
             (chirp-backend-thread "123"
                                   (lambda (tweets _envelope)
                                     (setq first tweets)))
@@ -206,46 +190,69 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
         (chirp-backend-read-cache-ttl 0))
     (dolist
         (case
-         '(((("legacy" . (("following" . t)
-                           ("followed_by" . nil)
-                           ("friends_count" . 23))))
+         '((((legacy . ((following . t)
+                        (followed_by . nil)
+                        (friends_count . 23))))
             t nil)
-           ((("following" . t)
-             ("followed_by" . t)
-             ("friends_count" . 23))
+           (((following . t)
+             (followed_by . t)
+             (friends_count . 23))
             t t)
-           ((("relationship_perspectives" . (("following" . nil)
-                                              ("followed_by" . t)))
-             ("relationship_counts" . (("following" . 23)))
-             ("legacy" . (("following" . t))))
+           (((relationship_perspectives . ((following . nil)
+                                           (followed_by . t)))
+             (relationship_counts . ((following . 23)))
+             (legacy . ((following . t))))
             nil t)
-           ((("following" . 23))
+           (((following . 23))
             nil nil)
-           ((("viewerFollowing" . nil)
-             ("viewerFollowedBy" . chirp-json-false)
-             ("following" . 23)
-             ("relationship_perspectives" . (("following" . t)
-                                              ("followed_by" . t))))
+           (((viewerFollowing . nil)
+             (viewerFollowedBy . chirp-json-false)
+             (following . 23)
+             (relationship_perspectives . ((following . t)
+                                           (followed_by . t))))
             nil nil)
-           ((("following" . nil)
-             ("followed_by" . nil)
-             ("friends_count" . 23))
+           (((following . nil)
+             (followed_by . nil)
+             (friends_count . 23))
             nil nil)))
-      (let ((raw (append '(("rest_id" . "42")
-                           ("screen_name" . "alice")
-                           ("name" . "Alice"))
+      (let ((raw (append '((rest_id . "42")
+                           (screen_name . "alice")
+                           (name . "Alice"))
                          (car case)))
             result)
         (cl-letf (((symbol-function 'chirp-x-graphql-request)
                    (lambda (_operation _variables callback &rest _options)
                      (funcall callback
-                              `(("data" . (("user" . (("result" . ,raw))))))))))
+                              `((data . ((user . ((result . ,raw))))))))))
           (chirp-backend-user "alice"
                               (lambda (user _envelope) (setq result user))
                               #'ert-fail))
         (should (eq (plist-get result :viewer-following-p) (nth 1 case)))
         (should (eq (plist-get result :viewer-followed-by-p) (nth 2 case)))
         (should (= (plist-get result :following) 23))))))
+
+(ert-deftest chirp-backend-normalization-preserves-alias-presence-and-zero ()
+  "Decoded null aliases and scalar children must not corrupt canonical fields."
+  (let* ((payload
+          (json-parse-string
+           (concat
+            "{\"rest_id\":null,\"id_str\":\"ignored\","
+            "\"full_text\":null,\"text\":\"Ignored alias\","
+            "\"favorite_count\":null,\"like_count\":99,\"reply_count\":0,"
+            "\"metrics\":{\"likes\":3},\"note_tweet\":7,"
+            "\"legacy\":{\"id_str\":\"42\",\"full_text\":\"Visible fallback\","
+            "\"reply_count\":9,\"favorite_count\":8},"
+            "\"author\":{\"rest_id\":\"7\",\"screen_name\":\"alice\",\"name\":\"Alice\","
+            "\"profile_bio\":7,\"avatar\":7,\"legacy\":\"opaque\"}}")
+           :object-type 'alist :array-type 'list
+           :null-object nil :false-object nil))
+         (tweet (chirp--tweet-from-x payload)))
+    (should (equal (plist-get tweet :id) "42"))
+    (should (equal (plist-get tweet :text) "Visible fallback"))
+    (should (equal (plist-get tweet :author-handle) "alice"))
+    (should-not (plist-get tweet :author-avatar-url))
+    (should (= (plist-get tweet :reply-count) 0))
+    (should (= (plist-get tweet :like-count) 3))))
 
 (ert-deftest chirp-backend-user-cache-coalesces-inflight-requests ()
   "Concurrent profile requests for the same handle should share one backend call."
@@ -352,8 +359,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                   (chirp-backend-test--home-timeline-payload
                    (list
                     (chirp-backend-test--timeline-entry
-                     '(("rest_id" . "1")
-                       ("legacy" . (("full_text" . "hello")))))
+                     '((rest_id . "1")
+                       (legacy . ((full_text . "hello")))))
                     (chirp-backend-test--bottom-cursor "cursor-next"))))))
               ((symbol-function 'chirp--top-level-tweets-from-x)
                (lambda (items)
@@ -375,18 +382,16 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
 (ert-deftest chirp-backend-timeline-preserves-reply-control-envelope ()
   "Timeline adaptation should retain viewer-specific reply controls."
   (let* ((raw
-          '(("__typename" . "TweetWithVisibilityResults")
-            ("tweet" . (("rest_id" . "123")
-                        ("legacy" . (("full_text" . "Restricted")
-                                     ("conversation_control" .
-                                      (("mode" . "ByInvitation")))))))
-            ("limitedActionResults" .
-             (("limited_actions" . ((("action" . "Reply"))))))))
+          '((__typename . "TweetWithVisibilityResults")
+            (tweet . ((rest_id . "123")
+                      (legacy . ((full_text . "Restricted")
+                                 (conversation_control . ((mode . "ByInvitation")))))))
+            (limitedActionResults . ((limited_actions . (((action . "Reply"))))))))
          (page
           (chirp-backend--timeline-page
            (chirp-backend-test--home-timeline-payload
             (list (chirp-backend-test--timeline-entry raw)))
-           '(("data" "home" "home_timeline_urt"))
+           '((data home home_timeline_urt))
            10
            "the home timeline"))
          (tweet (car (car page))))
@@ -411,7 +416,7 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
   (let (success failure)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
-                 (funcall callback '(("data" . nil))))))
+                 (funcall callback '((data . nil))))))
       (chirp-backend-feed
        (lambda (&rest _args)
          (setq success t))
@@ -431,11 +436,11 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                  (funcall
                   callback
                   (chirp-backend-test--timeline-payload
-                   '("data" "bookmark_timeline_v2" "timeline")
+                   '(data bookmark_timeline_v2 timeline)
                    (list
                     (chirp-backend-test--timeline-entry
-                     '(("rest_id" . "1")
-                       ("legacy" . (("full_text" . "saved")))))))))))
+                     '((rest_id . "1")
+                       (legacy . ((full_text . "saved")))))))))))
       (chirp-backend-bookmarks
        (lambda (items _envelope)
          (setq tweets items))))
@@ -454,11 +459,11 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                  (funcall
                   callback
                   (chirp-backend-test--timeline-payload
-                   '("data" "search_by_raw_query" "search_timeline" "timeline")
+                   '(data search_by_raw_query search_timeline timeline)
                    (list
                     (chirp-backend-test--module-entry
-                     '(("rest_id" . "2")
-                       ("legacy" . (("full_text" . "nested")))))))))))
+                     '((rest_id . "2")
+                       (legacy . ((full_text . "nested")))))))))))
       (chirp-backend-search
        "emacs"
        (lambda (items _envelope)
@@ -474,24 +479,24 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
   "Shared timeline adaptation should retain instruction-level special entries."
   (let* ((module-item
           (chirp-backend-test--module-item
-           '(("rest_id" . "1")
-             ("legacy" . (("full_text" . "module"))))))
+           '((rest_id . "1")
+             (legacy . ((full_text . "module"))))))
          (pinned-entry
           (chirp-backend-test--timeline-entry
-           '(("rest_id" . "2")
-             ("legacy" . (("full_text" . "pinned"))))))
+           '((rest_id . "2")
+             (legacy . ((full_text . "pinned"))))))
          (instructions
           (list
-           (list '("type" . "TimelineAddToModule")
-                 (cons "moduleItems" (list module-item)))
-           (list '("type" . "TimelinePinEntry")
-                 (cons "entry" pinned-entry))))
+           (list '(type . "TimelineAddToModule")
+                 (cons 'moduleItems (list module-item)))
+           (list '(type . "TimelinePinEntry")
+                 (cons 'entry pinned-entry))))
          (payload
           (chirp-backend-test--payload-at-path
-           '("data" "timeline")
-           (list (cons "instructions" instructions))))
+           '(data timeline)
+           (list (cons 'instructions instructions))))
          (page (chirp-backend--timeline-page
-                payload '(("data" "timeline")) 10 "the test timeline")))
+                payload '((data timeline)) 10 "the test timeline")))
     (should (equal (mapcar (lambda (tweet) (plist-get tweet :id)) (car page))
                    '("1" "2")))))
 
@@ -501,24 +506,24 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
          (nested-entry-id
           "profile-conversation-2094846962946801665-tweet-2094737512484970656")
          (raw
-          `(("rest_id" . ,tweet-id)
-            ("legacy" . (("full_text" . "Pinned and nested")))))
+          `((rest_id . ,tweet-id)
+            (legacy . ((full_text . "Pinned and nested")))))
          (pinned-entry (chirp-backend-test--timeline-entry raw))
          (conversation-entry
           (chirp-backend-test--module-entry raw nested-entry-id))
          (instructions
           (list
-           (list '("type" . "TimelinePinEntry")
-                 (cons "entry" pinned-entry))
-           (list '("type" . "TimelineAddEntries")
-                 (cons "entries" (list conversation-entry)))))
+           (list '(type . "TimelinePinEntry")
+                 (cons 'entry pinned-entry))
+           (list '(type . "TimelineAddEntries")
+                 (cons 'entries (list conversation-entry)))))
          (payload
           (chirp-backend-test--payload-at-path
-           '("data" "timeline")
-           (list (cons "instructions" instructions))))
+           '(data timeline)
+           (list (cons 'instructions instructions))))
          (tweets
           (car (chirp-backend--timeline-page
-                payload '(("data" "timeline")) 10 "the test timeline"))))
+                payload '((data timeline)) 10 "the test timeline"))))
     (should (equal (mapcar (lambda (tweet) (plist-get tweet :id)) tweets)
                    (list tweet-id tweet-id)))
     (should
@@ -546,7 +551,7 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                  (lambda (request-operation request-variables callback &rest _options)
                    (setq operation request-operation
                          variables request-variables)
-                   (funcall callback '(("data" . nil))))))
+                   (funcall callback '((data . nil))))))
         (chirp-backend-request
          (if (equal (car case) "delete")
              '("delete" "--yes" "123")
@@ -572,7 +577,7 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                    (should (eq (plist-get options :method) 'post))
                    (setq path request-path
                          form (plist-get options :form))
-                   (funcall callback '(("id_str" . "42"))))))
+                   (funcall callback '((id_str . "42"))))))
         (chirp-backend-request
          (list (car case) "Alice")
          (lambda (_payload _envelope)
@@ -597,8 +602,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                   (chirp-backend-test--user-timeline-payload
                    (list
                     (chirp-backend-test--timeline-entry
-                     '(("rest_id" . "1")
-                       ("legacy" . (("full_text" . "hello")))))
+                     '((rest_id . "1")
+                       (legacy . ((full_text . "hello")))))
                     (chirp-backend-test--bottom-cursor "cursor-next")))))))
       (chirp-backend-user-posts
        "@Alice"
@@ -638,19 +643,16 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                    callback
                    (cond
                     ((string-match-p "ownerships" path)
-                     '(("lists" .
-                        ((("id_str" . "1") ("name" . "Owned"))
-                         (("id_str" . "2") ("name" . "Shared"))))
-                       ("next_cursor_str" . "0")))
+                     '((lists . (((id_str . "1") (name . "Owned"))
+                                 ((id_str . "2") (name . "Shared"))))
+                       (next_cursor_str . "0")))
                     ((string-match-p "subscriptions" path)
-                     '(("lists" .
-                        ((("id_str" . "2") ("name" . "Shared"))
-                         (("id_str" . "3") ("name" . "Subscribed"))))
-                       ("next_cursor_str" . "0")))
+                     '((lists . (((id_str . "2") (name . "Shared"))
+                                 ((id_str . "3") (name . "Subscribed"))))
+                       (next_cursor_str . "0")))
                     (t
-                     '(("lists" .
-                        ((("id_str" . "4") ("name" . "Member"))))
-                       ("next_cursor_str" . "0"))))))))
+                     '((lists . (((id_str . "4") (name . "Member"))))
+                       (next_cursor_str . "0"))))))))
             (chirp-backend-lists
              (lambda (lists _envelope)
                (setq first lists)))
@@ -661,18 +663,14 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
             (should (equal first second))
             (should-not (eq first second))
             (should
-             (equal (chirp-get
-                     (cl-find "2" first
-                              :key (lambda (item) (chirp-get item "id"))
-                              :test #'equal)
-                     "sources")
+             (equal (map-elt (cl-find "2" first
+                                      :key (lambda (item) (map-elt item 'id))
+                                      :test #'equal) 'sources)
                     '("owned" "subscribed")))
             (should
-             (equal (chirp-get
-                     (cl-find "4" first
-                              :key (lambda (item) (chirp-get item "id"))
-                              :test #'equal)
-                     "sources")
+             (equal (map-elt (cl-find "4" first
+                                      :key (lambda (item) (map-elt item 'id))
+                                      :test #'equal) 'sources)
                     '("member")))
             (setq now 1016)
             (chirp-backend-lists #'ignore)
@@ -688,16 +686,15 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                        path request-path
                        query (plist-get options :query))
                  (funcall callback
-                          '(("users" .
-                             ((("id_str" . "1")
-                               ("screen_name" . "emacs")
-                               ("name" . "Emacs"))
-                              (("id_str" . "1")
-                               ("screen_name" . "duplicate")
-                               ("name" . "Duplicate"))
-                              (("id_str" . "2")
-                               ("screen_name" . "emacslife")
-                               ("name" . "Emacs Life")))))))))
+                          '((users . (((id_str . "1")
+                                       (screen_name . "emacs")
+                                       (name . "Emacs"))
+                                      ((id_str . "1")
+                                       (screen_name . "duplicate")
+                                       (name . "Duplicate"))
+                                      ((id_str . "2")
+                                       (screen_name . "emacslife")
+                                       (name . "Emacs Life")))))))))
       (chirp-backend-search-users
        "@em"
        (lambda (items _envelope)
@@ -750,11 +747,11 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                   (chirp-backend-test--user-timeline-payload
                    (list
                     (chirp-backend-test--timeline-entry
-                     '(("rest_id" . "1")
-                       ("legacy" . (("full_text" . "one")))))
+                     '((rest_id . "1")
+                       (legacy . ((full_text . "one")))))
                     (chirp-backend-test--timeline-entry
-                     '(("rest_id" . "2")
-                       ("legacy" . (("full_text" . "two")))))))))))
+                     '((rest_id . "2")
+                       (legacy . ((full_text . "two")))))))))))
       (chirp-backend-likes
        "@Alice"
        (lambda (items _envelope)
@@ -774,7 +771,7 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                  (funcall
                   callback
                   (chirp-backend-test--timeline-payload
-                   '("data" "search_by_raw_query" "search_timeline" "timeline")
+                   '(data search_by_raw_query search_timeline timeline)
                    nil)))))
       (chirp-backend-user-replies "@Alice" #'ignore nil 10 "cursor-prev"))
     (should (equal (plist-get operation :name) "SearchTimeline"))
@@ -832,11 +829,10 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                        path request-path
                        query (plist-get options :query))
                  (funcall callback
-                          '(("users" .
-                             ((("id_str" . "1")
-                               ("screen_name" . "alice")
-                               ("name" . "Alice"))))
-                            ("next_cursor_str" . "next"))))))
+                          '((users . (((id_str . "1")
+                                       (screen_name . "alice")
+                                       (name . "Alice"))))
+                            (next_cursor_str . "next"))))))
       (chirp-backend-followers
        "@Bob"
        (lambda (items response-envelope)
@@ -859,10 +855,9 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                (lambda (_service request-path callback &rest _options)
                  (setq path request-path)
                  (funcall callback
-                          '(("users" .
-                             ((("id_str" . "1")
-                               ("screen_name" . "alice")
-                               ("name" . "Alice")))))))))
+                          '((users . (((id_str . "1")
+                                       (screen_name . "alice")
+                                       (name . "Alice")))))))))
       (chirp-backend-following-users
        "@Bob"
        (lambda (items _envelope)
@@ -880,7 +875,7 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                  (funcall
                   callback
                   (chirp-backend-test--timeline-payload
-                   '("data" "list" "tweets_timeline" "timeline") nil)))))
+                   '(data list tweets_timeline timeline) nil)))))
       (chirp-backend-list "1956792682412345678" #'ignore))
     (should (equal (plist-get operation :name) "ListLatestTweetsTimeline"))
     (should (equal (alist-get "listId" variables nil nil #'string=)
@@ -900,8 +895,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                   (chirp-backend-test--thread-payload
                    (list
                     (chirp-backend-test--timeline-entry
-                     '(("rest_id" . "123")
-                       ("legacy" . (("full_text" . "hello")))))))))))
+                     '((rest_id . "123")
+                       (legacy . ((full_text . "hello")))))))))))
       (chirp-backend-thread "123" #'ignore))
     (should (equal (plist-get operation :name) "TweetDetail"))
     (should (equal (alist-get "focalTweetId" variables nil nil #'string=)
@@ -919,14 +914,12 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
                  (let* ((original
-                         '(("rest_id" . "200")
-                           ("legacy" . (("full_text" . "original")))))
+                         '((rest_id . "200")
+                           (legacy . ((full_text . "original")))))
                         (wrapper
-                         `(("rest_id" . "100")
-                           ("legacy" .
-                            (("full_text" . "RT @user: original")
-                             ("retweeted_status_result" .
-                              (("result" . ,original))))))))
+                         `((rest_id . "100")
+                           (legacy . ((full_text . "RT @user: original")
+                                      (retweeted_status_result . ((result . ,original))))))))
                    (funcall
                     callback
                     (chirp-backend-test--thread-payload
@@ -944,15 +937,13 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
   "Edit history should preserve version order and reuse one fresh X read."
   (let* ((chirp-backend-read-cache-ttl 15)
          (latest
-          '(("rest_id" . "200")
-            ("legacy" .
-             (("full_text" . "latest")
-              ("created_at" . "LATEST-TIME")))))
+          '((rest_id . "200")
+            (legacy . ((full_text . "latest")
+                       (created_at . "LATEST-TIME")))))
          (stale
-          '(("rest_id" . "100")
-            ("legacy" .
-             (("full_text" . "stale")
-              ("created_at" . "STALE-TIME")))))
+          '((rest_id . "100")
+            (legacy . ((full_text . "stale")
+                       (created_at . "STALE-TIME")))))
          (payload
           (chirp-backend-test--edit-history-payload
            (list
@@ -960,8 +951,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
              "latestTweet" latest)
             (chirp-backend-test--edit-history-entry
              "staleTweets"
-             `(("__typename" . "TweetWithVisibilityResults")
-               ("tweet" . ,stale))))))
+             `((__typename . "TweetWithVisibilityResults")
+               (tweet . ,stale))))))
          (request-count 0)
          operation variables versions failure)
     (unwind-protect
@@ -1014,7 +1005,7 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
         failure)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
-                 (funcall callback '(("data" . nil))))))
+                 (funcall callback '((data . nil))))))
       (chirp-backend-edit-history
        "200" #'ignore
        (lambda (message) (setq failure message))))
@@ -1031,14 +1022,11 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                  (funcall
                   callback
                   (chirp-backend-test--payload-at-path
-                   '("data" "tweetResult" "result")
-                   '(("rest_id" . "123")
-                     ("legacy" . (("full_text" . "Article preview")))
-                     ("article" .
-                      (("article_results" .
-                        (("result" .
-                          (("title" . "Longform")
-                           ("plain_text" . "Full article body.")))))))))))))
+                   '(data tweetResult result)
+                   '((rest_id . "123")
+                     (legacy . ((full_text . "Article preview")))
+                     (article . ((article_results . ((result . ((title . "Longform")
+                                                                (plain_text . "Full article body.")))))))))))))
       (chirp-backend-article
        "123"
        (lambda (tweet _envelope)
@@ -1075,8 +1063,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                  (funcall
                   callback
                   (chirp-backend-test--payload-at-path
-                   '("data" "create_tweet" "tweet_results" "result")
-                   '(("rest_id" . "123")))))))
+                   '(data create_tweet tweet_results result)
+                   '((rest_id . "123")))))))
       (chirp-backend-compose
        :kind 'post
        :text "hello"
@@ -1094,9 +1082,9 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                    "hello"))
     (should-not (assoc-string "conversation_control" variables t))
     (should (vectorp
-             (chirp-get-in variables '("media" "media_entities"))))
+             (map-nested-elt variables '("media" "media_entities"))))
     (should (vectorp
-             (chirp-get variables "semantic_annotation_ids")))))
+             (map-elt variables "semantic_annotation_ids")))))
 
 (ert-deftest chirp-backend-compose-uploads-alt-text-after-media ()
   "Image descriptions should be written after upload and before CreateTweet."
@@ -1122,8 +1110,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                        (funcall
                         callback
                         (chirp-backend-test--payload-at-path
-                         '("data" "create_tweet" "tweet_results" "result")
-                         '(("rest_id" . "123")))))))
+                         '(data create_tweet tweet_results result)
+                         '((rest_id . "123")))))))
             (chirp-backend-compose
              :kind 'post
              :text "hello"
@@ -1143,8 +1131,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                    (funcall
                     callback
                     (chirp-backend-test--payload-at-path
-                     '("data" "create_tweet" "tweet_results" "result")
-                     '(("rest_id" . "123")))))))
+                     '(data create_tweet tweet_results result)
+                     '((rest_id . "123")))))))
         (chirp-backend-compose
          :kind kind
          :text "hello"
@@ -1152,10 +1140,10 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
          :reply-audience 'community
          :attachments nil
          :callback #'ignore))
-      (should (equal (chirp-get-in variables '("conversation_control" "mode"))
+      (should (equal (map-nested-elt variables '("conversation_control" "mode"))
                      "Community"))
       (when (eq kind 'quote)
-        (should (equal (chirp-get variables "attachment_url")
+        (should (equal (map-elt variables "attachment_url")
                        "https://x.com/i/status/99"))))))
 
 (ert-deftest chirp-backend-compose-omits-reply-audience-for-replies ()
@@ -1167,8 +1155,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                  (funcall
                   callback
                   (chirp-backend-test--payload-at-path
-                   '("data" "create_tweet" "tweet_results" "result")
-                   '(("rest_id" . "456")))))))
+                   '(data create_tweet tweet_results result)
+                   '((rest_id . "456")))))))
       (chirp-backend-compose
        :kind 'reply
        :text "hello"
@@ -1177,7 +1165,7 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
        :attachments nil
        :callback #'ignore))
     (should-not (assoc-string "conversation_control" variables t))
-    (should (equal (chirp-get-in variables '("reply" "in_reply_to_tweet_id"))
+    (should (equal (map-nested-elt variables '("reply" "in_reply_to_tweet_id"))
                    "99"))))
 
 (ert-deftest chirp-backend-compose-rejects-an-invalid-reply-audience ()
@@ -1213,8 +1201,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                          (funcall
                           callback
                           (chirp-backend-test--payload-at-path
-                           '("data" "create_tweet" "tweet_results" "result")
-                           '(("rest_id" . "456")))))))
+                           '(data create_tweet tweet_results result)
+                           '((rest_id . "456")))))))
               (chirp-backend-compose
                :kind kind
                :text "hello"
@@ -1225,21 +1213,20 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
             (should uploaded)
             (should (equal result "456"))
             (let* ((entities
-                    (chirp-get-in variables '("media" "media_entities")))
+                    (map-nested-elt variables '("media" "media_entities")))
                    (entity (aref entities 0)))
               (should (= (length entities) 1))
-              (should (equal (chirp-get entity "media_id") "media-1"))
-              (should (vectorp (chirp-get entity "tagged_users"))))
+              (should (equal (map-elt entity "media_id") "media-1"))
+              (should (vectorp (map-elt entity "tagged_users"))))
             (pcase kind
               ('reply
                (should
                 (equal
-                 (chirp-get-in
-                  variables '("reply" "in_reply_to_tweet_id"))
+                 (map-nested-elt variables '("reply" "in_reply_to_tweet_id"))
                  "99")))
               ('quote
                (should
-                (equal (chirp-get variables "attachment_url")
+                (equal (map-elt variables "attachment_url")
                        "https://x.com/i/status/99"))))))
       (delete-file file))))
 
@@ -1254,8 +1241,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                  (funcall
                   callback
                   (chirp-backend-test--payload-at-path
-                   '("data" "notetweet_create" "tweet_results" "result")
-                   '(("rest_id" . "789")))))))
+                   '(data notetweet_create tweet_results result)
+                   '((rest_id . "789")))))))
       (chirp-backend-compose
        :kind 'post
        :text (make-string 141 ?你)
@@ -1292,7 +1279,7 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
   (let (success failure)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
-                 (funcall callback '(("data" . (("create_tweet" . nil))))))))
+                 (funcall callback '((data . ((create_tweet . nil))))))))
       (chirp-backend-compose
        :kind 'post
        :text "hello"
@@ -1307,8 +1294,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
 (defun chirp-backend-test--tweet-id-payload (id)
   "Return a GraphQL payload whose tweet rest_id is ID."
   (chirp-backend-test--payload-at-path
-   '("data" "tweet")
-   `(("rest_id" . ,id))))
+   '(data tweet)
+   `((rest_id . ,id))))
 
 (ert-deftest chirp-backend-save-draft-builds-post-tweet-request ()
   "Draft saves should use CreateDraftTweet and post_tweet_request."
@@ -1328,14 +1315,13 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                    (setq result saved-draft-id))))
     (should (equal (plist-get operation :name) "CreateDraftTweet"))
     (should (equal result "7"))
-    (let ((request (chirp-get variables "post_tweet_request")))
-      (should (equal (chirp-get request "status") "Nice"))
-      (should (equal (chirp-get request "auto_populate_reply_metadata")
+    (let ((request (map-elt variables "post_tweet_request")))
+      (should (equal (map-elt request "status") "Nice"))
+      (should (equal (map-elt request "auto_populate_reply_metadata")
                      :json-false))
-      (should (vectorp (chirp-get request "media_ids")))
-      (should (vectorp (chirp-get request "exclude_reply_user_ids")))
-      (should (equal (chirp-get (aref (chirp-get request "thread_tweets") 0)
-                                "status")
+      (should (vectorp (map-elt request "media_ids")))
+      (should (vectorp (map-elt request "exclude_reply_user_ids")))
+      (should (equal (map-elt (aref (map-elt request "thread_tweets") 0) "status")
                      "Two Nices")))))
 
 (ert-deftest chirp-backend-save-draft-edits-an-existing-draft ()
@@ -1346,14 +1332,14 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                                           &rest _options)
                  (setq operation request-operation
                        variables request-variables)
-                 (funcall callback '(("data" . nil))))))
+                 (funcall callback '((data . nil))))))
       (chirp-backend-save-draft
        :kind 'post
        :items (list (list :text "Nice" :attachments nil))
        :draft-id "2087"
        :callback #'ignore))
     (should (equal (plist-get operation :name) "EditDraftTweet"))
-    (should (equal (chirp-get variables "draft_tweet_id") "2087"))))
+    (should (equal (map-elt variables "draft_tweet_id") "2087"))))
 
 (ert-deftest chirp-backend-save-draft-includes-reply-and-quote-targets ()
   "Draft replies and quotes should use the captured post_tweet_request fields."
@@ -1370,13 +1356,10 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
          :target-id "99"
          :items (list (list :text "hello" :attachments nil))
          :callback #'ignore))
-      (should (equal (chirp-get-in variables
-                                   (list "post_tweet_request" (cadr spec)))
+      (should (equal (map-nested-elt variables (list "post_tweet_request" (cadr spec)))
                      (caddr spec)))
       (when (eq (car spec) 'reply)
-        (should (eq (chirp-get-in
-                     variables
-                     '("post_tweet_request" "auto_populate_reply_metadata"))
+        (should (eq (map-nested-elt variables '("post_tweet_request" "auto_populate_reply_metadata"))
                     t))))))
 
 (ert-deftest chirp-backend-save-draft-uploads-media-ids ()
@@ -1401,8 +1384,7 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
              :items (list (list :text "photo"
                                 :attachments (list file)))
              :callback #'ignore))
-          (should (equal (chirp-get-in variables
-                                       '("post_tweet_request" "media_ids"))
+          (should (equal (map-nested-elt variables '("post_tweet_request" "media_ids"))
                          ["media-1"])))
       (delete-file file))))
 
@@ -1425,8 +1407,7 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                           (list (list :media-id "2087634413287100416"))))
        :callback #'ignore))
     (should-not uploaded)
-    (should (equal (chirp-get-in variables
-                                 '("post_tweet_request" "media_ids"))
+    (should (equal (map-nested-elt variables '("post_tweet_request" "media_ids"))
                    ["2087634413287100416"]))))
 
 (ert-deftest chirp-backend-schedule-sends-execute-at ()
@@ -1447,8 +1428,8 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
                    (setq result scheduled-tweet-id))))
     (should (equal (plist-get operation :name) "CreateScheduledTweet"))
     (should (equal result "8"))
-    (should (equal (chirp-get variables "execute_at") 1786700000))
-    (should (equal (chirp-get-in variables '("post_tweet_request" "status"))
+    (should (equal (map-elt variables "execute_at") 1786700000))
+    (should (equal (map-nested-elt variables '("post_tweet_request" "status"))
                    "later"))))
 
 (ert-deftest chirp-backend-request-rejects-unknown-actions-without-a-process ()

@@ -190,7 +190,7 @@
               (setf (plist-get second :id) "conversation-2"
                     (plist-get second :title) "Bob")
               (funcall (nth 0 callbacks) (list first)
-                       `(("pagination" ("nextCursor" \, cursor))))
+                       `((pagination (nextCursor \, cursor))))
               (with-current-buffer buffer (chirp-dm-load-more-inbox))
               (should
                (equal (plist-get (nth 1 options) :cursor) cursor))
@@ -258,7 +258,7 @@
                           (chirp-dm-conversation--events state))
                   '("20")))
                 (funcall bridge (list old-event new-event)
-                         '(("pagination" ("complete" . t))))
+                         '((pagination (complete . t))))
                 (with-current-buffer buffer
                   (appkit-loop-run-pass (appkit-surface-loop view))
                   (should (appkit-chat-timeline-node "20"))
@@ -354,7 +354,7 @@
                  (fresh-cursor '(:cursor-id "new-page" :graph-snapshot-id "new")))
             (setf (plist-get second :id) "conversation-2")
             (funcall (nth 0 callbacks) (list first)
-                     `(("pagination" ("nextCursor" . ,cursor))))
+                     `((pagination (nextCursor . ,cursor))))
             (chirp-dm-test--drain view)
             (with-current-buffer buffer
               (chirp-dm-load-more-inbox)
@@ -363,7 +363,7 @@
             (should (plist-get state :loading-p))
             (should (eq (plist-get (plist-get state :status) :phase) 'refresh))
             (funcall (nth 2 callbacks) (list second)
-                     `(("pagination" ("nextCursor" . ,fresh-cursor))))
+                     `((pagination (nextCursor . ,fresh-cursor))))
             (funcall (nth 1 callbacks) (list first) nil)
             (should (equal (mapcar (lambda (item) (plist-get item :id))
                                   (plist-get state :items))
@@ -376,7 +376,7 @@
             (funcall (nth 4 callbacks) (list first) nil)
             (funcall (nth 3 errors) "stale refresh error")
             (funcall (nth 3 callbacks) (list second)
-                     `(("pagination" ("nextCursor" . ,fresh-cursor))))
+                     `((pagination (nextCursor . ,fresh-cursor))))
             (chirp-dm-test--drain view)
             (should (equal (mapcar (lambda (item) (plist-get item :id))
                                   (plist-get state :items))
@@ -452,7 +452,7 @@
                                   (plist-get conversation :events))
                            '("20")))
             (funcall bridge-callback (list old middle fresh)
-                     '(("pagination" ("complete" . t))))
+                     '((pagination (complete . t))))
             (chirp-dm-test--drain view)
             (with-current-buffer conversation-buffer
               (should (appkit-chat-timeline-node "20"))

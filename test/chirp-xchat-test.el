@@ -130,10 +130,10 @@
            :attachment-count 1
            :message-request-p t))
          (cursor
-          '(("__typename" . "XChatGetInboxPageContinueCursor")
-            ("cursor_id" . "cursor-next")
-            ("graph_snapshot_id" . "snapshot")
-            ("graph_snapshot_restarted" . t)))
+          '((__typename . "XChatGetInboxPageContinueCursor")
+            (cursor_id . "cursor-next")
+            (graph_snapshot_id . "snapshot")
+            (graph_snapshot_restarted . t)))
          operation variables request-owner conversations envelope)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (request-operation request-variables callback
@@ -185,12 +185,10 @@
   "Focused conversation data may omit the inbox-only deletion flag."
   (let* ((item
           (cl-remove-if
-           (lambda (cell) (equal (car cell) "is_deleted_by_viewer"))
+           (lambda (cell) (eq (car cell) 'is_deleted_by_viewer))
            (chirp-dm-test--conversation-item)))
          (payload
-          `(("data" .
-             (("get_inbox_page_conversation_data" .
-               (("items" . (,item))))))))
+          `((data . ((get_inbox_page_conversation_data . ((items . (,item))))))))
          conversation failure)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
@@ -206,7 +204,7 @@
   "Inbox data must retain its authoritative deletion flag."
   (let* ((item
           (cl-remove-if
-           (lambda (cell) (equal (car cell) "is_deleted_by_viewer"))
+           (lambda (cell) (eq (car cell) 'is_deleted_by_viewer))
            (chirp-dm-test--conversation-item)))
          (payload (chirp-dm-test--inbox-payload (list item)))
          success failure)
@@ -222,9 +220,9 @@
 (ert-deftest chirp-backend-xchat-inbox-allows-missing-restart-flag ()
   "A continuation cursor may omit its false snapshot restart flag."
   (let ((cursor
-         '(("__typename" . "XChatGetInboxPageContinueCursor")
-           ("cursor_id" . "cursor-next")
-           ("graph_snapshot_id" . "snapshot")))
+         '((__typename . "XChatGetInboxPageContinueCursor")
+           (cursor_id . "cursor-next")
+           (graph_snapshot_id . "snapshot")))
         envelope failure)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
@@ -256,7 +254,7 @@
     (should (equal (plist-get operation :name) "GetInboxPageRequestQuery"))
     (should completed)
     (should-not failure)
-    (should (eq (chirp-get-in envelope '("pagination" "complete")) t))
+    (should (eq (alist-get 'complete (alist-get 'pagination envelope)) t))
     (should-not (chirp-backend-envelope-next-cursor envelope))
     (let ((cursor (alist-get "continue_cursor" variables nil nil #'string=)))
       (should (equal (alist-get "cursor_id" cursor nil nil #'string=)
@@ -372,7 +370,7 @@
   "Inbox adaptation should not mistake a drifted cursor for exhaustion."
   (let ((payload
          (chirp-dm-test--inbox-payload
-          nil '(("__typename" . "XChatFutureCursor"))))
+          nil '((__typename . "XChatFutureCursor"))))
         success failure)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
@@ -386,10 +384,10 @@
 (ert-deftest chirp-backend-xchat-inbox-rejects-unknown-conversation-unions ()
   "Inbox adaptation should reject unknown conversation detail variants."
   (let* ((item (chirp-dm-test--conversation-item))
-         (detail (cdr (assoc "conversation_detail" item)))
+         (detail (cdr (assq 'conversation_detail item)))
          (payload (chirp-dm-test--inbox-payload (list item)))
          success failure)
-    (setcdr (assoc "__typename" detail) "XChatFutureConversationDetail")
+    (setcdr (assq '__typename detail) "XChatFutureConversationDetail")
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
                  (funcall callback payload))))
@@ -433,11 +431,9 @@
            :conversation-id "conversation-1"
            :text "older"))
          (payload
-          `(("data" .
-             (("get_conversation_page" .
-               (("encoded_message_events" . (,older))
-                ("has_more" . nil)
-                ("message_request_state" . "NONE")))))))
+          `((data . ((get_conversation_page . ((encoded_message_events . (,older))
+           (has_more . nil)
+           (message_request_state . "NONE")))))))
          operation variables owner events envelope)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (request-operation request-variables callback
@@ -467,7 +463,7 @@
                50))
     (should (equal (mapcar (lambda (event) (plist-get event :id)) events)
                    '("10")))
-    (should (eq (chirp-get-in envelope '("pagination" "complete")) t))
+    (should (eq (alist-get 'complete (alist-get 'pagination envelope)) t))
     (should-not (chirp-backend-envelope-next-cursor envelope))))
 
 (ert-deftest chirp-backend-xchat-history-preserves-recovery-key-events ()
@@ -487,11 +483,9 @@
            :conversation-id "conversation-1"
            :detail-field 3))
          (payload
-          `(("data" .
-             (("get_conversation_page" .
-               (("encoded_message_events" . (,message))
-                ("missing_conversation_key_change_events" . (,key-event))
-                ("has_more" . nil)))))))
+          `((data . ((get_conversation_page . ((encoded_message_events . (,message))
+           (missing_conversation_key_change_events . (,key-event))
+           (has_more . nil)))))))
          events envelope failure)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
@@ -505,9 +499,9 @@
     (should (equal (mapcar (lambda (event) (plist-get event :id)) events)
                    '("10")))
     (should (equal (plist-get (car events) :encoded-event) message))
-    (should (equal (chirp-get envelope "encodedKeyEvents")
+    (should (equal (alist-get 'encodedKeyEvents envelope)
                    (list key-event)))
-    (should (equal (plist-get (car (chirp-get envelope "keyEvents"))
+    (should (equal (plist-get (car (alist-get 'keyEvents envelope))
                               :sender-id)
                    "42"))))
 
@@ -521,11 +515,9 @@
            :conversation-id "conversation-1"
            :text "not a key"))
          (payload
-          `(("data" .
-             (("get_conversation_page" .
-               (("encoded_message_events" . nil)
-                ("missing_conversation_key_change_events" . (,message))
-                ("has_more" . nil)))))))
+          `((data . ((get_conversation_page . ((encoded_message_events . nil)
+           (missing_conversation_key_change_events . (,message))
+           (has_more . nil)))))))
          success failure)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
@@ -540,10 +532,8 @@
 (ert-deftest chirp-backend-xchat-history-requires-a-progress-cursor ()
   "A history page claiming more data should provide an older event cursor."
   (let ((payload
-         '(("data" .
-            (("get_conversation_page" .
-              (("encoded_message_events" . nil)
-               ("has_more" . t)))))))
+         '((data . ((get_conversation_page . ((encoded_message_events . nil)
+          (has_more . t)))))))
         success failure)
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (_operation _variables callback &rest _options)
@@ -599,11 +589,8 @@
                        (should (eq (plist-get options :owner) 'owner))
                        (funcall
                         callback
-                        `(("data" .
-                           (("xchat_send_create_message_event" .
-                             (("__typename" .
-                               "XChatSendMessageCreateEventResponse")
-                              ("encoded_message_event" . ,encoded)))))))
+                        `((data . ((xchat_send_create_message_event . ((__typename . "XChatSendMessageCreateEventResponse")
+                         (encoded_message_event . ,encoded)))))))
                        nil)))
             (chirp-backend-dm-send-text
              "42-99" "hello"
@@ -621,7 +608,7 @@
                         :encoded-message-event-signature "c2ln")))
                     ((symbol-function 'chirp-x-graphql-request)
                      (lambda (_operation _variables callback &rest _options)
-                       (funcall callback '(("data" . nil)))
+                       (funcall callback '((data . nil)))
                        nil)))
             (setq failure nil)
             (chirp-backend-dm-send-text
@@ -669,11 +656,8 @@
                     (push variables writes)
                     (funcall
                      callback
-                     `(("data" .
-                        (("xchat_send_create_message_event" .
-                          (("__typename" .
-                            "XChatSendMessageCreateEventResponse")
-                           ("encoded_message_event" . ,encoded))))))))
+                     `((data . ((xchat_send_create_message_event . ((__typename . "XChatSendMessageCreateEventResponse")
+                      (encoded_message_event . ,encoded))))))))
                   'request)))
             (chirp-backend-dm-send-reply
              "42-99" "reply" "dGFyZ2V0" '("a2V5")
@@ -743,11 +727,8 @@
                           :attachment-count 1)))
                     (funcall
                      callback
-                     `(("data" .
-                        (("xchat_send_create_message_event" .
-                          (("__typename" .
-                            "XChatSendMessageCreateEventResponse")
-                           ("encoded_message_event" . ,encoded))))))))
+                     `((data . ((xchat_send_create_message_event . ((__typename . "XChatSendMessageCreateEventResponse")
+                      (encoded_message_event . ,encoded))))))))
                   'send-request)))
             (chirp-backend-dm-send-attachments
              "42-99" ""
@@ -866,31 +847,24 @@
                      ((eq operation chirp-x--chat-media-initialize-operation)
                       (request
                        'initialize
-                       '(("data" .
-                          (("xchat_initialize_media_upload" .
-                            (("media_hash_key" . "media_hash")
-                             ("resume_id" . "123"))))))
+                       '((data . ((xchat_initialize_media_upload . ((media_hash_key . "media_hash")
+                        (resume_id . "123"))))))
                        callback options))
                      ((eq operation chirp-x--chat-media-finalize-operation)
                       (request
                        'finalize
-                       '(("data" .
-                          (("xchat_finalize_media_upload" .
-                            (("upload_error"))))))
+                       '((data . ((xchat_finalize_media_upload . ((upload_error))))))
                        callback options))
                      (t
                       (request
                        'send
-                       `(("data" .
-                          (("xchat_send_create_message_event" .
-                            (("__typename" . "XChatSendMessageCreateEventResponse")
-                             ("encoded_message_event" .
-                              ,(chirp-dm-test--event
-                                :sequence "30"
-                                :message-id (cdr (assoc "message_id" variables))
-                                :sender-id "42" :conversation-id "42:99"
-                                :text "" :key-version "1"
-                                :attachment-count 2)))))))
+                       `((data . ((xchat_send_create_message_event . ((__typename . "XChatSendMessageCreateEventResponse")
+                        (encoded_message_event . ,(chirp-dm-test--event
+                          :sequence "30"
+                          :message-id (cdr (assoc "message_id" variables))
+                          :sender-id "42" :conversation-id "42:99"
+                          :text "" :key-version "1"
+                          :attachment-count 2)))))))
                        callback options)))))
                  ((symbol-function 'chirp-x--request)
                   (lambda (_url _method callback &rest options)
@@ -1033,18 +1007,14 @@
                           chirp-x--chat-media-initialize-operation)
                       (funcall
                        callback
-                       '(("data" .
-                          (("xchat_initialize_media_upload" .
-                            (("__typename" . "InitializeMediaUploadResult")
-                             ("media_hash_key" . "media_hash")
-                             ("resume_id" . "123"))))))))
+                       '((data . ((xchat_initialize_media_upload . ((__typename . "InitializeMediaUploadResult")
+                        (media_hash_key . "media_hash")
+                        (resume_id . "123"))))))))
                      ((eq operation chirp-x--chat-media-finalize-operation)
                       (funcall
                        callback
-                       '(("data" .
-                          (("xchat_finalize_media_upload" .
-                            (("__typename" . "FinalizeMediaUploadResponse")
-                             ("upload_error")))))))))
+                       '((data . ((xchat_finalize_media_upload . ((__typename . "FinalizeMediaUploadResponse")
+                        (upload_error)))))))))
                     'graphql-request))
                  ((symbol-function 'chirp-x--request)
                   (lambda (url method callback &rest options)
@@ -1174,10 +1144,8 @@
            :text "sent"
            :key-version "1"))
          (payload
-          `(("data" .
-             (("xchat_send_create_message_event" .
-               (("__typename" . "XChatSendMessageCreateEventResponse")
-                ("encoded_message_event" . ,encoded))))))))
+          `((data . ((xchat_send_create_message_event . ((__typename . "XChatSendMessageCreateEventResponse")
+           (encoded_message_event . ,encoded))))))))
     (should-error
      (chirp-xchat-send-result payload "42-99" "43" message-id))
     (should-error
@@ -1189,15 +1157,12 @@
 (ert-deftest chirp-xchat-live-token-is-bounded-and-never-adapted-loosely ()
   "Live token normalization should require one bounded JWT-shaped value."
   (let ((payload
-         '(("data" .
-            (("user_get_x_chat_auth_token" .
-              (("token" . "header.payload.signature"))))))))
+         '((data . ((user_get_x_chat_auth_token . ((token . "header.payload.signature"))))))))
     (should (equal (chirp-xchat-live-token payload)
                    "header.payload.signature"))
     (should-error
      (chirp-xchat-live-token
-      '(("data" .
-         (("user_get_x_chat_auth_token" . (("token" . "not-a-jwt"))))))))))
+      '((data . ((user_get_x_chat_auth_token . ((token . "not-a-jwt"))))))))))
 
 (ert-deftest chirp-xchat-live-frame-decodes-event-and-instructions-boundedly ()
   "Binary live frames should expose events and classify control instructions."
@@ -1257,9 +1222,7 @@
                   owner (plist-get options :owner))
             (funcall
              callback
-             '(("data" .
-                (("user_get_x_chat_auth_token" .
-                  (("token" . "header.payload.signature")))))))
+             '((data . ((user_get_x_chat_auth_token . ((token . "header.payload.signature")))))))
             'request)))
       (chirp-backend-dm-live-token
        (lambda (value _envelope) (setq token value))

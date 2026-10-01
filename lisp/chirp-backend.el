@@ -13,6 +13,8 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'ucs-normalize)
+(require 'map)
+(require 'let-alist)
 (require 'chirp-core)
 (require 'chirp-x)
 (require 'chirp-xchat)
@@ -283,8 +285,8 @@ When zero or negative, the in-memory read cache is disabled."
   "Persisted X web operations used by Chirp's direct backend.")
 
 (defconst chirp-backend--user-timeline-paths
-  '(("data" "user" "result" "timeline" "timeline")
-    ("data" "user" "result" "timeline_v2" "timeline"))
+  '((data user result timeline timeline)
+    (data user result timeline_v2 timeline))
   "Alternative paths to an X user timeline object.")
 
 (defun chirp-backend--operation (key)
@@ -574,31 +576,27 @@ ERRBACK handles failures.  FETCHER is called with success and error callbacks."
 
 (defun chirp-backend--created-tweet-id (payload)
   "Return a created tweet identifier from GraphQL PAYLOAD, or nil."
-  (cl-loop for path in '(("data" "create_tweet" "tweet_results" "result"
-                          "rest_id")
-                         ("data" "notetweet_create" "tweet_results" "result"
-                          "rest_id")
-                         ("data" "create_note_tweet" "tweet_results" "result"
-                          "rest_id"))
-           for identifier = (chirp-get-in payload path)
+  (cl-loop for path in '((data create_tweet tweet_results result rest_id)
+                         (data notetweet_create tweet_results result rest_id)
+                         (data create_note_tweet tweet_results result rest_id))
+           for identifier = (map-nested-elt payload path)
            when (and identifier
                      (not (string-empty-p (format "%s" identifier))))
            return (format "%s" identifier)))
 
 (defun chirp-backend--published-tweet (result)
   "Normalize a complete published RESULT, never an ID-only acknowledgement."
-  (let* ((object (or (chirp-get result "tweet") result))
-         (legacy (chirp-get object "legacy")))
-    (when (and (chirp-get legacy "full_text")
+  (let* ((object (or (map-nested-elt result '(tweet)) result))
+         (legacy (map-nested-elt object '(legacy))))
+    (when (and (map-nested-elt legacy '(full_text))
                (chirp--extract-user-object object))
       (chirp--tweet-from-x result))))
 
 (defun chirp-backend-created-tweet (payload)
   "Return a complete normalized created tweet from PAYLOAD, or nil."
-  (cl-loop for operation in '("create_tweet" "notetweet_create"
-                              "create_note_tweet")
-           for result = (chirp-get-in
-                         payload (list "data" operation "tweet_results" "result"))
+  (cl-loop for operation in '(create_tweet notetweet_create
+                              create_note_tweet)
+           for result = (map-nested-elt payload (list 'data operation 'tweet_results 'result))
            for tweet = (chirp-backend--published-tweet result)
            when tweet return tweet))
 
@@ -613,11 +611,12 @@ ERRBACK receives read failures.  This bypasses list caches and pagination."
      ("withVoice" . :json-false))
    (lambda (payload)
      (let ((tweet (chirp-backend--published-tweet
-                   (chirp-get-in payload '("data" "tweetResult" "result")))))
+                   (map-nested-elt payload '(data tweetResult result)))))
        (if (and tweet (equal (plist-get tweet :id) id))
            (funcall callback tweet)
          (funcall errback "X did not return the published tweet"))))
-   :errback errback :owner owner))
+   :errback errback
+   :owner owner))
 
 (defun chirp-backend--compose-variables
     (kind text target-id media-ids note-tweet-p &optional reply-audience)
@@ -896,12 +895,12 @@ PROGRESS and OWNER are forwarded to each item upload."
 
 (defun chirp-backend--unsent-id (payload)
   "Return a draft or scheduled identifier from PAYLOAD, or nil."
-  (cl-loop for path in '(("data" "tweet" "rest_id")
-                         ("data" "create_draft_tweet" "tweet" "rest_id")
-                         ("data" "create_scheduled_tweet" "tweet" "rest_id")
-                         ("data" "edit_draft_tweet" "tweet" "rest_id")
-                         ("data" "edit_scheduled_tweet" "tweet" "rest_id"))
-           for identifier = (chirp-get-in payload path)
+  (cl-loop for path in '((data tweet rest_id)
+                         (data create_draft_tweet tweet rest_id)
+                         (data create_scheduled_tweet tweet rest_id)
+                         (data edit_draft_tweet tweet rest_id)
+                         (data edit_scheduled_tweet tweet rest_id))
+           for identifier = (map-nested-elt payload path)
            when (and identifier
                      (not (string-empty-p (format "%s" identifier))))
            return (format "%s" identifier)))
@@ -909,24 +908,35 @@ PROGRESS and OWNER are forwarded to each item upload."
 (defun chirp-backend--confirmed-unsent-entry
     (id kind target-id items uploaded execute-at)
   "Build the confirmed unsent snapshot from uploaded ITEMS and authoritative ID."
-  (let ((entry
-         (chirp-backend--normalize-unsent-entry
-          (if execute-at 'scheduled 'draft)
-          `(("rest_id" . ,id)
-            ("execute_at" . ,execute-at)
-            ("post_tweet_request"
-             . ,(chirp-backend--post-tweet-request kind target-id uploaded))))))
-    (cl-mapc
-     (lambda (normalized original)
-       (cl-mapc
-        (lambda (attachment submitted)
-          (when (listp submitted)
-            (dolist (key '(:description :type :preview-url :width :height))
-              (when (plist-member submitted key)
-                (nconc attachment (list key (plist-get submitted key)))))))
-        (plist-get normalized :attachments) (plist-get original :attachments)))
-     (plist-get entry :items) items)
-    entry))
+  (let* ((request
+           `((status . ,(plist-get (car uploaded) :text))
+             (media_ids . ,(chirp-backend--unsent-media-ids (car uploaded)))
+             (thread_tweets .
+                            ,(mapcar
+                              (lambda (item)
+                                `((status . ,(plist-get item :text))
+                                  (media_ids . ,(chirp-backend--unsent-media-ids item))))
+                              (cdr uploaded))))))
+    (pcase kind
+      ('reply (push `(in_reply_to_status_id . ,target-id) request))
+      ('quote (push `(attachment_url . ,(format "https://x.com/i/status/%s"
+                                                target-id)) request)))
+    (let ((entry
+           (chirp-backend--normalize-unsent-entry
+            (if execute-at 'scheduled 'draft)
+            `((rest_id . ,id) (execute_at . ,execute-at)
+              (post_tweet_request . ,request)))))
+      (cl-mapc
+       (lambda (normalized original)
+         (cl-mapc
+          (lambda (attachment submitted)
+            (when (listp submitted)
+              (dolist (key '(:description :type :preview-url :width :height))
+                (when (plist-member submitted key)
+                  (nconc attachment (list key (plist-get submitted key)))))))
+          (plist-get normalized :attachments) (plist-get original :attachments)))
+       (plist-get entry :items) items)
+      entry)))
 
 (cl-defun chirp-backend--submit-unsent
     (kind target-id items existing-id execute-at callback errback
@@ -1074,42 +1084,44 @@ Unix second in year 5138 are treated as milliseconds."
 (defun chirp-backend--unsent-media-count (request)
   "Return the number of media IDs stored on REQUEST."
   (let ((count (length (chirp-backend--media-id-list
-                        (chirp-get request "media_ids")))))
+                        (map-nested-elt request '(media_ids))))))
     (dolist (item (chirp-backend--json-list
-                   (chirp-get request "thread_tweets"))
+                   (map-nested-elt request '(thread_tweets)))
                   count)
       (setq count
             (+ count (length (chirp-backend--media-id-list
-                              (chirp-get item "media_ids"))))))))
+                              (map-nested-elt item '(media_ids)))))))))
 
 (defun chirp-backend--unsent-media-entity (entity)
   "Normalize one FetchDraftTweets media ENTITY, or return nil."
-  (let* ((info (or (chirp-get entity "media_info") entity))
-         (media-id
-          (or (chirp-backend--media-id
-               (chirp-get entity "media_id" "id" "id_str"))
-              (let ((key (chirp-get entity "media_key")))
-                (and (stringp key)
-                     (string-match "\\([0-9]+\\)\\'" key)
-                     (chirp-backend--media-id (match-string 1 key))))))
-         (url (chirp-first-nonblank
-               (chirp-get info "original_img_url")
-               (chirp-get-in info '("preview_image" "original_img_url")))))
-    (when media-id
-      (list :media-id media-id
-            :type (pcase (chirp-get info "__typename")
-                    ("ApiVideo" "video")
-                    ("ApiGif" "animated_gif")
-                    (_ "photo"))
-            :preview-url url
-            :width (chirp-get info "original_img_width")
-            :height (chirp-get info "original_img_height")))))
+  (when (chirp-object-p entity)
+    (let* ((info (or (map-nested-elt entity '(media_info)) entity))
+           (media-id
+            (or (chirp-backend--media-id
+                 (alist-get 'media_id entity (alist-get 'id entity (map-nested-elt entity '(id_str)))))
+                (let ((key (map-nested-elt entity '(media_key))))
+                  (and (stringp key)
+                       (string-match "\\([0-9]+\\)\\'" key)
+                       (chirp-backend--media-id (match-string 1 key))))))
+           (url (chirp-first-nonblank
+                 (map-nested-elt info '(original_img_url))
+                 (map-nested-elt info '(preview_image original_img_url)))))
+      (when media-id
+        (let-alist (and (chirp-object-p info) info)
+          (list :media-id media-id
+                :type (pcase .__typename
+                        ("ApiVideo" "video")
+                        ("ApiGif" "animated_gif")
+                        (_ "photo"))
+                :preview-url url
+                :width .original_img_width
+                :height .original_img_height))))))
 
 (defun chirp-backend--unsent-media-lookup (entry)
   "Return a media-id table built from ENTRY's media_entities."
   (let ((table (make-hash-table :test #'equal)))
     (dolist (entity (chirp-backend--json-list
-                     (chirp-get entry "media_entities")))
+                     (map-nested-elt entry '(media_entities))))
       (when-let* ((media (chirp-backend--unsent-media-entity entity)))
         (puthash (plist-get media :media-id) media table)))
     table))
@@ -1118,58 +1130,58 @@ Unix second in year 5138 are treated as milliseconds."
   "Return compose attachments for MEDIA-IDS using LOOKUP."
   (mapcar
    (lambda (media-id)
-     (let ((media (gethash media-id lookup)))
+     (pcase-let (((map :type :preview-url :width :height)
+                  (gethash media-id lookup)))
        (append (list :media-id media-id)
-               (when (plist-get media :type)
-                 (list :type (plist-get media :type)))
-               (when (plist-get media :preview-url)
-                 (list :preview-url (plist-get media :preview-url)))
-               (when (plist-get media :width)
-                 (list :width (plist-get media :width)))
-               (when (plist-get media :height)
-                 (list :height (plist-get media :height))))))
+               (when type (list :type type))
+               (when preview-url (list :preview-url preview-url))
+               (when width (list :width width))
+               (when height (list :height height)))))
    (chirp-backend--media-id-list media-ids)))
 
 (defun chirp-backend--unsent-items (request entry)
   "Return compose items for REQUEST using media on ENTRY."
   (let ((lookup (chirp-backend--unsent-media-lookup entry)))
-    (cons (list :text (or (chirp-get request "status") "")
+    (cons (list :text (or (map-nested-elt request '(status)) "")
                 :attachments
                 (chirp-backend--unsent-attachments
-                 (chirp-get request "media_ids") lookup))
+                 (map-nested-elt request '(media_ids)) lookup))
           (mapcar
            (lambda (item)
-             (list :text (or (chirp-get item "status") "")
+             (list :text (or (map-nested-elt item '(status)) "")
                    :attachments
                    (chirp-backend--unsent-attachments
-                    (chirp-get item "media_ids") lookup)))
+                    (map-nested-elt item '(media_ids)) lookup)))
            (chirp-backend--json-list
-            (chirp-get request "thread_tweets"))))))
+            (map-nested-elt request '(thread_tweets)))))))
 
 (defun chirp-backend--unsent-request (entry)
   "Return the stored create request on unsent ENTRY."
-  (or (chirp-get entry "tweet_create_request")
-      (chirp-get entry "post_tweet_request")
+  (or (map-nested-elt entry '(tweet_create_request))
+      (map-nested-elt entry '(post_tweet_request))
       entry))
 
 (defun chirp-backend--normalize-unsent-entry (kind entry)
   "Normalize unsent ENTRY of KIND into a plist, or return nil."
-  (when-let* ((request (chirp-backend--unsent-request entry))
+  (when-let* (((chirp-object-p entry))
+              (request (chirp-backend--unsent-request entry))
               (id (chirp-first-nonblank
-                   (format "%s" (or (chirp-get entry "rest_id")
-                                    (chirp-get entry "id")
+                   (format "%s" (or (map-nested-elt entry '(rest_id))
+                                    (map-nested-elt entry '(id))
                                     "")))))
     (when (string-match-p "\\`[0-9]+\\'" id)
       (let* ((reply-id (chirp-first-nonblank
-                        (chirp-get request "in_reply_to_status_id")))
+                        (map-nested-elt request '(in_reply_to_status_id))))
              (quote-url (chirp-first-nonblank
-                         (chirp-get request "attachment_url")))
+                         (map-nested-elt request '(attachment_url))))
              (quote-id (chirp-url-tweet-id quote-url))
              (execute-at
               (chirp-backend--unix-seconds
-               (or (chirp-get entry "execute_at" "scheduled_at")
-                   (chirp-get (chirp-get entry "scheduling_info")
-                              "execute_at" "scheduled_at"))))
+               (or (alist-get 'execute_at entry (map-nested-elt entry '(scheduled_at)))
+                   (let ((scheduling (map-nested-elt entry '(scheduling_info))))
+                     (when (chirp-object-p scheduling)
+                       (alist-get 'execute_at scheduling
+                                  (alist-get 'scheduled_at scheduling)))))))
              (items (chirp-backend--unsent-items request entry)))
         (list :id id
               :kind kind
@@ -1190,15 +1202,13 @@ Unix second in year 5138 are treated as milliseconds."
   "Return raw unsent objects of KIND from PAYLOAD."
   (pcase kind
     ('scheduled
-     (let ((list (chirp-get-in
-                  payload '("data" "viewer" "scheduled_tweet_list"))))
+     (let ((list (map-nested-elt payload '(data viewer scheduled_tweet_list))))
        (or (chirp-backend--json-list list)
-           (chirp-backend--json-list (chirp-get list "response_data"))
-           (chirp-backend--json-list (chirp-get list "items")))))
+           (chirp-backend--json-list (map-nested-elt list '(response_data)))
+           (chirp-backend--json-list (map-nested-elt list '(items))))))
     ('draft
      (chirp-backend--json-list
-      (chirp-get-in
-       payload '("data" "viewer" "draft_list" "response_data"))))
+      (map-nested-elt payload '(data viewer draft_list response_data))))
     (_ (error "Unsent kind is invalid: %S" kind))))
 
 (defun chirp-backend-fetch-unsent (kind callback &optional errback)
@@ -1263,7 +1273,8 @@ request lifetime.  Deletes are never retried automatically."
            `((,key . ,id))
            (lambda (payload)
              (funcall callback payload nil))
-           :errback error-fn :owner owner))
+           :errback error-fn
+           :owner owner))
       (error
        (funcall error-fn (error-message-string err))
        nil))))
@@ -1348,8 +1359,8 @@ ERRBACK receives a single human-readable string."
 
 (defun chirp-backend-envelope-next-cursor (envelope)
   "Return the next pagination cursor from ENVELOPE, or nil."
-  (or (chirp-get-in envelope '("pagination" "nextCursor"))
-      (chirp-get envelope "nextCursor")))
+  (or (map-nested-elt envelope '(pagination nextCursor))
+      (map-nested-elt envelope '(nextCursor))))
 
 (cl-defun chirp-backend-dm-recovery-input
     (user-id callback &key errback owner)
@@ -1605,18 +1616,18 @@ canceling a dispatched write cannot establish whether X accepted it."
                (setq child-token token child nil)
                (condition-case err
                    (let ((request
-                          (funcall
-                           start
-                           (lambda (value &optional envelope)
-                             (when (and (not settled-p)
-                                        (eq token child-token))
-                               (setq child-token nil child nil)
-                               (funcall success value envelope)))
-                           (lambda (message)
-                             (when (and (not settled-p)
-                                        (eq token child-token))
-                               (setq child-token nil child nil)
-                               (fail message))))))
+                           (funcall
+                            start
+                            (lambda (value &optional envelope)
+                              (when (and (not settled-p)
+                                         (eq token child-token))
+                                (setq child-token nil child nil)
+                                (funcall success value envelope)))
+                            (lambda (message)
+                              (when (and (not settled-p)
+                                         (eq token child-token))
+                                (setq child-token nil child nil)
+                                (fail message))))))
                      ;; A synchronous callback may already have advanced to
                      ;; another child, or canceled the entire operation.
                      (if (and (not settled-p) (eq token child-token))
@@ -1645,7 +1656,9 @@ canceling a dispatched write cannot establish whether X accepted it."
                        (error "XChat attachment send was canceled"))
                      (setq write-started-p t)
                      prepared))
-                 success :errback failure :owner owner))
+                 success
+                 :errback failure
+                 :owner owner))
               (lambda (event envelope)
                 (setq settled-p t)
                 (retire-workflow)
@@ -1661,7 +1674,9 @@ canceling a dispatched write cannot establish whether X accepted it."
                      conversation-id
                      (plist-get stage :encrypted-file)
                      (plist-get stage :encrypted-bytes)
-                     success :errback failure :owner owner
+                     success
+                     :errback failure
+                     :owner owner
                      :progress
                      (and progress
                           (lambda (event)
@@ -1929,45 +1944,42 @@ oldest-first order and a pagination envelope."
   "Return raw RESULT, preserving visibility metadata.
 
 When PROMOTED-P is non-nil, mark the inner tweet as promoted."
-  (let ((tweet (or (chirp-get result "tweet") result)))
+  (let ((tweet (or (map-nested-elt result '(tweet)) result)))
     (if (not promoted-p)
         result
       (let ((marked (copy-tree tweet)))
-        (push '("isPromoted" . t) marked)
-        (if (chirp-get result "tweet")
+        (push '(isPromoted . t) marked)
+        (if (map-nested-elt result '(tweet))
             (let ((copy (copy-tree result)))
-              (setcdr (assoc-string "tweet" copy t) marked)
+              (setcdr (assq 'tweet copy) marked)
               copy)
           marked)))))
 
 (defun chirp-backend--timeline-entry-tweet-items (entry)
   "Return raw tweet occurrence items carried by timeline ENTRY."
-  (let* ((content (chirp-get entry "content"))
-         (item-content (or (chirp-get content "itemContent")
-                           (chirp-get-in entry '("item" "itemContent"))))
-         (entry-id (chirp-get entry "entryId"))
-         (promoted-p (or (chirp-get item-content "promotedMetadata")
+  (let* ((content (map-nested-elt entry '(content)))
+         (item-content (or (map-nested-elt content '(itemContent))
+                           (map-nested-elt entry '(item itemContent))))
+         (entry-id (map-nested-elt entry '(entryId)))
+         (promoted-p (or (map-nested-elt item-content '(promotedMetadata))
                          (and (stringp entry-id)
                               (string-prefix-p "promoted-" entry-id))))
          items)
-    (when-let* ((result (chirp-get-in item-content
-                                      '("tweet_results" "result"))))
+    (when-let* ((result (map-nested-elt item-content '(tweet_results result))))
       (push (list :entry-id entry-id
                   :tweet (chirp-backend--timeline-tweet result promoted-p))
             items))
-    (dolist (nested (chirp-get content "items"))
-      (when-let* ((nested-content (chirp-get-in nested
-                                                '("item" "itemContent")))
-                  (result (chirp-get-in nested-content
-                                        '("tweet_results" "result"))))
-        (let ((nested-id (chirp-get nested "entryId")))
+    (dolist (nested (map-nested-elt content '(items)))
+      (when-let* ((nested-content (map-nested-elt nested '(item itemContent)))
+                  (result (map-nested-elt nested-content '(tweet_results result))))
+        (let ((nested-id (map-nested-elt nested '(entryId))))
           (push
            (list
             :entry-id (or nested-id entry-id)
             :tweet
             (chirp-backend--timeline-tweet
              result
-             (or (chirp-get nested-content "promotedMetadata")
+             (or (map-nested-elt nested-content '(promotedMetadata))
                  (and (stringp nested-id)
                       (string-prefix-p "promoted-" nested-id)))))
            items))))
@@ -1976,18 +1988,18 @@ When PROMOTED-P is non-nil, mark the inner tweet as promoted."
 (defun chirp-backend--timeline-entries (instructions)
   "Return flat timeline entries and module items from INSTRUCTIONS."
   (cl-loop for instruction in instructions
-           append (or (chirp-get instruction "entries")
-                      (chirp-get instruction "moduleItems")
-                      (when-let* ((entry (chirp-get instruction "entry")))
+           append (or (map-nested-elt instruction '(entries))
+                      (map-nested-elt instruction '(moduleItems))
+                      (when-let* ((entry (map-nested-elt instruction '(entry))))
                         (list entry))
                       '())))
 
 (defun chirp-backend--timeline-next-cursor (entries)
   "Return the bottom continuation cursor carried by timeline ENTRIES."
   (cl-loop for entry in entries
-           for content = (chirp-get entry "content")
-           when (equal (chirp-get content "cursorType") "Bottom")
-           return (chirp-get content "value")))
+           for content = (map-nested-elt entry '(content))
+           when (equal (map-nested-elt content '(cursorType)) "Bottom")
+           return (map-nested-elt content '(value))))
 
 (defun chirp-backend--timeline-page (payload paths limit label)
   "Normalize timeline PAYLOAD found at PATHS to LIMIT items.
@@ -1996,18 +2008,18 @@ LABEL names the timeline in errors.  Return a cons of normalized tweets and a
 Chirp pagination envelope."
   (let* ((timeline
           (cl-loop for path in paths
-                   for value = (chirp-get-in payload path)
+                   for value = (map-nested-elt payload path)
                    when (and value (chirp-object-p value))
                    return value))
-         (instructions (and timeline (chirp-get timeline "instructions"))))
+         (instructions (and timeline (map-nested-elt timeline '(instructions)))))
     (unless (and timeline (listp instructions))
       (error "X did not return %s" label))
     (let* ((entries (chirp-backend--timeline-entries instructions))
            (pinned-entries
             (cl-loop for instruction in instructions
-                     when (equal (chirp-get instruction "type")
+                     when (equal (map-nested-elt instruction '(type))
                                  "TimelinePinEntry")
-                     when (chirp-get instruction "entry")
+                     when (map-nested-elt instruction '(entry))
                      collect it))
            (tweet-items
             (cl-loop for entry in entries
@@ -2027,8 +2039,8 @@ Chirp pagination envelope."
                            (list (plist-get item :tweet))))
                      when tweet
                      collect
-                     (let ((entry-id (plist-get item :entry-id))
-                           (context (plist-get item :timeline-context)))
+                     (pcase-let (((map :entry-id (:timeline-context context))
+                                  item))
                        (when entry-id
                          (plist-put tweet :timeline-entry-id entry-id))
                        (when context
@@ -2036,19 +2048,17 @@ Chirp pagination envelope."
                        tweet)))
            (cursor (chirp-backend--timeline-next-cursor entries))
            (envelope (and cursor
-                          `(("pagination" . (("nextCursor" . ,cursor)))))))
+                          `((pagination . ((nextCursor . ,cursor)))))))
       (cons (cl-subseq tweets 0 (min limit (length tweets))) envelope))))
 
 (defun chirp-backend--edit-history-tweets (payload)
   "Return normalized tweet versions from edit-history PAYLOAD."
   (let* ((timeline
-          (chirp-get-in
-           payload
-           '("data" "tweet_result_by_rest_id" "result"
-             "edit_history_timeline" "timeline")))
+          (map-nested-elt payload '(data tweet_result_by_rest_id result
+                                    edit_history_timeline timeline)))
          (instructions
           (and (chirp-object-p timeline)
-               (chirp-get timeline "instructions"))))
+               (map-nested-elt timeline '(instructions)))))
     (unless (and timeline (listp instructions))
       (error "X did not return tweet edit history"))
     (let* ((entries (chirp-backend--timeline-entries instructions))
@@ -2101,7 +2111,7 @@ pagination, and OWNER optionally owns the transport lifecycle."
                ("requestContext" . "launch"))
              (when cursor
                `(("cursor" . ,cursor))))
-     '(("data" "home" "home_timeline_urt"))
+     '((data home home_timeline_urt))
      limit callback
      :errback errback
      :label "a home timeline"
@@ -2120,30 +2130,31 @@ pagination, and OWNER optionally owns the transport lifecycle."
 
 (defun chirp-backend--notification-tweet-id (item)
   "Return the first target tweet ID referenced by notification ITEM."
-  (cl-loop for target in (chirp-get-in item '("template" "target_objects"))
-           for result = (chirp-get-in target '("tweet_results" "result"))
+  (cl-loop for target in (map-nested-elt item '(template target_objects))
+           for result = (map-nested-elt target '(tweet_results result))
            for tweet = (and result (chirp--tweet-from-x result))
            when tweet return (plist-get tweet :id)))
 
 (defun chirp-backend--normalize-notification (entry)
   "Normalize one X notification timeline ENTRY, or return nil."
-  (when-let* ((item (chirp-get-in entry '("content" "itemContent")))
+  (when-let* ((item (map-nested-elt entry '(content itemContent)))
               (id (chirp-first-nonblank
-                   (chirp-get item "id")
-                   (chirp-get entry "entryId"))))
-    (let* ((icon (chirp-get item "notification_icon"))
-           (kind (or (cdr (assoc-string icon
-                                        chirp-backend--notification-kinds))
-                     "unknown"))
-           (message (chirp-first-nonblank
-                     (chirp-get-in item '("rich_message" "text"))))
-           (tweet-id (chirp-backend--notification-tweet-id item))
-           (timestamp (chirp-get item "timestamp_ms")))
-      (append `(("id" . ,id)
-                ("type" . ,kind))
-              (when message `(("message" . ,message)))
-              (when timestamp `(("timestampMs" . ,timestamp)))
-              (when tweet-id `(("tweetId" . ,tweet-id)))))))
+                   (map-nested-elt item '(id))
+                   (map-nested-elt entry '(entryId)))))
+    (let-alist (and (chirp-object-p item) item)
+      (let* ((icon .notification_icon)
+             (kind (or (cdr (assoc-string icon
+                                          chirp-backend--notification-kinds))
+                       "unknown"))
+             (message (chirp-first-nonblank
+                       (map-nested-elt item '(rich_message text))))
+             (tweet-id (chirp-backend--notification-tweet-id item))
+             (timestamp .timestamp_ms))
+        (append `((id . ,id)
+                  (type . ,kind))
+                (when message `((message . ,message)))
+                (when timestamp `((timestampMs . ,timestamp)))
+                (when tweet-id `((tweetId . ,tweet-id))))))))
 
 (defun chirp-backend-notifications (callback &optional errback max-results)
   "Fetch account activity notifications and call CALLBACK.
@@ -2157,11 +2168,9 @@ ERRBACK handles failures and MAX-RESULTS limits the response."
        ("count" . ,limit))
      (lambda (payload)
        (if-let* ((timeline
-                  (chirp-get-in
-                   payload
-                   '("data" "viewer_v2" "user_results" "result"
-                     "notification_timeline" "timeline")))
-                 (instructions (chirp-get timeline "instructions")))
+                  (map-nested-elt payload '(data viewer_v2 user_results result
+                                            notification_timeline timeline)))
+                 (instructions (map-nested-elt timeline '(instructions))))
            (let* ((entries (chirp-backend--timeline-entries instructions))
                   (notifications
                    (delq nil (mapcar #'chirp-backend--normalize-notification
@@ -2172,8 +2181,7 @@ ERRBACK handles failures and MAX-RESULTS limits the response."
              (funcall callback
                       notifications
                       (and next-cursor
-                           `(("pagination" .
-                              (("nextCursor" . ,next-cursor)))))))
+                           `((pagination . ((nextCursor . ,next-cursor)))))))
          (funcall error-fn "X did not return a notification timeline")))
      :errback error-fn)))
 
@@ -2188,8 +2196,8 @@ ERRBACK handles failures and MAX-RESULTS limits the response."
        ("includePromotedContent" . :json-false)
        ("latestControlAvailable" . t)
        ("requestContext" . "launch"))
-     '(("data" "bookmark_timeline" "timeline")
-       ("data" "bookmark_timeline_v2" "timeline"))
+     '((data bookmark_timeline timeline)
+       (data bookmark_timeline_v2 timeline))
      limit callback
      :errback errback
      :label "the bookmarks timeline")))
@@ -2203,7 +2211,7 @@ ERRBACK handles failures and MAX-RESULTS limits the response."
        ("rawQuery" . ,query)
        ("querySource" . "typed_query")
        ("product" . "Top"))
-     '(("data" "search_by_raw_query" "search_timeline" "timeline"))
+     '((data search_by_raw_query search_timeline timeline))
      limit callback
      :errback errback
      :label "the search timeline")))
@@ -2227,7 +2235,7 @@ ERRBACK receives request failures."
          (let ((seen (make-hash-table :test #'equal))
                users)
            (dolist (user (chirp-backend--collect-users
-                          (chirp-get payload "users")))
+                          (map-nested-elt payload '(users))))
              (let ((key (or (plist-get user :id)
                             (plist-get user :handle))))
                (when (and key (not (gethash key seen)))
@@ -2257,14 +2265,13 @@ CALLBACK receives text with HTML entities decoded after joining chunks."
        (lambda (payloads)
          (let ((chunks
                 (mapcar (lambda (payload)
-                          (chirp-get (chirp-get payload "result") "text"))
+                          (map-nested-elt payload '(result text)))
                         payloads)))
            (if-let* (((cl-every #'stringp chunks))
                      (translation (chirp-first-nonblank (apply #'concat chunks))))
                (funcall callback
-                        `(("id" . ,tweet-id)
-                          ("translation"
-                           . ,(chirp-decode-html-entities translation)))
+                        `((id . ,tweet-id)
+                          (translation . ,(chirp-decode-html-entities translation)))
                         nil)
              (funcall error-fn "X did not return a translation"))))
        :method 'post
@@ -2287,8 +2294,7 @@ CALLBACK receives text with HTML entities decoded after joining chunks."
       (chirp-backend--operation 'viewer) nil
       (lambda (payload)
         (let ((user (chirp--user-from-x
-                     (chirp-get-in
-                      payload '("data" "viewer" "user_results" "result")))))
+                     (map-nested-elt payload '(data viewer user_results result)))))
           (if user
               (funcall success user nil)
             (funcall error "X did not return the authenticated profile"))))
@@ -2324,27 +2330,27 @@ CALLBACK receives text with HTML entities decoded after joining chunks."
 
 (defun chirp-backend--normalize-list-info (item source)
   "Normalize X list ITEM tagged with SOURCE, or return nil."
-  (when-let* ((id (chirp-first-nonblank
-                   (chirp-get item "id_str" "id"))))
-    (let ((owner (chirp-get item "user")))
-      `(("id" . ,id)
-        ("name" . ,(or (chirp-get item "name") id))
-        ("slug" . ,(or (chirp-get item "slug") ""))
-        ("description" . ,(or (chirp-get item "description") ""))
-        ("mode" . ,(or (chirp-get item "mode") ""))
-        ("memberCount" . ,(or (chirp-get item "member_count") 0))
-        ("subscriberCount" . ,(or (chirp-get item "subscriber_count") 0))
-        ("uri" . ,(or (chirp-get item "uri") ""))
-        ("fullName" . ,(or (chirp-get item "full_name") ""))
-        ("owner" . (("name" . ,(or (chirp-get owner "name") ""))
-                    ("screenName" . ,(or (chirp-get owner "screen_name") ""))
-                    ("profileImageUrl" .
-                     ,(or (chirp-get owner "profile_image_url_https"
-                                     "profile_image_url")
-                          ""))))
-        ("following" . ,(chirp-boolean-value
-                         (chirp-get item "following")))
-        ("sources" . (,source))))))
+  (when (chirp-object-p item)
+    (let-alist item
+      (when-let* ((id (chirp-first-nonblank
+                       (alist-get 'id_str item .id))))
+        (let ((owner (and (chirp-object-p .user) .user)))
+          `((id . ,id)
+            (name . ,(or .name id))
+            (slug . ,(or .slug ""))
+            (description . ,(or .description ""))
+            (mode . ,(or .mode ""))
+            (memberCount . ,(or .member_count 0))
+            (subscriberCount . ,(or .subscriber_count 0))
+            (uri . ,(or .uri ""))
+            (fullName . ,(or .full_name ""))
+            (owner . ((name . ,(or (map-nested-elt owner '(name)) ""))
+                      (screenName . ,(or (map-nested-elt owner '(screen_name)) ""))
+                      (profileImageUrl .
+                                       ,(or (alist-get 'profile_image_url_https owner
+                                                       (alist-get 'profile_image_url owner)) ""))))
+            (following . ,(chirp-boolean-value .following))
+            (sources . (,source))))))))
 
 (defun chirp-backend--request-list-collection
     (endpoint source user-id callback errback
@@ -2362,9 +2368,11 @@ CURSOR, PAGE, and ACCUMULATED carry private pagination state."
                (delq nil
                      (mapcar (lambda (item)
                                (chirp-backend--normalize-list-info item source))
-                             (chirp-get payload "lists"))))
+                             (map-nested-elt payload '(lists)))))
               (all-items (append accumulated items))
-              (next (chirp-get payload "next_cursor_str" "next_cursor")))
+              (next (when (chirp-object-p payload)
+                      (alist-get 'next_cursor_str payload
+                                 (alist-get 'next_cursor payload)))))
          (if (and next
                   (not (equal (format "%s" next) "0"))
                   (not (equal (format "%s" next) cursor))
@@ -2383,13 +2391,13 @@ CURSOR, PAGE, and ACCUMULATED carry private pagination state."
   (let ((by-id (make-hash-table :test #'equal))
         result)
     (dolist (item (append owned subscribed member))
-      (let* ((id (chirp-get item "id"))
+      (let* ((id (map-nested-elt item '(id)))
              (existing (and id (gethash id by-id))))
         (if existing
-            (setcdr (assoc-string "sources" existing t)
+            (setcdr (assq 'sources existing)
                     (delete-dups
-                     (append (chirp-get existing "sources")
-                             (chirp-get item "sources"))))
+                     (append (map-nested-elt existing '(sources))
+                             (map-nested-elt item '(sources)))))
           (when id
             (puthash id item by-id)
             (push item result)))))
@@ -2444,7 +2452,7 @@ CURSOR, PAGE, and ACCUMULATED carry private pagination state."
      'list
      `(("listId" . ,list-id)
        ("count" . ,limit))
-     '(("data" "list" "tweets_timeline" "timeline"))
+     '((data list tweets_timeline timeline))
      limit callback
      :errback errback
      :label "the list timeline")))
@@ -2453,10 +2461,13 @@ CURSOR, PAGE, and ACCUMULATED carry private pagination state."
 
 (defun chirp-backend--tweet-matches-id-p (tweet tweet-id)
   "Return non-nil when TWEET or its raw wrapper identifies TWEET-ID."
-  (or (equal (plist-get tweet :id) tweet-id)
-      (equal (chirp-first-nonblank
-              (chirp-get (plist-get tweet :raw) "rest_id" "id_str" "id"))
-             tweet-id)))
+  (pcase-let (((map :id :raw) tweet))
+    (or (equal id tweet-id)
+        (and (chirp-object-p raw)
+             (equal (chirp-first-nonblank
+                     (alist-get 'rest_id raw
+                                (alist-get 'id_str raw (alist-get 'id raw))))
+                    tweet-id)))))
 
 (defun chirp-backend-thread (tweet-id callback &optional errback)
   "Fetch TWEET-ID thread data and call CALLBACK, or ERRBACK on failure."
@@ -2476,8 +2487,8 @@ CURSOR, PAGE, and ACCUMULATED carry private pagination state."
           ("withQuickPromoteEligibilityTweetFields" . :json-false)
           ("withBirdwatchNotes" . :json-false)
           ("withVoice" . :json-false))
-        '(("data" "tweetResult" "result" "timeline")
-          ("data" "threaded_conversation_with_injections_v2"))
+        '((data tweetResult result timeline)
+          (data threaded_conversation_with_injections_v2))
         limit
         (lambda (tweets envelope)
           (if-let* ((focus (cl-find-if
@@ -2546,8 +2557,7 @@ CURSOR, PAGE, and ACCUMULATED carry private pagination state."
         (let ((tweet
                (chirp-apply-tweet-state-overrides
                 (chirp--tweet-from-x
-                 (chirp-get-in
-                  payload '("data" "tweetResult" "result"))))))
+                 (map-nested-elt payload '(data tweetResult result))))))
           (if (and tweet
                    (or (plist-get tweet :article-title)
                        (plist-get tweet :article-text)))
@@ -2569,7 +2579,7 @@ CURSOR, PAGE, and ACCUMULATED carry private pagination state."
           ("withSafetyModeUserFields" . t))
         (lambda (payload)
           (let ((user (chirp--user-from-x
-                       (chirp-get-in payload '("data" "user" "result")))))
+                       (map-nested-elt payload '(data user result)))))
             (if user
                 (funcall success user nil)
               (funcall error (format "X did not return profile @%s"
@@ -2627,8 +2637,7 @@ MAX-RESULTS limits the response, and CURSOR bypasses the initial-page cache."
                            ("querySource" . "typed_query")
                            ("product" . "Latest"))
                          (when cursor `(("cursor" . ,cursor))))
-                 '(("data" "search_by_raw_query"
-                    "search_timeline" "timeline"))
+                 '((data search_by_raw_query search_timeline timeline))
                  limit success
                  :errback error
                  :label "the replies timeline")
@@ -2717,13 +2726,14 @@ ERRBACK receives transport or response failures."
                        (_ (error "Unknown user collection: %S" kind))))
              (lambda (payload)
                (let* ((users (chirp-backend--collect-users
-                              (chirp-get payload "users")))
-                      (cursor (chirp-get payload
-                                         "next_cursor_str" "next_cursor")))
+                              (map-nested-elt payload '(users))))
+                      (cursor (when (chirp-object-p payload)
+                                (alist-get 'next_cursor_str payload
+                                           (alist-get 'next_cursor payload)))))
                  (funcall
                   success users
                   (and cursor
-                       `(("pagination" . (("nextCursor" . ,cursor))))))))
+                       `((pagination . ((nextCursor . ,cursor))))))))
              :query `(("user_id" . ,user-id)
                       ("count" . ,chirp-default-max-results)
                       ("cursor" . "-1")

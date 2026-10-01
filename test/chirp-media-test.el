@@ -446,15 +446,14 @@ rerender and creates a CPU loop."
   "Structured media payloads should keep preview URLs and variant lists."
   (let* ((media
           (chirp--media-item-from-x
-           '(("type" . "video")
-             ("url" . "https://high.mp4")
-             ("previewUrl" . "https://preview.jpg")
-             ("altText" . "A demo video")
-             ("variants"
-              . ((("url" . "https://high.mp4")
-                  ("bitrate" . 2176000))
-                 (("url" . "https://low.mp4")
-                  ("bitrate" . 832000))))))))
+           '((type . "video")
+             (url . "https://high.mp4")
+             (previewUrl . "https://preview.jpg")
+             (altText . "A demo video")
+             (variants . (((url . "https://high.mp4")
+                 (bitrate . 2176000))
+                ((url . "https://low.mp4")
+                 (bitrate . 832000))))))))
     (should (equal (plist-get media :preview-url) "https://preview.jpg"))
     (should (equal (plist-get media :alt) "A demo video"))
     (should (equal (mapcar (lambda (variant) (plist-get variant :url))
@@ -463,34 +462,33 @@ rerender and creates a CPU loop."
 
 (defun chirp-test--card-binding (key value)
   "Return one GraphQL-style card binding for KEY and VALUE."
-  (list (cons "key" key)
-        (cons "value" value)))
+  (list (cons 'key key)
+        (cons 'value value)))
 
 (defun chirp-test--card-object (name bindings)
   "Return a tweet card object named NAME with BINDINGS."
-  `(("legacy" . (("name" . ,name)
-                 ("binding_values" . ,bindings)))))
+  `((legacy . ((name . ,name)
+                 (binding_values . ,bindings)))))
 
 (ert-deftest chirp-tweet-from-x-reads-summary-link-card ()
   "Website cards should come from X binding_values, not a later HTML fetch."
   (let* ((bindings
           (list
            (chirp-test--card-binding
-            "title" '(("string_value" . "GitHub - antirez/h3.c")))
+            "title" '((string_value . "GitHub - antirez/h3.c")))
            (chirp-test--card-binding
             "description"
-            '(("string_value" . "MiniMax H3 inference engine for Mac computers.")))
+            '((string_value . "MiniMax H3 inference engine for Mac computers.")))
            (chirp-test--card-binding
-            "vanity_url" '(("string_value" . "github.com")))
+            "vanity_url" '((string_value . "github.com")))
            (chirp-test--card-binding
             "thumbnail_image"
-            '(("image_value"
-               . (("url" . "https://pbs.twimg.com/card_img/demo.jpg")))))))
+            '((image_value . ((url . "https://pbs.twimg.com/card_img/demo.jpg")))))))
          (tweet
           (chirp--tweet-from-x
-           (list (cons "rest_id" "2086764219433660463")
-                 (cons "urls" (list "https://github.com/antirez/h3.c"))
-                 (cons "card" (chirp-test--card-object "summary" bindings)))))
+           (list (cons 'rest_id "2086764219433660463")
+                 (cons 'urls (list "https://github.com/antirez/h3.c"))
+                 (cons 'card (chirp-test--card-object "summary" bindings)))))
          (card (plist-get tweet :link-card)))
     (should (equal (plist-get card :title) "GitHub - antirez/h3.c"))
     (should (equal (plist-get card :description)
@@ -504,14 +502,13 @@ rerender and creates a CPU loop."
   "Poll cards should not be rendered as website previews."
   (let ((tweet
          (chirp--tweet-from-x
-          (list (cons "id" "1")
-                (cons "text" "poll")
-                (cons "card"
-                      (chirp-test--card-object
-                       "poll2choice_text_only"
-                       (list (chirp-test--card-binding
-                              "title"
-                              '(("string_value" . "A or B"))))))))))
+          (list (cons 'id "1")
+                (cons 'text "poll")
+                (cons 'card (chirp-test--card-object
+                 "poll2choice_text_only"
+                 (list (chirp-test--card-binding
+                        "title"
+                        '((string_value . "A or B"))))))))))
     (should-not (plist-get tweet :link-card))))
 
 (ert-deftest chirp-media-prefetch-tweet-prefetches-x-link-card-image ()
@@ -548,13 +545,10 @@ rerender and creates a CPU loop."
            "\"url\":\"https://example.com/video.mp4\"}]}}}}"))
          (tweet
           (chirp--tweet-from-x
-           `(("rest_id" . "1")
-             ("legacy" . (("full_text" . "video")))
-             ("card" .
-              (("legacy" .
-                (("binding_values" .
-                  ((("key" . "unified_card")
-                    ("value" . (("string_value" . ,card)))))))))))))
+           `((rest_id . "1")
+             (legacy . ((full_text . "video")))
+             (card . ((legacy . ((binding_values . (((key . "unified_card")
+               (value . ((string_value . ,card)))))))))))))
          (media (car (plist-get tweet :media))))
     (should (equal (plist-get media :type) "video"))
     (should (equal (chirp-media-playback-url media)

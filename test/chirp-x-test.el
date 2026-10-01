@@ -12,6 +12,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'json)
+(require 'map)
 (require 'url-http)
 (require 'url-util)
 (require 'chirp-x)
@@ -449,7 +450,7 @@
                (lambda (_url _method callback &rest options)
                  (setq requests (1+ requests))
                  (if (= requests 2)
-                     (funcall callback '(("ok" . t)))
+                     (funcall callback '((ok . t)))
                    (funcall (plist-get options :errback) (pop responses)))
                  'request))
               ((symbol-function 'chirp-x--refresh-query-ids)
@@ -590,7 +591,7 @@
                     callback))))
         (chirp-backend-translate
          "123" "zh" (lambda (data _envelope)
-                      (setq received (chirp-get data "translation")))
+                      (setq received (map-elt data 'translation)))
          (lambda (message) (ert-fail message))))
       (should (equal received
                      "  Record & Tuple\n<T> \"引号\" '单引号' & 🎉 &lt;  ")))))
@@ -1627,16 +1628,16 @@
                      (lambda (_url _method callback &rest _options)
                        (setq request-count (1+ request-count))
                        (pcase request-count
-                         (1 (funcall callback '(("media_id_string" . "7"))))
+                         (1 (funcall callback '((media_id_string . "7"))))
                          (2 (funcall callback
                                      (make-hash-table :test #'equal)))
                          (3 (funcall
                              callback
-                             '(("processing_info" .
-                                (("state" . "failed")
-                                 ("error" . (("code" . 3)
-                                             ("message" .
-                                              "Invalid media"))))))))))))
+                             '((processing_info .
+                                ((state . "failed")
+                                 (error . ((code . 3)
+                                           (message .
+                                            "Invalid media"))))))))))))
             (chirp-x-upload-media
              file (lambda (_media-id)
                     (setq success t))
@@ -1662,14 +1663,14 @@
                      (lambda (_url _method callback &rest _options)
                        (setq request-count (1+ request-count))
                        (pcase request-count
-                         (1 (funcall callback '(("media_id_string" . "7"))))
+                         (1 (funcall callback '((media_id_string . "7"))))
                          (2 (funcall callback
                                      (make-hash-table :test #'equal)))
                          (3 (funcall
                              callback
-                             '(("processing_info" .
-                                (("state" . "pending")
-                                 ("check_after_secs" . 30))))))))))
+                             '((processing_info .
+                                ((state . "pending")
+                                 (check_after_secs . 30))))))))))
             (chirp-x-upload-media
              file #'ignore
              :errback (lambda (message)
@@ -1711,14 +1712,14 @@
                      (lambda (_url _method callback &rest _options)
                        (setq request-count (1+ request-count))
                        (pcase request-count
-                         (1 (funcall callback '(("media_id_string" . "7"))))
+                         (1 (funcall callback '((media_id_string . "7"))))
                          (2 (funcall callback
                                      (make-hash-table :test #'equal)))
                          (_ (funcall
                              callback
-                             '(("processing_info" .
-                                (("state" . "pending")
-                                 ("check_after_secs" . 0))))))))))
+                             '((processing_info .
+                                ((state . "pending")
+                                 (check_after_secs . 0))))))))))
             (chirp-x-upload-media
              file #'ignore
              :errback (lambda (message)

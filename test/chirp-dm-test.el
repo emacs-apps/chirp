@@ -241,7 +241,7 @@
                     (push 'history calls)
                     (push (plist-get options :owner) owners)
                     (funcall callback (list key-event)
-                             '(("pagination" ("complete" . t))))
+                             '((pagination (complete . t))))
                     nil))
                  ((symbol-function 'chirp-backend-dm-signing-keys)
                   (lambda (_user-ids callback &rest options)
@@ -1007,8 +1007,8 @@
                                                                "10"
                                                                "older")
                               current)
-                             '(("pagination" ("complete" . t))
-                               ("encodedKeyEvents"
+                             '((pagination (complete . t))
+                               (encodedKeyEvents
                                 "recovery-key-event")))
                     (should
                      (equal
@@ -1069,7 +1069,7 @@
                             (chirp-dm-test--normalized-event "10" "10"
                                                              "older")
                             current)
-                           '(("pagination" ("complete" . t))))
+                           '((pagination (complete . t))))
                   (appkit-loop-run-pass (appkit-surface-loop view))
                   (should (appkit-chat-history-older-loaded-p))
                   (should (= request-count 1)))))))
@@ -1133,8 +1133,8 @@
                   (should
                    (equal (appkit-chat-history-window-first-key) "20")))
                 (funcall bridge-callback (list intermediate fresh)
-                         '(("pagination"
-                            ("nextCursor" :sequence-id "25"
+                         '((pagination
+                            (nextCursor :sequence-id "25"
                              :key-version "0"))))
                 (should
                  (equal bridge-cursors
@@ -1147,7 +1147,7 @@
                   '("20")))
                 (funcall bridge-callback
                          (list oldest current intermediate)
-                         '(("pagination" ("complete" . t))))
+                         '((pagination (complete . t))))
                 (should
                  (equal
                   (mapcar (lambda (event) (plist-get event :id))
@@ -1201,15 +1201,15 @@
                        (list
                         (chirp-dm-test--normalized-event "29" "29"
                                                          "gap"))
-                       '(("pagination"
-                          ("nextCursor" :sequence-id "25" :key-version
+                       '((pagination
+                          (nextCursor :sequence-id "25" :key-version
                            "0"))))
               (funcall bridge-callback
                        (list
                         (chirp-dm-test--normalized-event "28" "28"
                                                          "gap"))
-                       '(("pagination"
-                          ("nextCursor" :sequence-id "30" :key-version
+                       '((pagination
+                          (nextCursor :sequence-id "30" :key-version
                            "0"))))
               (let*
                   ((view
@@ -1364,7 +1364,7 @@
                   (should-not canceled)
                   (appkit-retire-handle bridge-handle)
                   (funcall bridge (list old fresh)
-                           '(("pagination" ("complete" . t)))))
+                           '((pagination (complete . t)))))
                 (chirp-dm-test--drain view)
                 (with-current-buffer buffer
                   (should-not (appkit-chat-history-loading-p))

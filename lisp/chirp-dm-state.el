@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'map)
 (require 'subr-x)
 (require 'appkit-core)
 (require 'appkit-presentation)
@@ -20,9 +21,9 @@
 
 (defun chirp-dm-state--event-id (event)
   "Return normalized EVENT's stable identity."
-  (or (plist-get event :sequence-id)
-      (plist-get event :id)
-      (error "XChat event has no stable identity")))
+  (map-let (:sequence-id :id) event
+    (or sequence-id id
+        (error "XChat event has no stable identity"))))
 
 (defun chirp-dm-state-merge-events (current fetched)
   "Merge ordered XChat event lists CURRENT and FETCHED by stable identity.
@@ -58,9 +59,8 @@ not replaced by a later encrypted snapshot."
 
 (defun chirp-dm-state--apply-reaction-event (target event)
   "Apply one normalized reaction EVENT to its TARGET message."
-  (let* ((emoji (plist-get event :text))
-         (sender-id (plist-get event :sender-id))
-         (reactions (plist-get target :reactions))
+  (pcase-let* (((map (:text emoji) :sender-id :content-kind) event)
+              (reactions (map-elt target :reactions))
          (reaction
           (cl-find emoji reactions
                    :key (lambda (item) (plist-get item :emoji))
@@ -70,14 +70,14 @@ not replaced by a later encrypted snapshot."
       (unless reaction
         (setq reaction (list :emoji emoji :count 0 :senders nil)
               reactions (append reactions (list reaction))))
-      (if (eq (plist-get event :content-kind) 'reaction)
+      (if (eq content-kind 'reaction)
           (cl-pushnew sender-id (plist-get reaction :senders) :test #'equal)
         (setf (plist-get reaction :senders)
-              (delete sender-id (plist-get reaction :senders))))
-      (if (plist-get reaction :senders)
-          (setf (plist-get reaction :count)
-                (length (plist-get reaction :senders)))
-        (setq reactions (delq reaction reactions)))
+              (delete sender-id (map-elt reaction :senders))))
+      (let ((senders (map-elt reaction :senders)))
+        (if senders
+            (setf (plist-get reaction :count) (length senders))
+          (setq reactions (delq reaction reactions))))
       (setf (plist-get target :reactions) reactions))))
 
 (defun chirp-dm-state--refresh-reactions (events)
@@ -89,10 +89,9 @@ not replaced by a later encrypted snapshot."
           events)))
     (dolist (event events)
       (unless (chirp-dm-state--reaction-event-p event)
-        (dolist (id (delete-dups
-                     (delq nil (list (plist-get event :sequence-id)
-                                     (plist-get event :id)))))
-          (puthash id event targets))))
+        (map-let (:sequence-id :id) event
+          (dolist (identity (delete-dups (delq nil (list sequence-id id))))
+            (puthash identity event targets)))))
     (dolist (event events)
       (when-let* (((chirp-dm-state--reaction-event-p event))
                   (target-id (plist-get event :target-message-id))
@@ -188,10 +187,9 @@ Return its canonical conversation, or nil if metadata has not been loaded."
 
 (defun chirp-dm-state--acquire-preview (table snapshot)
   "Acquire inbox SNAPSHOT in TABLE without joining disjoint timeline fragments."
-  (let* ((id (plist-get snapshot :id))
-         (conversation (gethash id table))
-         (current (plist-get conversation :events))
-         (fetched (plist-get snapshot :events)))
+  (pcase-let* (((map :id (:events fetched)) snapshot)
+               (conversation (gethash id table))
+               (current (map-elt conversation :events)))
     (if (or (null conversation) (null current))
         (chirp-dm-state--acquire table snapshot)
       ;; Inbox metadata must not replace an open timeline's older-page cursor.
@@ -205,17 +203,18 @@ Return its canonical conversation, or nil if metadata has not been loaded."
           (chirp-dm-state--set-events
            conversation (chirp-dm-state-merge-events current fetched))
         ;; A disjoint bounded preview is not evidence of timeline continuity.
-        (let ((event (plist-get snapshot :latest-event))
-              (previous (plist-get conversation :inbox-preview)))
+        (pcase-let* (((map :latest-event :preview :updated-at-msec) snapshot)
+                     (previous (map-elt conversation :inbox-preview))
+                     ((map :kind :sequence-id :sender-id) latest-event))
           (when (chirp-xchat-event-before-p
-                 (plist-get previous :latest-event) event)
+                 (map-elt previous :latest-event) latest-event)
             (setf (plist-get conversation :inbox-preview)
-                  (list :preview (copy-tree (plist-get snapshot :preview))
-                        :updated-at-msec (plist-get snapshot :updated-at-msec)
+                  (list :preview (copy-tree preview)
+                        :updated-at-msec updated-at-msec
                         :latest-event
-                        (list :kind (plist-get event :kind)
-                              :sequence-id (plist-get event :sequence-id)
-                              :sender-id (plist-get event :sender-id)))))))
+                        (list :kind kind
+                              :sequence-id sequence-id
+                              :sender-id sender-id))))))
       conversation)))
 
 (defun chirp-dm-state-acquire-preview (snapshot)
@@ -258,15 +257,16 @@ Only Surface reducers change their own local state."
   (when (appkit-app-live-p chirp--app)
     (dolist (view (appkit-app--surface-snapshot chirp--app))
       (when (appkit-surface-live-p view)
-        (let ((state (appkit-surface-model view)))
-          (pcase (plist-get state :type)
+        (pcase-let* ((state (appkit-surface-model view))
+                     ((map :type (:conversation current) :items) state))
+          (pcase type
             ('dm-conversation
-             (when (eq (plist-get state :conversation) conversation)
+             (when (eq current conversation)
                (appkit-surface-post
                 view (list 'chirp-dm-conversation 'canonical-changed
                            view conversation seed-key decrypt-p))))
             ('dm-inbox
-             (when (or promote-p (memq conversation (plist-get state :items)))
+             (when (or promote-p (memq conversation items))
                (appkit-surface-post
                 view (list 'chirp-dm-inbox 'canonical-changed
                            state conversation promote-p))))))))))

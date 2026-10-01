@@ -24,6 +24,8 @@
 (declare-function chirp-dm-load-more-inbox "chirp-dm-inbox" ())
 
 (require 'cl-lib)
+(require 'map)
+(require 'let-alist)
 (require 'subr-x)
 (require 'browse-url)
 (require 'json)
@@ -61,6 +63,14 @@
 (declare-function chirp-media-open-external-at-point "chirp-media-view" ())
 (declare-function chirp-media-download-at-point "chirp-media" ())
 (declare-function chirp-media-prefetch-tweet "chirp-media" (tweet buffer))
+(declare-function chirp-media-view--update "chirp-media-view"
+                  (context model message))
+(declare-function chirp-dm-state--app-update "chirp-dm-state"
+                  (context session message))
+(declare-function chirp-dm-inbox--update "chirp-dm-inbox"
+                  (context model message))
+(declare-function chirp-dm-conversation--update "chirp-dm-conversation"
+                  (context model message))
 (declare-function chirp-xchat-native-session-destroy
                   "chirp-xchat-native-module" (session))
 
@@ -1041,7 +1051,7 @@ revisited later."
         (browse-url url)
       (user-error "No URL available at point"))))
 
-;;; Data Access
+;;; Payload Normalization
 
 (defun chirp-object-p (value)
   "Return non-nil when VALUE looks like an alist-style JSON object."
@@ -1051,29 +1061,6 @@ revisited later."
              (and (consp head)
                   (or (stringp (car head))
                       (symbolp (car head))))))))
-
-(defun chirp-get (object &rest keys)
-  "Return the first matching value in OBJECT for KEYS."
-  (when (chirp-object-p object)
-    (cl-loop for key in keys
-             for cell = (assoc-string key object t)
-             when cell
-             return (cdr cell))))
-
-(defun chirp-get-in (object path)
-  "Return the value at PATH inside OBJECT."
-  (let ((value object))
-    (catch 'missing
-      (dolist (key path value)
-        (setq value
-              (cond
-               ((chirp-object-p value)
-                (let ((cell (assoc-string key value t)))
-                  (if cell
-                      (cdr cell)
-                    (throw 'missing nil))))
-               (t
-                (throw 'missing nil))))))))
 
 (defun chirp-boolean-value (value)
   "Normalize VALUE into a Lisp boolean."
@@ -1126,8 +1113,12 @@ revisited later."
 (defun chirp--tweet-display-text-range (object legacy)
   "Return OBJECT or LEGACY's display text range, or nil."
   (chirp--display-text-range
-   (or (chirp-get object "display_text_range" "displayTextRange")
-       (chirp-get legacy "display_text_range" "displayTextRange"))))
+   (or (when (chirp-object-p object)
+     (cdr (or (assq 'display_text_range object)
+              (assq 'displayTextRange object))))
+       (when (chirp-object-p legacy)
+         (cdr (or (assq 'display_text_range legacy)
+                  (assq 'displayTextRange legacy)))))))
 
 ;;;; URLs
 
@@ -1146,12 +1137,12 @@ revisited later."
         text)))
    ((chirp-object-p value)
     (chirp-first-nonblank
-     (chirp-get value
-                "expanded_url"
-                "expandedUrl"
-                "expanded"
-                "url"
-                "shortUrl")))
+     (when (chirp-object-p value)
+       (cdr (or (assq 'expanded_url value)
+                (assq 'expandedUrl value)
+                (assq 'expanded value)
+                (assq 'url value)
+                (assq 'shortUrl value))))))
    (t nil)))
 
 (defun chirp--urls-from-x (&rest values)
@@ -1169,23 +1160,23 @@ revisited later."
 (defun chirp-extract-tweet-urls (object &optional legacy)
   "Extract expanded URLs for tweet OBJECT and optional LEGACY payload."
   (chirp--urls-from-x
-   (chirp-get object "urls")
-   (chirp-get-in object '("note_tweet" "note_tweet_results" "result" "entity_set" "urls"))
-   (chirp-get-in object '("note_tweet" "entity_set" "urls"))
-   (chirp-get-in object '("entities" "urls"))
+   (map-nested-elt object '(urls))
+   (map-nested-elt object '(note_tweet note_tweet_results result entity_set urls))
+   (map-nested-elt object '(note_tweet entity_set urls))
+   (map-nested-elt object '(entities urls))
    (and legacy
-        (chirp-get-in legacy '("entities" "urls")))))
+        (map-nested-elt legacy '(entities urls)))))
 
 ;;;; Text Entities
 
 (defun chirp--entity-indices (value)
   "Return VALUE's code-point (START . END) indices, or nil."
   (chirp--display-text-range
-   (or (chirp-get value "indices")
-       (and (integerp (chirp-get value "from_index"))
-            (integerp (chirp-get value "to_index"))
-            (vector (chirp-get value "from_index")
-                    (chirp-get value "to_index"))))))
+   (or (map-nested-elt value '(indices))
+       (and (integerp (map-nested-elt value '(from_index)))
+            (integerp (map-nested-elt value '(to_index)))
+            (vector (map-nested-elt value '(from_index))
+                    (map-nested-elt value '(to_index)))))))
 
 (defun chirp--mention-from-x (value)
   "Return one Chirp mention decoded from X VALUE, or nil."
@@ -1196,14 +1187,20 @@ revisited later."
         (list :handle handle :name handle))))
    ((chirp-object-p value)
     (when-let* ((handle (chirp-first-nonblank
-                         (chirp-get value "screen_name" "screenName"
-                                    "username" "handle")
-                         (chirp-get-in value '("core" "screen_name")))))
+                         (when (chirp-object-p value)
+                           (cdr (or (assq 'screen_name value)
+                                    (assq 'screenName value)
+                                    (assq 'username value)
+                                    (assq 'handle value))))
+                         (map-nested-elt value '(core screen_name)))))
       (setq handle (string-remove-prefix "@" handle))
       (list :handle handle
             :name (or (chirp-first-nonblank
-                       (chirp-get value "name" "display_name" "displayName")
-                       (chirp-get-in value '("core" "name")))
+                       (when (chirp-object-p value)
+                         (cdr (or (assq 'name value)
+                                  (assq 'display_name value)
+                                  (assq 'displayName value))))
+                       (map-nested-elt value '(core name)))
                       handle))))
    (t nil)))
 
@@ -1215,7 +1212,11 @@ revisited later."
            (string-remove-prefix "#" (string-trim value)))
           ((chirp-object-p value)
            (chirp-first-nonblank
-            (chirp-get value "text" "tag" "hashtag" "cashtag")))
+            (when (chirp-object-p value)
+              (cdr (or (assq 'text value)
+                       (assq 'tag value)
+                       (assq 'hashtag value)
+                       (assq 'cashtag value))))))
           (t nil))))
     (and tag
          (not (string-empty-p tag))
@@ -1244,21 +1245,23 @@ Indices are Unicode code-point offsets into the tweet text."
        (list :kind kind
              :url (chirp--url-from-x value)
              :display (chirp-first-nonblank
-                       (chirp-get value "display_url" "displayUrl")
-                       (chirp-get value "display"))
+                       (when (chirp-object-p value)
+                         (cdr (or (assq 'display_url value)
+                                  (assq 'displayUrl value))))
+                       (map-nested-elt value '(display)))
              :start (car indices)
              :end (cdr indices)))
       ('timestamp
        (list :kind 'timestamp
-             :tag (chirp-first-nonblank (chirp-get value "text"))
-             :seconds (chirp-get value "seconds")
+             :tag (chirp-first-nonblank (map-nested-elt value '(text)))
+             :seconds (map-nested-elt value '(seconds))
              :start (car indices)
              :end (cdr indices))))))
 
 (defun chirp--entities-of (entities field kind)
   "Return normalized KIND entities from ENTITIES field FIELD."
   (let (items)
-    (dolist (item (chirp-get entities field) (nreverse items))
+    (dolist (item (map-elt entities field) (nreverse items))
       (when-let* ((entity (chirp--text-entity-from-x kind item)))
         (push entity items)))))
 
@@ -1269,20 +1272,20 @@ This is the same set `tweetTextParts` walks: mentions, hashtags, cashtags,
 URLs, media, and timestamps.  Each item keeps its code-point `indices'."
   (when (chirp-object-p entities)
     (append
-     (chirp--entities-of entities "user_mentions" 'mention)
-     (chirp--entities-of entities "userMentions" 'mention)
-     (chirp--entities-of entities "hashtags" 'hashtag)
-     (chirp--entities-of entities "symbols" 'cashtag)
-     (chirp--entities-of entities "urls" 'url)
-     (chirp--entities-of entities "media" 'media)
-     (chirp--entities-of entities "timestamps" 'timestamp))))
+     (chirp--entities-of entities 'user_mentions 'mention)
+     (chirp--entities-of entities 'userMentions 'mention)
+     (chirp--entities-of entities 'hashtags 'hashtag)
+     (chirp--entities-of entities 'symbols 'cashtag)
+     (chirp--entities-of entities 'urls 'url)
+     (chirp--entities-of entities 'media 'media)
+     (chirp--entities-of entities 'timestamps 'timestamp))))
 
 ;;;; Visible Text
 
 (defun chirp--note-tweet-result (object)
   "Return OBJECT's note-tweet result, or nil."
-  (or (chirp-get-in object '("note_tweet" "note_tweet_results" "result"))
-      (chirp-get object "note_tweet")))
+  (or (map-nested-elt object '(note_tweet note_tweet_results result))
+      (map-nested-elt object '(note_tweet))))
 
 (defun chirp--tweet-source-text-and-entities (object legacy)
   "Return a plist describing OBJECT's visible text source.
@@ -1292,21 +1295,25 @@ LEGACY supplies fallback tweet text and entities.  The plist contains
 `entity_set'.  Ordinary tweets use `full_text' and the matching `entities'
 object.  Mixing those sources would apply the wrong code-point indices."
   (let* ((note (chirp--note-tweet-result object))
-         (note-text (and note (chirp-first-nonblank (chirp-get note "text"))))
+         (note-text (and note (chirp-first-nonblank (map-nested-elt note '(text)))))
          (legacy-text (chirp-first-nonblank
-                       (chirp-get object "full_text" "text")
-                       (chirp-get legacy "full_text" "text"))))
+                       (when (chirp-object-p object)
+                         (cdr (or (assq 'full_text object)
+                                  (assq 'text object))))
+                       (when (chirp-object-p legacy)
+                         (cdr (or (assq 'full_text legacy)
+                                  (assq 'text legacy)))))))
     (if (and (stringp note-text)
              (not (string-empty-p note-text)))
         (list :text note-text
               :entities (chirp-extract-text-entities
-                         (or (chirp-get note "entity_set")
-                             (chirp-get note "entitySet")))
+                         (or (map-nested-elt note '(entity_set))
+                             (map-nested-elt note '(entitySet))))
               :note-p t)
       (list :text legacy-text
             :entities (chirp-extract-text-entities
-                       (or (chirp-get object "entities")
-                           (chirp-get legacy "entities")))))))
+                       (or (map-nested-elt object '(entities))
+                           (map-nested-elt legacy '(entities))))))))
 
 (defun chirp--leading-reply-mention-length (text)
   "Return the character length of a leading reply-mention run in TEXT."
@@ -1667,9 +1674,10 @@ When MAX-COUNT is non-nil, return at most that many images."
   "Return a quoted tweet decoded from X VALUE, or nil."
   (when-let* ((quoted
                (and (chirp-object-p value)
-                    (or (chirp-get value "quotedTweet" "quoted_tweet")
-                        (chirp-get-in
-                         value '("quoted_status_result" "result"))))))
+                    (or (when (chirp-object-p value)
+                      (cdr (or (assq 'quotedTweet value)
+                               (assq 'quoted_tweet value))))
+                        (map-nested-elt value '(quoted_status_result result))))))
     (chirp--tweet-from-x quoted)))
 
 (defun chirp-quoted-tweet-enriched-p (tweet)
@@ -1753,7 +1761,7 @@ When MAX-COUNT is non-nil, return at most that many images."
   "Return the first scalar count in VALUES or their `count' members."
   (cl-loop for value in values
            for count = (if (chirp-object-p value)
-                           (chirp-get value "count")
+                           (map-nested-elt value '(count))
                          value)
            when (or (numberp count)
                     (and (stringp count)
@@ -2018,75 +2026,87 @@ Retweets use their wrapper ID so the wrapper and original remain distinct."
   "Return non-nil when OBJECT resembles a user payload."
   (and (chirp-object-p object)
        (or (chirp-first-nonblank
-            (chirp-get object "screen_name")
-            (chirp-get object "screenName")
-            (chirp-get object "username")
-            (chirp-get object "handle")
-            (chirp-get-in object '("core" "screen_name"))
-            (chirp-get-in object '("legacy" "screen_name")))
-           (chirp-get object "rest_id" "id"))
+            (map-nested-elt object '(screen_name))
+            (map-nested-elt object '(screenName))
+            (map-nested-elt object '(username))
+            (map-nested-elt object '(handle))
+            (map-nested-elt object '(core screen_name))
+            (map-nested-elt object '(legacy screen_name)))
+           (when (chirp-object-p object)
+             (cdr (or (assq 'rest_id object)
+                      (assq 'id object)))))
        (or (chirp-first-nonblank
-            (chirp-get object "name")
-            (chirp-get object "display_name")
-            (chirp-get object "description")
-            (chirp-get object "bio")
-            (chirp-get-in object '("core" "name"))
-            (chirp-get-in object '("legacy" "name"))
-            (chirp-get-in object '("legacy" "description")))
-           (chirp-get object "followers_count" "friends_count" "statuses_count")
-           (chirp-get object "followers" "following" "tweets")
-           (chirp-get-in object '("legacy" "followers_count"))
-           (chirp-get-in object '("legacy" "friends_count")))))
+            (map-nested-elt object '(name))
+            (map-nested-elt object '(display_name))
+            (map-nested-elt object '(description))
+            (map-nested-elt object '(bio))
+            (map-nested-elt object '(core name))
+            (map-nested-elt object '(legacy name))
+            (map-nested-elt object '(legacy description)))
+           (when (chirp-object-p object)
+             (cdr (or (assq 'followers_count object)
+                      (assq 'friends_count object)
+                      (assq 'statuses_count object))))
+           (when (chirp-object-p object)
+             (cdr (or (assq 'followers object)
+                      (assq 'following object)
+                      (assq 'tweets object))))
+           (map-nested-elt object '(legacy followers_count))
+           (map-nested-elt object '(legacy friends_count)))))
 
 (defun chirp--tweet-result (object)
   "Return the inner tweet from visibility wrapper OBJECT."
-  (or (chirp-get object "tweet") object))
+  (or (map-nested-elt object '(tweet)) object))
 
 (defun chirp--tweet-reply-control-mode (object)
   "Return the reply-control mode carried by tweet OBJECT, or nil."
   (let* ((tweet (chirp--tweet-result object))
-         (legacy (chirp-get tweet "legacy"))
-         (control (or (chirp-get legacy "conversation_control"
-                                 "conversationControl")
-                      (chirp-get tweet "conversation_control"
-                                 "conversationControl")))
+         (legacy (map-nested-elt tweet '(legacy)))
+         (control (or (when (chirp-object-p legacy)
+           (cdr (or (assq 'conversation_control legacy)
+                    (assq 'conversationControl legacy))))
+                      (when (chirp-object-p tweet)
+                        (cdr (or (assq 'conversation_control tweet)
+                                 (assq 'conversationControl tweet))))))
          (mode (and (chirp-object-p control)
                     (chirp-first-nonblank
-                     (chirp-get control "mode" "type")))))
+                     (when (chirp-object-p control)
+                       (cdr (or (assq 'mode control)
+                                (assq 'type control))))))))
     (and mode (format "%s" mode))))
 
 (defun chirp--tweet-reply-limited-p (object)
   "Return non-nil when OBJECT explicitly limits the viewer's reply action."
-  (let ((actions (or (chirp-get-in object
-                                   '("limitedActionResults" "limited_actions"))
-                     (chirp-get-in object
-                                   '("limited_action_results" "limited_actions")))))
+  (let ((actions (or (map-nested-elt object '(limitedActionResults limited_actions))
+                     (map-nested-elt object '(limited_action_results limited_actions)))))
     (or (and (listp actions)
              (cl-some (lambda (action)
                         (or (equal action "Reply")
-                            (equal (chirp-get action "action") "Reply")))
+                            (equal (map-nested-elt action '(action)) "Reply")))
                       actions))
-        (equal (chirp-get (chirp-get object "legacy") "limited_actions")
+        (equal (map-nested-elt object '(legacy limited_actions))
                "limited_replies"))))
 
 (defun chirp--tweet-edit-metadata (object)
   "Return normalized edit-history metadata carried by tweet OBJECT."
   (let* ((tweet (chirp--tweet-result object))
-         (control (chirp-get tweet "edit_control" "editControl"))
+         (control (when (chirp-object-p tweet)
+           (cdr (or (assq 'edit_control tweet)
+                    (assq 'editControl tweet)))))
          (initial-control
           (and (chirp-object-p control)
-               (chirp-get control
-                          "edit_control_initial"
-                          "editControlInitial")))
+               (when (chirp-object-p control)
+                 (cdr (or (assq 'edit_control_initial control)
+                          (assq 'editControlInitial control))))))
          (raw-ids
           (or (and (chirp-object-p initial-control)
-                   (chirp-get initial-control
-                              "edit_tweet_ids"
-                              "editTweetIds"))
+                   (when (chirp-object-p initial-control)
+                     (cdr (or (assq 'edit_tweet_ids initial-control)
+                              (assq 'editTweetIds initial-control)))))
               (and (chirp-object-p control)
-                   (chirp-get control
-                              "edit_tweet_ids"
-                              "editTweetIds"))))
+                   (when (chirp-object-p control)
+                     (cdr (or (assq 'edit_tweet_ids control)
+                              (assq 'editTweetIds control)))))))
          (ids
           (delete-dups
            (cl-loop for id in raw-ids
@@ -2096,9 +2116,9 @@ Retweets use their wrapper ID so the wrapper and original remain distinct."
          (initial-id
           (or (and (chirp-object-p control)
                    (chirp-first-nonblank
-                    (chirp-get control
-                               "initial_tweet_id"
-                               "initialTweetId")))
+                    (when (chirp-object-p control)
+                      (cdr (or (assq 'initial_tweet_id control)
+                               (assq 'initialTweetId control))))))
               (car ids))))
     (list :edit-history-ids ids
           :edit-history-initial-id initial-id
@@ -2107,29 +2127,49 @@ Retweets use their wrapper ID so the wrapper and original remain distinct."
 (defun chirp-tweet-like-p (object)
   "Return non-nil when OBJECT resembles a tweet payload."
   (let* ((tweet (chirp--tweet-result object))
-         (legacy (chirp-get tweet "legacy"))
-         (metrics (chirp-get tweet "metrics"))
+         (legacy (map-nested-elt tweet '(legacy)))
+         (metrics (map-nested-elt tweet '(metrics)))
          (id (chirp-first-nonblank
-              (chirp-get tweet "rest_id" "id_str" "id")
-              (chirp-get legacy "id_str")))
+              (when (chirp-object-p tweet)
+                (cdr (or (assq 'rest_id tweet)
+                         (assq 'id_str tweet)
+                         (assq 'id tweet))))
+              (map-nested-elt legacy '(id_str))))
          (text (chirp-first-nonblank
-                (chirp-get tweet "full_text" "text")
-                (chirp-get legacy "full_text" "text")
-                (chirp-get-in tweet '("note_tweet" "note_tweet_results"
-                                      "result" "text"))
-                (chirp-get-in tweet '("note_tweet" "text"))))
-         (stats (or (chirp-get tweet "favorite_count" "retweet_count"
-                               "reply_count" "quote_count" "bookmark_count"
-                               "view_count")
+                (when (chirp-object-p tweet)
+                  (cdr (or (assq 'full_text tweet)
+                           (assq 'text tweet))))
+                (when (chirp-object-p legacy)
+                  (cdr (or (assq 'full_text legacy)
+                           (assq 'text legacy))))
+                (map-nested-elt tweet '(note_tweet note_tweet_results result text))
+                (map-nested-elt tweet '(note_tweet text))))
+         (stats (or (when (chirp-object-p tweet)
+           (cdr (or (assq 'favorite_count tweet)
+                    (assq 'retweet_count tweet)
+                    (assq 'reply_count tweet)
+                    (assq 'quote_count tweet)
+                    (assq 'bookmark_count tweet)
+                    (assq 'view_count tweet))))
                     (and metrics
-                         (chirp-get metrics "likes" "retweets" "replies"
-                                    "quotes" "bookmarks" "views"))
+                         (when (chirp-object-p metrics)
+                           (cdr (or (assq 'likes metrics)
+                                    (assq 'retweets metrics)
+                                    (assq 'replies metrics)
+                                    (assq 'quotes metrics)
+                                    (assq 'bookmarks metrics)
+                                    (assq 'views metrics)))))
                     (and legacy
-                         (chirp-get legacy "favorite_count" "retweet_count"
-                                    "reply_count" "quote_count")))))
+                         (when (chirp-object-p legacy)
+                           (cdr (or (assq 'favorite_count legacy)
+                                    (assq 'retweet_count legacy)
+                                    (assq 'reply_count legacy)
+                                    (assq 'quote_count legacy))))))))
     (and (chirp-object-p tweet)
          id
-         (or text stats (chirp-get tweet "conversationId" "conversation_id"))
+         (or text stats (when (chirp-object-p tweet)
+           (cdr (or (assq 'conversationId tweet)
+                    (assq 'conversation_id tweet)))))
          (not (chirp-user-like-p tweet)))))
 
 (defun chirp-find-first-object (value predicate)
@@ -2157,11 +2197,13 @@ Retweets use their wrapper ID so the wrapper and original remain distinct."
 
 (defun chirp--extract-user-object (object)
   "Extract the most relevant user object from OBJECT."
-  (let ((direct (or (chirp-get object "user" "author")
-                    (chirp-get-in object '("core" "user_results" "result"))
-                    (chirp-get-in object '("author_results" "result"))
-                    (chirp-get-in object '("user_results" "result"))
-                    (chirp-get-in object '("result")))))
+  (let ((direct (or (when (chirp-object-p object)
+    (cdr (or (assq 'user object)
+             (assq 'author object))))
+                    (map-nested-elt object '(core user_results result))
+                    (map-nested-elt object '(author_results result))
+                    (map-nested-elt object '(user_results result))
+                    (map-nested-elt object '(result)))))
     (cond
      ((chirp-user-like-p object) object)
      ((chirp-user-like-p direct) direct)
@@ -2171,127 +2213,104 @@ Retweets use their wrapper ID so the wrapper and original remain distinct."
   "Return USER's viewer relationship FIELD as a boolean.
 Prefer ALIASES, then relationship perspectives, then legacy and REST fields.
 A present false value takes precedence over lower-priority representations."
-  (let* ((cell (or (cl-loop for alias in aliases
-                            for cell = (assoc-string alias user t)
-                            when cell return cell)
-                   (assoc-string field
-                                 (chirp-get user "relationship_perspectives") t)
-                   (assoc-string field (chirp-get user "legacy") t)))
-         (value (if cell
-                    (cdr cell)
-                  (let ((value (chirp-get user field)))
-                    ;; Flattened profiles also use `following' for a count.
-                    (unless (and (equal field "following") (numberp value))
-                      value)))))
-    (chirp-boolean-value value)))
+  (let-alist user
+    (let* ((cell (or (cl-loop for alias in aliases
+                             for cell = (assq alias user)
+                             when cell return cell)
+                    (and (chirp-object-p .relationship_perspectives)
+                         (assq field .relationship_perspectives))
+                    (and (chirp-object-p .legacy)
+                         (assq field .legacy))))
+           (value (if cell
+                      (cdr cell)
+                    (let ((value (map-elt user field)))
+                      ;; Flattened profiles also use `following' for a count.
+                      (unless (and (eq field 'following) (numberp value))
+                        value)))))
+      (chirp-boolean-value value))))
 
 (defun chirp--user-from-x (object)
   "Return a Chirp user decoded from X OBJECT, or nil."
   (let* ((user (chirp--extract-user-object object))
-         (legacy (chirp-get user "legacy"))
-         (handle (chirp-first-nonblank
-                  (chirp-get user "screen_name")
-                  (chirp-get user "screenName")
-                  (chirp-get user "username")
-                  (chirp-get user "handle")
-                  (chirp-get-in user '("core" "screen_name"))
-                  (chirp-get legacy "screen_name")))
-         (name (chirp-first-nonblank
-                (chirp-get user "name")
-                (chirp-get user "display_name")
-                (chirp-get-in user '("core" "name"))
-                (chirp-get legacy "name")
-                handle))
-         (id (chirp-first-nonblank
-              (chirp-get user "rest_id" "id_str" "id")
-              (chirp-get legacy "id_str")))
-         (bio (chirp-clean-text
-               (chirp-first-nonblank
-                (chirp-get user "description")
-                (chirp-get user "bio")
-                (chirp-get-in user '("profile_bio" "description"))
-                (chirp-get legacy "description"))))
-         (followers (or (chirp-get user "followers_count")
-                        (chirp-get user "followers")
-                        (chirp-get-in user '("relationship_counts" "followers"))
-                        (chirp-get legacy "followers_count")))
-         (following (or (chirp-get user "friends_count")
-                        (chirp-get user "following_count")
-                        (let ((count (chirp-get user "following")))
-                          (and (numberp count) count))
-                        (chirp-get-in user '("relationship_counts" "following"))
-                        (chirp-get legacy "friends_count")))
-         (posts (or (chirp-get user "statuses_count")
-                    (chirp-get user "tweets_count")
-                    (chirp-get user "tweets")
-                    (chirp-get-in user '("tweet_counts" "tweets"))
-                    (chirp-get legacy "statuses_count")))
-         (joined (chirp-first-nonblank
-                  (chirp-get user "createdAtLocal")
-                  (chirp-get user "createdAtISO")
-                  (chirp-get user "createdAt")
-                  (chirp-get user "created_at")
-                  (chirp-get-in user '("core" "created_at"))
-                  (chirp-get legacy "created_at")))
-         (avatar-url (chirp-first-nonblank
-                      (chirp-get user "profileImageUrl")
-                      (chirp-get user "profile_image_url_https")
-                      (chirp-get user "profile_image_url")
-                      (chirp-get-in user '("avatar" "image_url"))
-                      (chirp-get legacy "profile_image_url_https" "profile_image_url")))
-         (viewer-following-p
-          (chirp--user-relationship-p user "following"
-                                      "viewerFollowing" "viewer_following"))
-         (viewer-followed-by-p
-          (chirp--user-relationship-p user "followed_by"
-                                      "viewerFollowedBy" "viewer_followed_by"))
-         (viewer-blocking-p
-          (chirp--user-relationship-p user "blocking"
-                                      "viewerBlocking" "viewer_blocking"))
-         (viewer-muting-p
-          (chirp--user-relationship-p user "muting"
-                                      "viewerMuting" "viewer_muting")))
-    (when (or handle id name)
-      (list :kind 'user
-            :id id
-            :name name
-            :handle (and handle (string-remove-prefix "@" handle))
-            :bio bio
-            :avatar-url avatar-url
-            :followers followers
-            :following following
-            :viewer-following-p viewer-following-p
-            :viewer-followed-by-p viewer-followed-by-p
-            :viewer-blocking-p viewer-blocking-p
-            :viewer-muting-p viewer-muting-p
-            :posts posts
-            :joined joined
-            :profile-url (and handle
-                              (format "https://x.com/%s"
-                                      (string-remove-prefix "@" handle)))
-            :raw object))))
+         (legacy (map-nested-elt user '(legacy))))
+    (let-alist user
+      (let* ((handle (chirp-first-nonblank
+                      .screen_name .screenName .username .handle
+                      (map-nested-elt .core '(screen_name))
+                      (map-nested-elt legacy '(screen_name))))
+             (name (chirp-first-nonblank
+                    .name .display_name (map-nested-elt .core '(name))
+                    (map-nested-elt legacy '(name)) handle))
+             (id (chirp-first-nonblank
+                  (cdr (or (assq 'rest_id user) (assq 'id_str user) (assq 'id user)))
+                  (map-nested-elt legacy '(id_str))))
+             (bio (chirp-clean-text
+                   (chirp-first-nonblank
+                    .description .bio (map-nested-elt .profile_bio '(description))
+                    (map-nested-elt legacy '(description)))))
+             (followers (or .followers_count .followers
+                            (map-nested-elt .relationship_counts '(followers))
+                            (map-nested-elt legacy '(followers_count))))
+             (following (or .friends_count .following_count
+                            (and (numberp .following) .following)
+                            (map-nested-elt .relationship_counts '(following))
+                            (map-nested-elt legacy '(friends_count))))
+             (posts (or .statuses_count .tweets_count .tweets
+                        (map-nested-elt .tweet_counts '(tweets))
+                        (map-nested-elt legacy '(statuses_count))))
+             (joined (chirp-first-nonblank
+                      .createdAtLocal .createdAtISO .createdAt .created_at
+                      (map-nested-elt .core '(created_at))
+                      (map-nested-elt legacy '(created_at))))
+             (avatar-url (chirp-first-nonblank
+                          .profileImageUrl .profile_image_url_https .profile_image_url
+                          (map-nested-elt .avatar '(image_url))
+                          (when (chirp-object-p legacy)
+                            (cdr (or (assq 'profile_image_url_https legacy)
+                                     (assq 'profile_image_url legacy))))))
+             (viewer-following-p
+              (chirp--user-relationship-p user 'following 'viewerFollowing 'viewer_following))
+             (viewer-followed-by-p
+              (chirp--user-relationship-p user 'followed_by 'viewerFollowedBy 'viewer_followed_by))
+             (viewer-blocking-p
+              (chirp--user-relationship-p user 'blocking 'viewerBlocking 'viewer_blocking))
+             (viewer-muting-p
+              (chirp--user-relationship-p user 'muting 'viewerMuting 'viewer_muting)))
+        (when (or handle id name)
+          (list :kind 'user :id id :name name
+                :handle (and handle (string-remove-prefix "@" handle))
+                :bio bio :avatar-url avatar-url
+                :followers followers :following following
+                :viewer-following-p viewer-following-p
+                :viewer-followed-by-p viewer-followed-by-p
+                :viewer-blocking-p viewer-blocking-p
+                :viewer-muting-p viewer-muting-p
+                :posts posts :joined joined
+                :profile-url (and handle
+                                  (format "https://x.com/%s"
+                                          (string-remove-prefix "@" handle)))
+                :raw object))))))
 
 ;;;; Media
 
 (defun chirp--media-variant-from-x (object)
   "Return one media variant decoded from X OBJECT."
-  (let ((url (chirp-first-nonblank (chirp-get object "url")))
-        (bitrate (chirp-get object "bitrate")))
-    (when url
-      (list :url url
-            :bitrate bitrate))))
+  (when (chirp-object-p object)
+    (let-alist object
+      (when-let* ((url (chirp-first-nonblank .url)))
+        (list :url url :bitrate .bitrate)))))
 
 ;;;; Link Cards
 
 (defun chirp--tweet-card (object)
   "Return OBJECT's card object, or nil."
-  (or (chirp-get object "card")
-      (chirp-get object "tweet_card")))
+  (or (map-nested-elt object '(card))
+      (map-nested-elt object '(tweet_card))))
 
 (defun chirp--tweet-card-legacy (object)
   "Return OBJECT's card legacy payload, or nil."
   (when-let* ((card (chirp--tweet-card object)))
-    (or (chirp-get card "legacy") card)))
+    (or (map-nested-elt card '(legacy)) card)))
 
 (defun chirp--card-binding-entries (bindings)
   "Normalize card BINDINGS into an alist of (KEY . VALUE)."
@@ -2301,21 +2320,21 @@ A present false value takes precedence over lower-priority representations."
     (chirp--card-binding-entries (append bindings nil)))
    ((not (listp bindings)) nil)
    ((and (consp (car bindings))
-         (stringp (chirp-get (car bindings) "key")))
+         (stringp (map-nested-elt (car bindings) '(key))))
     (cl-loop for binding in bindings
-             for key = (chirp-get binding "key")
-             for value = (or (chirp-get binding "value") binding)
+             for key = (map-nested-elt binding '(key))
+             for value = (or (map-nested-elt binding '(value)) binding)
              when (stringp key)
              collect (cons key value)))
    ((chirp-object-p bindings)
     (cl-loop for (key . value) in bindings
-             when (stringp key)
-             collect (cons key value)))))
+             when (or (symbolp key) (stringp key))
+             collect (cons (if (symbolp key) (symbol-name key) key) value)))))
 
 (defun chirp--tweet-card-bindings (object)
   "Return OBJECT's card bindings as an alist of (KEY . VALUE)."
   (chirp--card-binding-entries
-   (chirp-get (chirp--tweet-card-legacy object) "binding_values")))
+   (map-nested-elt (chirp--tweet-card-legacy object) '(binding_values))))
 
 (defun chirp--card-binding (bindings key)
   "Return the VALUE object for KEY in BINDINGS, or nil."
@@ -2325,7 +2344,9 @@ A present false value takes precedence over lower-priority representations."
   "Return the raw string_value for KEY in BINDINGS, or nil."
   (let ((value (chirp--card-binding bindings key)))
     (chirp-first-nonblank
-     (chirp-get value "string_value" "stringValue")
+     (when (chirp-object-p value)
+       (cdr (or (assq 'string_value value)
+                (assq 'stringValue value))))
      (and (stringp value) value))))
 
 (defun chirp--card-binding-string (bindings &rest keys)
@@ -2350,9 +2371,9 @@ A present false value takes precedence over lower-priority representations."
                         "player_image")
            for value = (chirp--card-binding bindings key)
            for url = (chirp-first-nonblank
-                      (chirp-get-in value '("image_value" "url"))
-                      (chirp-get-in value '("imageValue" "url"))
-                      (chirp-get value "url"))
+                      (map-nested-elt value '(image_value url))
+                      (map-nested-elt value '(imageValue url))
+                      (map-nested-elt value '(url)))
            when (and (stringp url)
                      (string-match-p "\\`https?://" url))
            return url))
@@ -2379,8 +2400,8 @@ URLS are already-expanded tweet URLs used to prefer a real destination
 over the card's `t.co` permalink."
   (when-let* ((legacy (chirp--tweet-card-legacy object))
               (name (chirp-first-nonblank
-                     (chirp-get legacy "name")
-                     (chirp-get (chirp--tweet-card object) "name")))
+                     (map-nested-elt legacy '(name))
+                     (map-nested-elt (chirp--tweet-card object) '(name))))
               ((chirp--link-card-name-p name))
               (bindings (chirp--tweet-card-bindings object)))
     (let* ((title (chirp--card-binding-string bindings "title" "vanity_title"))
@@ -2395,7 +2416,7 @@ over the card's `t.co` permalink."
                          (not (string-match-p "://" domain))
                          (concat "https://" domain))
                     website
-                    (chirp-get legacy "url"))))
+                    (map-nested-elt legacy '(url)))))
       (when (or title description image-url)
         (list :url url
               :title title
@@ -2415,7 +2436,7 @@ over the card's `t.co` permalink."
                 (json-parse-string
                  encoded :object-type 'alist :array-type 'list
                  :null-object nil :false-object nil))
-               (entities (chirp-get parsed "media_entities")))
+               (entities (map-nested-elt parsed '(media_entities))))
           (and (chirp-object-p entities)
                (cl-remove-if-not
                 (lambda (media)
@@ -2426,42 +2447,36 @@ over the card's `t.co` permalink."
 
 (defun chirp--media-item-from-x (object)
   "Return one Chirp media item decoded from X OBJECT."
-  (let* ((type (chirp-first-nonblank (chirp-get object "type")))
-         (url (chirp-first-nonblank
-               (chirp-get object "media_url_https" "media_url" "url")))
-         (preview-url (chirp-first-nonblank
-                       (chirp-get object
-                                  "preview_url" "previewUrl"
-                                  "preview_image_url" "previewImageUrl"
-                                  "thumbnail_url" "thumbnailUrl"
-                                  "poster_url" "posterUrl"
-                                  "media_url_https" "media_url")
-                       (chirp-get-in object '("preview" "url"))
-                       (chirp-get-in object '("thumbnail" "url"))
-                       (chirp-get-in object '("poster" "url"))))
-         (raw-variants
-          (or (chirp-get object "variants")
-              (chirp-get-in object '("video_info" "variants"))))
-         (variants
-          (and (listp raw-variants)
-               (delq nil
-                     (mapcar #'chirp--media-variant-from-x raw-variants))))
-         (width (or (chirp-get object "width")
-                    (chirp-get-in object '("original_info" "width"))
-                    (chirp-get-in object '("sizes" "large" "w"))))
-         (height (or (chirp-get object "height")
-                     (chirp-get-in object '("original_info" "height"))
-                     (chirp-get-in object '("sizes" "large" "h"))))
-         (alt (chirp-first-nonblank
-               (chirp-get object "altText" "alt_text" "ext_alt_text" "description"))))
-    (when (and type url)
-      (list :type type
-            :url url
-            :preview-url preview-url
-            :variants variants
-            :width width
-            :height height
-            :alt alt))))
+  (when (chirp-object-p object)
+    (let-alist object
+      (let* ((type (chirp-first-nonblank .type))
+             (url (chirp-first-nonblank
+                   (cdr (or (assq 'media_url_https object)
+                            (assq 'media_url object)
+                            (assq 'url object)))))
+             (preview-url
+              (chirp-first-nonblank
+               (cdr (or (assq 'preview_url object) (assq 'previewUrl object)
+                        (assq 'preview_image_url object) (assq 'previewImageUrl object)
+                        (assq 'thumbnail_url object) (assq 'thumbnailUrl object)
+                        (assq 'poster_url object) (assq 'posterUrl object)
+                        (assq 'media_url_https object) (assq 'media_url object)))
+               (map-nested-elt .preview '(url))
+               (map-nested-elt .thumbnail '(url))
+               (map-nested-elt .poster '(url))))
+             (raw-variants (or .variants (map-nested-elt .video_info '(variants))))
+             (variants (and (listp raw-variants)
+                            (delq nil (mapcar #'chirp--media-variant-from-x raw-variants))))
+             (width (or .width (map-nested-elt .original_info '(width))
+                        (map-nested-elt .sizes '(large w))))
+             (height (or .height (map-nested-elt .original_info '(height))
+                         (map-nested-elt .sizes '(large h))))
+             (alt (chirp-first-nonblank
+                   (cdr (or (assq 'altText object) (assq 'alt_text object)
+                            (assq 'ext_alt_text object) (assq 'description object))))))
+        (when (and type url)
+          (list :type type :url url :preview-url preview-url :variants variants
+                :width width :height height :alt alt))))))
 
 (defun chirp--media-list-from-x (value)
   "Return Chirp media items decoded from X VALUE."
@@ -2475,7 +2490,9 @@ over the card's `t.co` permalink."
   "Find a string below VALUE under KEYS that satisfies PREDICATE."
   (cond
    ((chirp-object-p value)
-    (or (let ((candidate (apply #'chirp-get value keys)))
+    (or (let ((candidate (cl-loop for key in keys
+                                  for cell = (assq key value)
+                                  when cell return (cdr cell))))
           (and (stringp candidate)
                (not (string-blank-p candidate))
                (or (null predicate) (funcall predicate candidate))
@@ -2493,9 +2510,8 @@ over the card's `t.co` permalink."
   "Return the first image URL found below VALUE."
   (chirp--article-find-string
    value
-   '("original_img_url" "originalImgUrl" "original_url" "originalUrl"
-     "media_url_https" "mediaUrlHttps" "media_url" "mediaUrl" "url"
-     "src" "uri")
+   '(original_img_url originalImgUrl original_url originalUrl
+     media_url_https mediaUrlHttps media_url mediaUrl url src uri)
    (lambda (candidate)
      (let ((url (downcase candidate)))
        (or (string-prefix-p "https://pbs.twimg.com/" url)
@@ -2505,7 +2521,7 @@ over the card's `t.co` permalink."
 
 (defun chirp--article-entity-map (content-state)
   "Return CONTENT-STATE's Draft.js entity map as a string-keyed alist."
-  (let ((value (chirp-get content-state "entityMap")))
+  (let ((value (map-nested-elt content-state '(entityMap))))
     (cond
      ((chirp-object-p value)
       (mapcar (lambda (cell)
@@ -2513,40 +2529,41 @@ over the card's `t.co` permalink."
               value))
      ((listp value)
       (cl-loop for item in value
-               for key = (chirp-get item "key")
-               for entity = (chirp-get item "value")
+               for key = (map-nested-elt item '(key))
+               for entity = (map-nested-elt item '(value))
                when (and key entity)
                collect (cons (format "%s" key) entity))))))
 
 (defun chirp--article-media-map (article)
   "Return media identifiers mapped to image URLs from ARTICLE."
   (cl-loop for media in (append
-                         (when-let* ((cover (chirp-get article "cover_media")))
+                         (when-let* ((cover (map-nested-elt article '(cover_media))))
                            (list cover))
-                         (chirp-get article "media_entities"))
+                         (map-nested-elt article '(media_entities)))
            for url = (chirp--article-image-url media)
            when url
-           append (cl-loop for key in '("media_id" "media_key" "id")
-                           for identifier = (chirp-get media key)
+           append (cl-loop for key in '(media_id media_key id)
+                           for identifier = (and (chirp-object-p media)
+                                                  (alist-get key media))
                            when identifier
                            collect (cons (format "%s" identifier) url))))
 
 (defun chirp--article-block-entity (range entity-map)
   "Return RANGE's Draft.js entity from ENTITY-MAP."
-  (when-let* ((key (chirp-get range "key")))
+  (when-let* ((key (map-nested-elt range '(key))))
     (cdr (assoc-string (format "%s" key) entity-map t))))
 
 (defun chirp--article-render-text-block (block entity-map)
   "Render Draft.js text BLOCK using links from ENTITY-MAP."
-  (let ((text (chirp-get block "text"))
+  (let ((text (map-nested-elt block '(text)))
         ranges)
     (when (stringp text)
-      (dolist (range (chirp-get block "entityRanges"))
+      (dolist (range (map-nested-elt block '(entityRanges)))
         (let* ((entity (chirp--article-block-entity range entity-map))
-               (type (upcase (or (chirp-get entity "type") "")))
-               (offset (chirp-get range "offset"))
-               (length (chirp-get range "length"))
-               (url (chirp-get-in entity '("data" "url"))))
+               (type (upcase (or (map-nested-elt entity '(type)) "")))
+               (offset (map-nested-elt range '(offset)))
+               (length (map-nested-elt range '(length)))
+               (url (map-nested-elt entity '(data url))))
           (when (and (equal type "LINK")
                      (integerp offset) (>= offset 0)
                      (integerp length) (> length 0)
@@ -2569,7 +2586,7 @@ over the card's `t.co` permalink."
   "Return distinct (URL . CAPTION) images from ENTITY using MEDIA-MAP."
   (let ((default-caption
          (or (chirp--article-find-string
-              entity '("caption" "alt" "alt_text" "altText" "title" "name"))
+              entity '(caption alt alt_text altText title name))
              ""))
         (seen (make-hash-table :test #'equal))
         images)
@@ -2578,24 +2595,23 @@ over the card's `t.co` permalink."
                     (puthash url t seen)
                     (push (cons url (or caption default-caption)) images))))
       (add-image (chirp--article-image-url entity) default-caption)
-      (dolist (media (chirp-get-in entity '("data" "mediaItems")))
-        (let* ((media-id (chirp-get media "mediaId"))
+      (dolist (media (map-nested-elt entity '(data mediaItems)))
+        (let* ((media-id (map-nested-elt media '(mediaId)))
                (url (or (chirp--article-image-url media)
                         (and media-id
                              (cdr (assoc-string (format "%s" media-id)
                                                 media-map t)))))
                (caption (chirp--article-find-string
-                         media '("caption" "alt" "alt_text" "altText"
-                                 "title" "name"))))
+                         media '(caption alt alt_text altText title name))))
           (add-image url caption))))
     (nreverse images)))
 
 (defun chirp--article-atomic-parts (block entity-map media-map)
   "Render atomic Draft.js BLOCK using ENTITY-MAP and MEDIA-MAP."
-  (cl-loop for range in (chirp-get block "entityRanges")
+  (cl-loop for range in (map-nested-elt block '(entityRanges))
            for entity = (chirp--article-block-entity range entity-map)
-           for type = (upcase (or (chirp-get entity "type") ""))
-           for markdown = (chirp-get-in entity '("data" "markdown"))
+           for type = (upcase (or (map-nested-elt entity '(type)) ""))
+           for markdown = (map-nested-elt entity '(data markdown))
            append
            (cond
             ((and (equal type "MARKDOWN")
@@ -2611,13 +2627,13 @@ over the card's `t.co` permalink."
 
 (defun chirp--article-content-text (article)
   "Render ARTICLE's Draft.js content as lightweight Markdown."
-  (let* ((content-state (chirp-get article "content_state"))
+  (let* ((content-state (map-nested-elt article '(content_state)))
          (entity-map (chirp--article-entity-map content-state))
          (media-map (chirp--article-media-map article))
          (ordered-counter 0)
          parts)
-    (dolist (block (chirp-get content-state "blocks"))
-      (let ((type (or (chirp-get block "type") "unstyled")))
+    (dolist (block (map-nested-elt content-state '(blocks)))
+      (let ((type (or (map-nested-elt block '(type)) "unstyled")))
         (if (equal type "atomic")
             (progn
               (setq ordered-counter 0)
@@ -2647,237 +2663,289 @@ over the card's `t.co` permalink."
 
 (defun chirp--tweet-from-x (object)
   "Return a Chirp tweet decoded from X OBJECT, or nil."
-  (let* ((result object)
-         (wrapper (chirp--tweet-result result))
-         (wrapper-legacy (chirp-get wrapper "legacy"))
-         (raw-retweet (chirp-get-in
-                       wrapper-legacy '("retweeted_status_result" "result")))
-         (retweet (and raw-retweet
-                       (or (chirp-get raw-retweet "tweet") raw-retweet)))
-         (retweet-p (and retweet (chirp-tweet-like-p retweet)))
-         (retweet-id
-          (and retweet-p
-               (chirp-first-nonblank
-                (chirp-get wrapper "rest_id" "id_str" "id")
-                (chirp-get wrapper-legacy "id_str"))))
-         (retweeter (and retweet
-                         (chirp--user-from-x
-                          (chirp--extract-user-object wrapper))))
-         (object (if retweet-p retweet wrapper))
-         (legacy (chirp-get object "legacy"))
-         (metrics (chirp-get object "metrics"))
-         (author (chirp--extract-user-object object))
-         (author-user (chirp--user-from-x author))
-         (author-handle (plist-get author-user :handle))
-         (id (chirp-first-nonblank
-              (chirp-get object "rest_id" "id_str" "id")
-              (chirp-get legacy "id_str")))
-         (url (chirp-first-nonblank
-               (chirp-get object "url")
-               (chirp-get legacy "url")
-               (and id author-handle
-                    (format "https://x.com/%s/status/%s" author-handle id))
-               (and id (format "https://x.com/i/status/%s" id))))
-         (tweet-identity (list :id id :url url :author-handle author-handle))
-         (source (chirp--tweet-source-text-and-entities object legacy))
-         (raw-source (plist-get source :text))
-         (source-entities (plist-get source :entities))
-         (display-range
-          (and (not (plist-get source :note-p))
-               (chirp--tweet-display-text-range object legacy)))
-         (reply-to-handle (let ((handle (chirp-first-nonblank
-                                         (chirp-get object "inReplyToScreenName"
-                                                    "in_reply_to_screen_name")
-                                         (chirp-get legacy "in_reply_to_screen_name"))))
-                            (and handle
-                                 (string-remove-prefix "@" handle))))
-         (reply-to-id (chirp-first-nonblank
-                       (chirp-get object "inReplyToStatusId"
-                                  "in_reply_to_status_id_str"
-                                  "in_reply_to_status_id")
-                       (chirp-get legacy "in_reply_to_status_id_str"
-                                  "in_reply_to_status_id")))
-         (visible-range
-          (chirp--visible-text-range
-           raw-source display-range
-           (or reply-to-id reply-to-handle)))
-         (visible-raw
-          (chirp--substring
-           (or raw-source "")
-           (car visible-range)
-           (cdr visible-range)))
-         (visible-entities
-          (chirp--rebase-text-entities
-           source-entities
-           (car visible-range)
-           (cdr visible-range)))
-         (full-text (chirp-clean-text raw-source))
-         (quoted-tweet (chirp--quoted-tweet-from-x object))
-         (timeline-context
-          (pcase (or (chirp-get wrapper "timelineContext" "timeline_context")
-                     (chirp-get object "timelineContext" "timeline_context"))
-            ("related" 'related)
-            (_ nil)))
-         (all-urls (chirp-extract-tweet-urls object legacy))
-         (media
-          (or (chirp--media-list-from-x
-               (or (chirp-get object "media")
-                   (chirp-get-in object '("extended_entities" "media"))
-                   (chirp-get-in legacy '("extended_entities" "media"))
-                   (chirp-get-in legacy '("entities" "media"))))
-              (chirp--unified-card-media-from-x object)))
-         (url-context (list :tweet tweet-identity
-                            :quoted-tweet quoted-tweet
-                            :media media))
-         (media-url-covered-p
-          (and media
-               (cl-some (lambda (candidate)
-                          (or (chirp--media-url-p candidate media)
-                              (chirp--tweet-permalink-p candidate tweet-identity)))
-                        all-urls)))
-         (covered-short-url-count
-          (+ (length all-urls)
-             (if (and media (not media-url-covered-p)) 1 0)))
-         (walk-entities
-          (if (>= covered-short-url-count
-                  (chirp-short-url-count visible-raw))
-              (append visible-entities
-                      (chirp--uncovered-short-url-entities
-                       visible-raw visible-entities))
-            visible-entities))
-         (emitted
-          (chirp--emit-visible-text visible-raw walk-entities url-context))
-         (display-text (car emitted))
-         (text-entities (cdr emitted))
-         (mentions
-          (cl-remove-if-not
-           (lambda (entity)
-             (eq (plist-get entity :kind) 'mention))
-           text-entities))
-         (hashtags
-          (delq nil
-                (mapcar
-                 (lambda (entity)
-                   (and (eq (plist-get entity :kind) 'hashtag)
-                        (plist-get entity :tag)))
-                 text-entities)))
-         (urls (chirp--filter-display-urls all-urls url-context))
-         (link-card (chirp--link-card-from-x object urls))
-         (article-result
-          (chirp-get-in object '("article" "article_results" "result")))
-         (article-title (chirp-first-nonblank
-                         (chirp-get object "articleTitle" "article_title")
-                         (chirp-get article-result "title")))
-         (article-text-raw
-          (chirp-first-nonblank
-           (chirp-get object "articleText" "article_text")
-           (chirp--article-content-text article-result)
-           (chirp-get article-result "plain_text")))
-         (article-text (and article-text-raw
-                            (chirp-clean-text article-text-raw)))
-         (retweeted-by
-          (let ((handle (chirp-first-nonblank
-                         (chirp-get wrapper "retweetedBy" "retweeted_by")
-                         (plist-get retweeter :handle))))
-            (and handle (string-remove-prefix "@" handle))))
-         (retweeted-by-name
-          (chirp-first-nonblank
-           (chirp-get wrapper "retweetedByName" "retweeted_by_name")
-           (plist-get retweeter :name)
-           retweeted-by))
-         (retweeted-p (chirp-boolean-value
-                       (or (chirp-get object "retweeted" "isRetweeted")
-                           (chirp-get-in object '("viewer" "retweeted"))
-                           (chirp-get legacy "retweeted")
-                           (chirp-get wrapper-legacy "retweeted"))))
-         (liked-p (chirp-boolean-value
-                   (or (chirp-get object "liked" "favorited" "isLiked" "isFavorited")
-                       (chirp-get-in object '("viewer" "liked"))
-                       (chirp-get-in object '("viewer" "favorited"))
-                       (chirp-get legacy "liked" "favorited"))))
-         (bookmarked-p (chirp-boolean-value
-                        (or (chirp-get object "bookmarked" "isBookmarked")
-                            (chirp-get-in object '("viewer" "bookmarked"))
-                            (chirp-get legacy "bookmarked"))))
-         (promoted-p (chirp-boolean-value
-                      (or (chirp-get wrapper "isPromoted" "is_promoted" "promoted")
-                          (chirp-get object "isPromoted" "is_promoted" "promoted")
-                          (chirp-get-in wrapper '("itemContent" "promotedMetadata"))
-                          (chirp-get wrapper "promotedMetadata"))))
-         (reply-control-mode
-          (chirp--tweet-reply-control-mode object))
-         (reply-limited-p
-          (or (chirp--tweet-reply-limited-p result)
-              (chirp--tweet-reply-limited-p object)
-              (equal (chirp-get legacy "limited_actions")
-                     "limited_replies")))
-         (edit-metadata (chirp--tweet-edit-metadata object)))
-    (when (or id (not (string-empty-p display-text)))
-      (list :kind 'tweet
-            :id id
-            :retweet-id retweet-id
-            :text display-text
-            :raw-text full-text
-            :created-at (chirp-first-nonblank
-                         (chirp-get object "createdAtLocal" "createdAtISO" "createdAt" "created_at")
-                         (chirp-get legacy "created_at"))
-            :url url
-            :urls urls
-            :link-card link-card
-            :mentions mentions
-            :hashtags hashtags
-            :text-entities text-entities
-            :conversation-id (chirp-first-nonblank
-                              (chirp-get object "conversationId" "conversation_id")
-                              (chirp-get legacy "conversation_id_str"))
-            :timeline-context timeline-context
-            :reply-to-id reply-to-id
-            :reply-to-handle reply-to-handle
-            :reply-control-mode reply-control-mode
-            :reply-limited-p reply-limited-p
-            :edit-history-ids
-            (plist-get edit-metadata :edit-history-ids)
-            :edit-history-initial-id
-            (plist-get edit-metadata :edit-history-initial-id)
-            :edited-p (plist-get edit-metadata :edited-p)
-            :retweeted-by retweeted-by
-            :retweeted-by-name retweeted-by-name
-            :author-name (plist-get author-user :name)
-            :author-handle author-handle
-            :author-avatar-url (plist-get author-user :avatar-url)
-            :quoted-tweet quoted-tweet
-            :article-title article-title
-            :article-text article-text
-            :promoted-p promoted-p
-            :deleted-p nil
-            :media media
-            :retweeted-p retweeted-p
-            :liked-p liked-p
-            :bookmarked-p bookmarked-p
-            :reply-count (chirp--count-value
-                          (chirp-get object "reply_count")
-                          (chirp-get metrics "replies")
-                          (chirp-get legacy "reply_count"))
-            :retweet-count (chirp--count-value
-                            (chirp-get object "retweet_count")
-                            (chirp-get metrics "retweets")
-                            (chirp-get legacy "retweet_count"))
-            :like-count (chirp--count-value
-                         (chirp-get object "favorite_count" "like_count")
-                         (chirp-get metrics "likes")
-                         (chirp-get legacy "favorite_count"))
-            :quote-count (chirp--count-value
-                          (chirp-get object "quote_count")
-                          (chirp-get metrics "quotes")
-                          (chirp-get legacy "quote_count"))
-            :bookmark-count (chirp--count-value
-                             (chirp-get object "bookmark_count")
-                             (chirp-get metrics "bookmarks")
-                             (chirp-get legacy "bookmark_count"))
-            :view-count (chirp--count-value
-                         (chirp-get object "view_count" "views")
-                         (chirp-get metrics "views"))
-            :raw wrapper))))
+  (pcase-let* ((result object)
+               (wrapper (chirp--tweet-result result))
+               (wrapper-legacy (map-nested-elt wrapper '(legacy)))
+               (raw-retweet (map-nested-elt wrapper-legacy '(retweeted_status_result result)))
+               (retweet (and raw-retweet
+			     (or (map-nested-elt raw-retweet '(tweet)) raw-retweet)))
+               (retweet-p (and retweet (chirp-tweet-like-p retweet)))
+               (retweet-id
+		(and retweet-p
+		     (chirp-first-nonblank
+                      (when (chirp-object-p wrapper)
+			(cdr (or (assq 'rest_id wrapper)
+				 (assq 'id_str wrapper)
+				 (assq 'id wrapper))))
+                      (map-nested-elt wrapper-legacy '(id_str)))))
+               (retweeter (and retweet
+                               (chirp--user-from-x
+				(chirp--extract-user-object wrapper))))
+               ((map (:handle retweeter-handle) (:name retweeter-name)) retweeter)
+               (object (if retweet-p retweet wrapper)))
+    (let-alist (and (chirp-object-p object) object)
+      (pcase-let* ((legacy .legacy)
+		   (metrics .metrics)
+		   ((map ('replies metric-replies) ('retweets metric-retweets)
+			 ('likes metric-likes) ('quotes metric-quotes)
+			 ('bookmarks metric-bookmarks) ('views metric-views))
+		    (and (chirp-object-p metrics) metrics))
+		   (author (chirp--extract-user-object object))
+		   (author-user (chirp--user-from-x author))
+		   ((map (:handle author-handle) (:name author-name)
+			 (:avatar-url author-avatar-url)) author-user)
+		   (id (chirp-first-nonblank
+			(when (chirp-object-p object)
+			  (cdr (or (assq 'rest_id object)
+				   (assq 'id_str object)
+				   (assq 'id object))))
+			(map-nested-elt legacy '(id_str))))
+		   (url (chirp-first-nonblank
+			 .url
+			 (map-nested-elt legacy '(url))
+			 (and id author-handle
+			      (format "https://x.com/%s/status/%s" author-handle id))
+			 (and id (format "https://x.com/i/status/%s" id))))
+		   (tweet-identity (list :id id :url url :author-handle author-handle))
+		   (source (chirp--tweet-source-text-and-entities object legacy))
+		   ((map (:text raw-source) (:entities source-entities) :note-p) source)
+		   (display-range
+		    (and (not note-p)
+			 (chirp--tweet-display-text-range object legacy)))
+		   (reply-to-handle (let ((handle (chirp-first-nonblank
+						   (when (chirp-object-p object)
+						     (cdr (or (assq 'inReplyToScreenName object)
+							      (assq 'in_reply_to_screen_name object))))
+						   (map-nested-elt legacy '(in_reply_to_screen_name)))))
+				      (and handle
+					   (string-remove-prefix "@" handle))))
+		   (reply-to-id (chirp-first-nonblank
+				 (when (chirp-object-p object)
+				   (cdr (or (assq 'inReplyToStatusId object)
+					    (assq 'in_reply_to_status_id_str object)
+					    (assq 'in_reply_to_status_id object))))
+				 (when (chirp-object-p legacy)
+				   (cdr (or (assq 'in_reply_to_status_id_str legacy)
+					    (assq 'in_reply_to_status_id legacy))))))
+		   (visible-range
+		    (chirp--visible-text-range
+		     raw-source display-range
+		     (or reply-to-id reply-to-handle)))
+		   (visible-raw
+		    (chirp--substring
+		     (or raw-source "")
+		     (car visible-range)
+		     (cdr visible-range)))
+		   (visible-entities
+		    (chirp--rebase-text-entities
+		     source-entities
+		     (car visible-range)
+		     (cdr visible-range)))
+		   (full-text (chirp-clean-text raw-source))
+		   (quoted-tweet (chirp--quoted-tweet-from-x object))
+		   (timeline-context
+		    (pcase (or (when (chirp-object-p wrapper)
+				 (cdr (or (assq 'timelineContext wrapper)
+					  (assq 'timeline_context wrapper))))
+			       (when (chirp-object-p object)
+				 (cdr (or (assq 'timelineContext object)
+					  (assq 'timeline_context object)))))
+		      ("related" 'related)
+		      (_ nil)))
+		   (all-urls (chirp-extract-tweet-urls object legacy))
+		   (media
+		    (or (chirp--media-list-from-x
+			 (or .media
+			     (map-nested-elt object '(extended_entities media))
+			     (map-nested-elt legacy '(extended_entities media))
+			     (map-nested-elt legacy '(entities media))))
+			(chirp--unified-card-media-from-x object)))
+		   (url-context (list :tweet tweet-identity
+				      :quoted-tweet quoted-tweet
+				      :media media))
+		   (media-url-covered-p
+		    (and media
+			 (cl-some (lambda (candidate)
+				    (or (chirp--media-url-p candidate media)
+					(chirp--tweet-permalink-p candidate tweet-identity)))
+				  all-urls)))
+		   (covered-short-url-count
+		    (+ (length all-urls)
+		       (if (and media (not media-url-covered-p)) 1 0)))
+		   (walk-entities
+		    (if (>= covered-short-url-count
+			    (chirp-short-url-count visible-raw))
+			(append visible-entities
+				(chirp--uncovered-short-url-entities
+				 visible-raw visible-entities))
+		      visible-entities))
+		   (emitted
+		    (chirp--emit-visible-text visible-raw walk-entities url-context))
+		   (display-text (car emitted))
+		   (text-entities (cdr emitted))
+		   (mentions
+		    (cl-remove-if-not
+		     (lambda (entity)
+		       (eq (plist-get entity :kind) 'mention))
+		     text-entities))
+		   (hashtags
+		    (delq nil
+			  (mapcar
+			   (lambda (entity)
+			     (and (eq (plist-get entity :kind) 'hashtag)
+				  (plist-get entity :tag)))
+			   text-entities)))
+		   (urls (chirp--filter-display-urls all-urls url-context))
+		   (link-card (chirp--link-card-from-x object urls))
+		   (article-result
+		    (map-nested-elt object '(article article_results result)))
+		   (article-title (chirp-first-nonblank
+				   (when (chirp-object-p object)
+				     (cdr (or (assq 'articleTitle object)
+					      (assq 'article_title object))))
+				   (map-nested-elt article-result '(title))))
+		   (article-text-raw
+		    (chirp-first-nonblank
+		     (when (chirp-object-p object)
+		       (cdr (or (assq 'articleText object)
+				(assq 'article_text object))))
+		     (chirp--article-content-text article-result)
+		     (map-nested-elt article-result '(plain_text))))
+		   (article-text (and article-text-raw
+				      (chirp-clean-text article-text-raw)))
+		   (retweeted-by
+		    (let ((handle (chirp-first-nonblank
+				   (when (chirp-object-p wrapper)
+				     (cdr (or (assq 'retweetedBy wrapper)
+					      (assq 'retweeted_by wrapper))))
+				   retweeter-handle)))
+		      (and handle (string-remove-prefix "@" handle))))
+		   (retweeted-by-name
+		    (chirp-first-nonblank
+		     (when (chirp-object-p wrapper)
+		       (cdr (or (assq 'retweetedByName wrapper)
+				(assq 'retweeted_by_name wrapper))))
+		     retweeter-name
+		     retweeted-by))
+		   (retweeted-p (chirp-boolean-value
+				 (or (when (chirp-object-p object)
+				       (cdr (or (assq 'retweeted object)
+						(assq 'isRetweeted object))))
+				     (map-nested-elt object '(viewer retweeted))
+				     (map-nested-elt legacy '(retweeted))
+				     (map-nested-elt wrapper-legacy '(retweeted)))))
+		   (liked-p (chirp-boolean-value
+			     (or (when (chirp-object-p object)
+				   (cdr (or (assq 'liked object)
+					    (assq 'favorited object)
+					    (assq 'isLiked object)
+					    (assq 'isFavorited object))))
+				 (map-nested-elt object '(viewer liked))
+				 (map-nested-elt object '(viewer favorited))
+				 (when (chirp-object-p legacy)
+				   (cdr (or (assq 'liked legacy)
+					    (assq 'favorited legacy)))))))
+		   (bookmarked-p (chirp-boolean-value
+				  (or (when (chirp-object-p object)
+					(cdr (or (assq 'bookmarked object)
+						 (assq 'isBookmarked object))))
+				      (map-nested-elt object '(viewer bookmarked))
+				      (map-nested-elt legacy '(bookmarked)))))
+		   (promoted-p (chirp-boolean-value
+				(or (when (chirp-object-p wrapper)
+				      (cdr (or (assq 'isPromoted wrapper)
+					       (assq 'is_promoted wrapper)
+					       (assq 'promoted wrapper))))
+				    (when (chirp-object-p object)
+				      (cdr (or (assq 'isPromoted object)
+					       (assq 'is_promoted object)
+					       (assq 'promoted object))))
+				    (map-nested-elt wrapper '(itemContent promotedMetadata))
+				    (map-nested-elt wrapper '(promotedMetadata)))))
+		   (reply-control-mode
+		    (chirp--tweet-reply-control-mode object))
+		   (reply-limited-p
+		    (or (chirp--tweet-reply-limited-p result)
+			(chirp--tweet-reply-limited-p object)
+			(equal (map-nested-elt legacy '(limited_actions))
+			       "limited_replies")))
+		   (edit-metadata (chirp--tweet-edit-metadata object))
+		   ((map :edit-history-ids :edit-history-initial-id :edited-p)
+		    edit-metadata))
+	(when (or id (not (string-empty-p display-text)))
+	  (list :kind 'tweet
+		:id id
+		:retweet-id retweet-id
+		:text display-text
+		:raw-text full-text
+		:created-at (chirp-first-nonblank
+                             (when (chirp-object-p object)
+                               (cdr (or (assq 'createdAtLocal object)
+					(assq 'createdAtISO object)
+					(assq 'createdAt object)
+					(assq 'created_at object))))
+                             (map-nested-elt legacy '(created_at)))
+		:url url
+		:urls urls
+		:link-card link-card
+		:mentions mentions
+		:hashtags hashtags
+		:text-entities text-entities
+		:conversation-id (chirp-first-nonblank
+				  (when (chirp-object-p object)
+                                    (cdr (or (assq 'conversationId object)
+                                             (assq 'conversation_id object))))
+				  (map-nested-elt legacy '(conversation_id_str)))
+		:timeline-context timeline-context
+		:reply-to-id reply-to-id
+		:reply-to-handle reply-to-handle
+		:reply-control-mode reply-control-mode
+		:reply-limited-p reply-limited-p
+		:edit-history-ids edit-history-ids
+		:edit-history-initial-id edit-history-initial-id
+		:edited-p edited-p
+		:retweeted-by retweeted-by
+		:retweeted-by-name retweeted-by-name
+		:author-name author-name
+		:author-handle author-handle
+		:author-avatar-url author-avatar-url
+		:quoted-tweet quoted-tweet
+		:article-title article-title
+		:article-text article-text
+		:promoted-p promoted-p
+		:deleted-p nil
+		:media media
+		:retweeted-p retweeted-p
+		:liked-p liked-p
+		:bookmarked-p bookmarked-p
+		:reply-count (chirp--count-value
+                              .reply_count
+                              metric-replies
+                              (map-nested-elt legacy '(reply_count)))
+		:retweet-count (chirp--count-value
+				.retweet_count
+				metric-retweets
+				(map-nested-elt legacy '(retweet_count)))
+		:like-count (chirp--count-value
+                             (when (chirp-object-p object)
+                               (cdr (or (assq 'favorite_count object)
+					(assq 'like_count object))))
+                             metric-likes
+                             (map-nested-elt legacy '(favorite_count)))
+		:quote-count (chirp--count-value
+                              .quote_count
+                              metric-quotes
+                              (map-nested-elt legacy '(quote_count)))
+		:bookmark-count (chirp--count-value
+				 .bookmark_count
+				 metric-bookmarks
+				 (map-nested-elt legacy '(bookmark_count)))
+		:view-count (chirp--count-value
+                             (when (chirp-object-p object)
+                               (cdr (or (assq 'view_count object)
+					(assq 'views object))))
+                             metric-views)
+		:raw wrapper))))))
 
 ;;; Collections
 

@@ -11,6 +11,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'map)
 (require 'subr-x)
 (require 'tabulated-list)
 (require 'appkit-evil)
@@ -97,16 +98,16 @@ Either `draft' or `scheduled'.")
 
 (defun chirp-unsent--when-label (entry)
   "Return the When column label for ENTRY."
-  (if-let* ((execute-at (plist-get entry :execute-at)))
-      (format-time-string "%Y-%m-%d %H:%M" execute-at)
-    (if (eq (plist-get entry :kind) 'scheduled)
-        "Scheduled"
-      "Draft")))
+  (pcase-let (((map :execute-at :kind) entry))
+    (if execute-at
+        (format-time-string "%Y-%m-%d %H:%M" execute-at)
+      (if (eq kind 'scheduled) "Scheduled" "Draft"))))
 
 (defun chirp-unsent--preview (entry)
   "Return the Text column value for ENTRY."
-  (let* ((text (string-replace "\n" " " (or (car (plist-get entry :texts)) "")))
-         (media (or (plist-get entry :media-count) 0))
+  (pcase-let* (((map :texts :media-count) entry)
+              (text (string-replace "\n" " " (or (car texts) "")))
+              (media (or media-count 0))
          (prefix (if (> media 0)
                      (format "[%d img] " media)
                    "")))
@@ -114,11 +115,12 @@ Either `draft' or `scheduled'.")
 
 (defun chirp-unsent--row (entry)
   "Return a tabulated-list row for ENTRY."
-  (list (plist-get entry :id)
-        (vector " "
-                (format "%d" (length (plist-get entry :texts)))
-                (chirp-unsent--preview entry)
-                (chirp-unsent--when-label entry))))
+  (pcase-let (((map :id :texts) entry))
+    (list id
+          (vector " "
+                  (format "%d" (length texts))
+                  (chirp-unsent--preview entry)
+                  (chirp-unsent--when-label entry)))))
 
 (defun chirp-unsent--title ()
   "Return the buffer title for the current unsent collection."

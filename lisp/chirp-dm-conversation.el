@@ -10,6 +10,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'map)
 (require 'seq)
 (require 'subr-x)
 (require 'appkit-core)
@@ -111,12 +112,11 @@ Set this to nil to disable automatic pagination.  Manual loading with
 (defun chirp-dm-conversation--state (view)
   "Return VIEW's validated XChat conversation state."
   (let ((state (appkit-surface-model view)))
-    (unless
-        (and (listp state)
-             (eq (plist-get state :type) 'dm-conversation)
-             (plist-get state :instance)
-             (listp (plist-get state :conversation)))
+    (unless (listp state)
       (error "Invalid Chirp direct-message conversation state"))
+    (map-let (:type :instance :conversation) state
+      (unless (and (eq type 'dm-conversation) instance (listp conversation))
+        (error "Invalid Chirp direct-message conversation state")))
     (chirp-dm-conversation--conversation state) state))
 
 (defun chirp-dm-conversation--current-view ()
@@ -132,13 +132,11 @@ Set this to nil to disable automatic pagination.  Manual loading with
   (let ((seen (make-hash-table :test #'equal))
         additions)
     (dolist (event current)
-      (puthash (or (plist-get event :id)
-                   (plist-get event :encoded-event))
-               t seen))
+      (map-let (:id :encoded-event) event
+        (puthash (or id encoded-event) t seen)))
     (dolist (event fetched)
-      (let ((identity
-             (or (plist-get event :id)
-                 (plist-get event :encoded-event))))
+      (pcase-let* (((map :id :encoded-event) event)
+                   (identity (or id encoded-event)))
         (unless (gethash identity seen)
           (puthash identity t seen)
           (push event additions))))
@@ -155,11 +153,12 @@ Set this to nil to disable automatic pagination.  Manual loading with
 
 (defun chirp-dm-conversation--history-key-events (envelope)
   "Return normalized recovery key events carried by history ENVELOPE."
-  (or (chirp-get envelope "keyEvents")
-      (mapcar
-       (lambda (encoded)
-         (list :id encoded :encoded-event encoded))
-       (or (chirp-get envelope "encodedKeyEvents") nil))))
+  (when (chirp-object-p envelope)
+    (or (alist-get 'keyEvents envelope)
+        (mapcar
+         (lambda (encoded)
+           (list :id encoded :encoded-event encoded))
+         (alist-get 'encodedKeyEvents envelope)))))
 
 ;;; Decryption and Recovery
 
@@ -174,9 +173,9 @@ Set this to nil to disable automatic pagination.  Manual loading with
 
 (defun chirp-dm-conversation--decrypt-input (state)
   "Return encoded events and signing-key user IDs from conversation STATE."
-  (let* ((conversation (chirp-dm-conversation--conversation state))
-         (events (plist-get conversation :events))
-         (recovery-events (plist-get state :recovery-key-events))
+  (pcase-let* ((conversation (chirp-dm-conversation--conversation state))
+               ((map :events :participants) conversation)
+               (recovery-events (map-elt state :recovery-key-events))
          (epoch (chirp-dm-conversation--native-key-epoch))
          (encoded
           (delete-dups
@@ -189,12 +188,12 @@ Set this to nil to disable automatic pagination.  Manual loading with
                    collect (plist-get event :encoded-event))
                   (cl-loop
                    for event in events
-                   when (or (plist-get event :encrypted-p)
+                   when (map-let (:encrypted-p :kind) event
+                          (or encrypted-p
                             (and
-                             (eq (plist-get event :kind)
-                                 'conversation-key-change)
+                             (eq kind 'conversation-key-change)
                              (chirp-dm-conversation--pending-key-event-p
-                              event epoch)))
+                              event epoch))))
                    collect (plist-get event :encoded-event))))))
          (user-ids
           (delete-dups
@@ -202,7 +201,7 @@ Set this to nil to disable automatic pagination.  Manual loading with
                  (append
                   (mapcar (lambda (participant)
                             (plist-get participant :id))
-                          (plist-get conversation :participants))
+                          participants)
                   (mapcar (lambda (event)
                             (plist-get event :sender-id))
                           (append recovery-events events)))))))
@@ -220,10 +219,10 @@ Set this to nil to disable automatic pagination.  Manual loading with
     (or
      (cl-some
       (lambda (event)
-        (or (plist-get event :encrypted-p)
-            (and
-             (eq (plist-get event :kind) 'conversation-key-change)
-             (chirp-dm-conversation--pending-key-event-p event epoch))))
+        (map-let (:encrypted-p :kind) event
+          (or encrypted-p
+              (and (eq kind 'conversation-key-change)
+                   (chirp-dm-conversation--pending-key-event-p event epoch)))))
       (chirp-dm-conversation--events state))
      (cl-some
       (lambda (event)
@@ -256,32 +255,32 @@ CONVERSATION-ID and MESSAGE-ID identify their owning message."
          (by-id (make-hash-table :test #'equal))
          (updated 0))
     (dolist (message messages)
-      (when (equal (plist-get message :conversation-id) conversation-id)
-        (dolist (id (list (plist-get message :sequence-id)
-                          (plist-get message :message-id)))
-          (when id
-            (puthash id message by-id)))))
+      (map-let ((:conversation-id verified-conversation-id) :sequence-id :message-id) message
+        (when (equal verified-conversation-id conversation-id)
+          (dolist (id (list sequence-id message-id))
+            (when id
+              (puthash id message by-id))))))
     (chirp-dm-state-set-events
      conversation
      (mapcar
       (lambda (event)
-        (if-let* ((message
-                   (or (gethash (plist-get event :sequence-id) by-id)
-                       (gethash (plist-get event :message-id) by-id)))
-                  ((or (null (plist-get message :sender-id))
-                       (equal (plist-get message :sender-id)
-                              (plist-get event :sender-id)))))
-            (let* ((copy (copy-sequence event))
-                   (content-kind (plist-get message :content-kind))
-                   (text (plist-get message :text))
-                   (reply-text (plist-get message :reply-text))
-                   (message-id
-                    (or (plist-get message :message-id)
-                        (plist-get message :sequence-id)))
-                   (attachments
-                    (chirp-dm-conversation--verified-attachments
-                     (plist-get message :attachments)
-                     conversation-id message-id)))
+        (map-let (:sequence-id :message-id :sender-id) event
+          (if-let* ((message (or (gethash sequence-id by-id)
+                                (gethash message-id by-id)))
+                    ((map-let ((:sender-id verified-sender)) message
+                       (or (null verified-sender)
+                           (equal verified-sender sender-id)))))
+            (pcase-let* ((copy (copy-sequence event))
+                         ((map :content-kind :text :reply-text
+                               :target-message-id :reply-p
+                               :reply-attachment-count :key-version
+                               (:attachments raw-attachments)
+                               (:message-id verified-message-id) :sequence-id)
+                          message)
+                         (message-id (or verified-message-id sequence-id))
+                         (attachments
+                          (chirp-dm-conversation--verified-attachments
+                           raw-attachments conversation-id message-id)))
               (setf (plist-get copy :kind)
                     (pcase content-kind
                       ('mark-read 'mark-read)
@@ -290,25 +289,25 @@ CONVERSATION-ID and MESSAGE-ID identify their owning message."
                     (plist-get copy :content-kind) content-kind
                     (plist-get copy :text) text
                     (plist-get copy :target-message-id)
-                    (plist-get message :target-message-id)
+                    target-message-id
                     (plist-get copy :document)
                     (chirp-dm-conversation--decode-plain-text text)
                     (plist-get copy :attachments) attachments
                     (plist-get copy :attachment-count) (length attachments)
                     (plist-get copy :reply-p)
-                    (plist-get message :reply-p)
+                    reply-p
                     (plist-get copy :reply-text) reply-text
                     (plist-get copy :reply-document)
                     (chirp-dm-conversation--decode-plain-text reply-text)
                     (plist-get copy :reply-attachment-count)
-                    (plist-get message :reply-attachment-count)
+                    reply-attachment-count
                     (plist-get copy :key-version)
-                    (plist-get message :key-version)
+                    key-version
                     (plist-get copy :encrypted-p) nil
                     (plist-get copy :decrypted-p) t)
               (cl-incf updated)
               copy)
-          event))
+            event)))
       (plist-get conversation :events)))
     updated))
 
@@ -319,8 +318,9 @@ CONVERSATION-ID and MESSAGE-ID identify their owning message."
      conversation
      (mapcar
       (lambda (event)
-        (if (and (eq (plist-get event :kind) 'conversation-key-change)
-                 (member (plist-get event :encoded-event) encoded))
+        (if (map-let (:kind :encoded-event) event
+              (and (eq kind 'conversation-key-change)
+                   (member encoded-event encoded)))
             (plist-put (copy-sequence event) :native-key-epoch epoch)
           event))
       (plist-get conversation :events)))))
@@ -379,12 +379,11 @@ CONVERSATION-ID and MESSAGE-ID identify their owning message."
   "Coalesce decryption for VIEW behind one exact native-session operation.
 Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
   (when (appkit-surface-live-p view)
-    (let* ((chirp--app (appkit-surface-app view))
-           (state (chirp-dm-conversation--state view))
-           (active (plist-get state :decrypt-operation))
-           (input (chirp-dm-conversation--decrypt-input state))
-           (encoded (plist-get input :events))
-           (user-ids (plist-get input :user-ids))
+    (pcase-let* ((chirp--app (appkit-surface-app view))
+                 (state (chirp-dm-conversation--state view))
+                 (active (map-elt state :decrypt-operation))
+                 ((map (:events encoded) :user-ids)
+                  (chirp-dm-conversation--decrypt-input state))
            (key-event-p
             (cl-some
              (lambda (event)
@@ -439,13 +438,14 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
 
 (defun chirp-dm-conversation--make-state (instance conversation)
   "Return view state for INSTANCE and normalized CONVERSATION."
-  (let ((canonical (chirp-dm-state-acquire conversation)))
+  (pcase-let* ((canonical (chirp-dm-state-acquire conversation))
+               ((map :older-cursor :has-more) canonical))
     (list :type 'dm-conversation
           :instance instance
           :conversation canonical
           :recovery-key-events nil
-          :older-cursor (copy-tree (plist-get canonical :older-cursor))
-          :older-available-p (plist-get canonical :has-more)
+          :older-cursor (copy-tree older-cursor)
+          :older-available-p has-more
           :older-stalled-p nil
           :status (list :phase 'idle :message nil)
           :decrypt-loading-p nil
@@ -480,28 +480,29 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
   "Return MESSAGE-ID from canonical conversation STATE, or nil."
   (cl-find-if
    (lambda (event)
-     (or (equal (plist-get event :sequence-id) message-id)
-         (equal (plist-get event :id) message-id)))
+     (map-let (:sequence-id :id) event
+       (or (equal sequence-id message-id)
+           (equal id message-id))))
    (chirp-dm-conversation--events state)))
 
 (defun chirp-dm-conversation--reply-target (state)
   "Return STATE's current Appkit reply target event, or nil."
-  (let ((aux (appkit-chatbuf-aux-state)))
-    (when (eq (plist-get aux :aux-type) 'reply)
-      (chirp-dm-conversation--message-by-id
-       state (plist-get aux :message-id)))))
+  (map-let (:aux-type :message-id) (appkit-chatbuf-aux-state)
+    (when (eq aux-type 'reply)
+      (chirp-dm-conversation--message-by-id state message-id))))
 
 (defun chirp-dm-conversation--event-sender-label (conversation event)
   "Return EVENT's sender label in CONVERSATION."
-  (let ((participant
-         (cl-find (plist-get event :sender-id)
-                  (plist-get conversation :participants)
-                  :key (lambda (item) (plist-get item :id))
-                  :test #'equal)))
-    (or (plist-get participant :name)
-        (and-let* ((handle (plist-get participant :handle)))
-          (concat "@" handle))
-        (and (equal (plist-get event :sender-id)
+  (pcase-let* (((map :sender-id) event)
+               (participant
+                (cl-find sender-id
+                         (map-elt conversation :participants)
+                         :key (lambda (item) (map-elt item :id))
+                         :test #'equal))
+               ((map :name :handle) participant))
+    (or name
+        (and handle (concat "@" handle))
+        (and (equal sender-id
                     (chirp--session-xchat-user-id (chirp--session)))
              "You")
         "message")))
@@ -509,8 +510,8 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
 (defun chirp-dm-conversation--reply-context-text (state)
   "Return Appkit reply context chrome for conversation STATE."
   (if-let* ((target (chirp-dm-conversation--reply-target state)))
-      (let* ((conversation (chirp-dm-conversation--conversation state))
-             (document (plist-get target :document))
+      (pcase-let* ((conversation (chirp-dm-conversation--conversation state))
+                   ((map :document :attachment-count) target)
              (preview
               (chirp-dm-conversation--one-line
                (if document (appkit-markup-plain-text document) ""))))
@@ -525,7 +526,7 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
           (cond
            ((not (string-empty-p preview))
             (truncate-string-to-width preview 80 nil nil "…"))
-           ((> (or (plist-get target :attachment-count) 0) 0)
+           ((> (or attachment-count 0) 0)
             "[Attachment message]")
            (t "[Message preview unavailable]")))
          :cancel-action #'chirp-dm-cancel-reply
@@ -535,9 +536,8 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
 
 (defun chirp-dm-conversation--reply-key-events (state target)
   "Return bounded raw key events from STATE needed to validate TARGET."
-  (let* ((version
-          (or (plist-get target :conversation-key-version)
-              (plist-get target :key-version)))
+  (pcase-let* (((map :conversation-key-version :key-version) target)
+               (version (or conversation-key-version key-version))
          (events
           (append (plist-get state :recovery-key-events)
                   (cl-remove-if-not
@@ -581,19 +581,16 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
 
 (defun chirp-dm-conversation--sync (view _app state change)
   "Render committed conversation STATE using projection CHANGE."
-  (let*
+  (pcase-let*
       ((conversation (chirp-dm-conversation--conversation state))
-       (title
-        (chirp-dm-conversation--one-line
-         (plist-get conversation :title)))
-       (slice
+       ((map :title :events) conversation)
+       (title (chirp-dm-conversation--one-line title))
+       ((map :valid-p :reason :entries)
         (appkit-chat-history-window-slice
-         (plist-get conversation :events)
-         (lambda (event) (plist-get event :id))))
+         events (lambda (event) (map-elt event :id))))
        (resources (appkit-projection-change-resources change)))
-    (unless (plist-get slice :valid-p)
-      (error "Invalid XChat history window: %s"
-             (plist-get slice :reason)))
+    (unless valid-p
+      (error "Invalid XChat history window: %s" reason))
     (setq-local chirp--view-title
                 (format "DM: %s"
                         (if (string-empty-p title) "Conversation"
@@ -607,7 +604,7 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
                (appkit-projection-change-keys change))
          (appkit-chat-timeline-sync
           (chirp-dm-render-project-events view conversation
-                                          (plist-get slice :entries))
+                                          entries)
           :force-keys
           (if
               (or (appkit-projection-change-geometry-p change)
@@ -628,15 +625,13 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
     (when-let* ((observer (appkit-chat-timeline-scroll-observer)))
       (appkit-scroll-observer-check observer))
     (let (demands interests)
-      (dolist (event (chirp-dm-state-visible-events
-                      (plist-get slice :entries)))
-        (when (eq (plist-get event :kind) 'message)
-          (let* ((participant
-                  (chirp-dm-render--event-participant
-                   view (plist-get state :conversation) event))
-                 (avatar (chirp-media-xchat-avatar-demand
-                          view (plist-get participant :id)
-                          (plist-get participant :avatar-url)))
+      (dolist (event (chirp-dm-state-visible-events entries))
+        (map-let (:kind (:id event-id)) event
+          (when (eq kind 'message)
+            (pcase-let* ((participant
+                         (chirp-dm-render--event-participant view conversation event))
+                        ((map :id :avatar-url) participant)
+                        (avatar (chirp-media-xchat-avatar-demand view id avatar-url))
                  (row-demands (append (and avatar (list avatar))
                                       (chirp-dm-render--event-media-demands view event))))
             (dolist (demand row-demands)
@@ -645,10 +640,10 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
                      (interest (cl-find key interests
                                         :key #'appkit-resource-interest-key :test #'equal)))
                 (if interest
-                    (push (plist-get event :id) (appkit-resource-interest-row-keys interest))
+                    (push event-id (appkit-resource-interest-row-keys interest))
                   (push (appkit-resource-interest-create
                          :key key
-                         :row-keys (list (plist-get event :id))) interests)))))))
+                         :row-keys (list event-id)) interests))))))))
       (appkit-render-result-create
        :resource-demands (cl-delete-duplicates demands :key #'appkit-resource-demand-key
                                                :test #'equal)
@@ -758,23 +753,22 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
                        (plist-get status :message)
                        (and (eq kind 'history-error) detail)))
                (when (eq kind 'history-success)
-                 (setf (plist-get model :recovery-key-events)
-                       (chirp-dm-conversation--append-unique-events
-                        (plist-get model :recovery-key-events)
-                        (plist-get detail :recovery))
-                       (plist-get model :older-stalled-p) (plist-get detail :stalled))
-                 (when (plist-get detail :cursor-p)
-                   (setf (plist-get model :older-cursor)
-                         (unless (plist-get detail :complete)
-                           (copy-tree (plist-get detail :cursor)))
-                         (plist-get model :older-available-p)
-                         (not (plist-get detail :complete))))
-                 (when (plist-get detail :first)
-                   (appkit-chat-history-window-set (plist-get detail :first) nil))
-                 (when (plist-get detail :seed)
-                   (appkit-chat-history-window-seed-live (plist-get detail :seed)))
-                 (when (plist-get detail :complete)
-                   (appkit-chat-history-older-loaded-set t)))))
+                 (map-let (:recovery :stalled :cursor-p :complete :cursor :first :seed)
+                     detail
+                   (setf (plist-get model :recovery-key-events)
+                         (chirp-dm-conversation--append-unique-events
+                          (map-elt model :recovery-key-events) recovery)
+                         (plist-get model :older-stalled-p) stalled)
+                   (when cursor-p
+                     (setf (plist-get model :older-cursor)
+                           (unless complete (copy-tree cursor))
+                           (plist-get model :older-available-p) (not complete)))
+                   (when first
+                     (appkit-chat-history-window-set first nil))
+                   (when seed
+                     (appkit-chat-history-window-seed-live seed))
+                   (when complete
+                     (appkit-chat-history-older-loaded-set t))))))
             ('decrypt-start
              (setf (plist-get model :decrypt-operation) value
                    (plist-get model :decrypt-loading-p) t))
@@ -842,7 +836,7 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
            (merged (chirp-dm-state-merge-events current events))
            (first (plist-get (car merged) :id))
            (cursor (chirp-backend-envelope-next-cursor envelope))
-           (complete (and (chirp-get-in envelope '("pagination" "complete")) t))
+           (complete (and (map-nested-elt envelope '(pagination complete)) t))
            (snapshot (copy-sequence conversation)))
       (when (or cursor complete)
         (setf (plist-get snapshot :older-cursor) (unless complete cursor)
@@ -935,9 +929,7 @@ its key history, and REMAINING bounds the automatic page count."
                         (next-cursor
                          (chirp-backend-envelope-next-cursor envelope))
                         (complete
-                         (and (chirp-get-in envelope
-                                            '("pagination" "complete"))
-                              t)))
+                         (and (map-nested-elt envelope '(pagination complete)) t)))
                    (setf (plist-get bridged :events) bridged-events)
                    (cond
                     ((chirp-dm-conversation--events-overlap-p
@@ -1089,11 +1081,10 @@ Disjoint focused fragments are bridged through older history before merging."
 (defun chirp-dm-conversation--attachment-object-p (value)
   "Return non-nil when VALUE is a typed local XChat attachment object."
   (and (listp value)
-       (eq (plist-get value :kind)
-           chirp-dm-conversation--attachment-object-kind)
-       (memq (plist-get value :attachment-kind)
-             chirp-dm-conversation--attachment-kinds)
-       (stringp (plist-get value :path))))
+       (map-let (:kind :attachment-kind :path) value
+         (and (eq kind chirp-dm-conversation--attachment-object-kind)
+              (memq attachment-kind chirp-dm-conversation--attachment-kinds)
+              (stringp path)))))
 
 (defun chirp-dm-conversation--classify-compose-object (value _text)
   "Classify structured compose VALUE for XChat output."
@@ -1121,11 +1112,8 @@ Disjoint focused fragments are bridged through older history before merging."
 
 (defun chirp-dm-conversation--attachment-display-text (attachment)
   "Return typed composer preview text for ATTACHMENT."
-  (let* ((kind (plist-get attachment :attachment-kind))
-         (path (plist-get attachment :path))
-         (filename
-          (or (plist-get attachment :filename)
-              (file-name-nondirectory path)))
+  (pcase-let* (((map (:attachment-kind kind) :path :filename) attachment)
+               (filename (or filename (file-name-nondirectory path)))
          (image-p (memq kind '(photo gif)))
          (image
           (and image-p
@@ -1370,22 +1358,18 @@ With ARG in the composer, insert a newline instead."
 
 (defun chirp-dm-conversation--event-at-point (state)
   "Return canonical message event at point in conversation STATE."
-  (let ((projected (get-text-property (point) 'chirp-dm-event))
-        (key (appkit-chat-timeline-key-at-point)))
-    (chirp-dm-conversation--message-by-id
-     state
-     (or (plist-get projected :sequence-id)
-         (plist-get projected :id)
-         key))))
+  (pcase-let* (((map :sequence-id :id)
+               (get-text-property (point) 'chirp-dm-event))
+              (key (appkit-chat-timeline-key-at-point)))
+    (chirp-dm-conversation--message-by-id state (or sequence-id id key))))
 
 (defun chirp-dm-conversation--target-event-at-point (state action)
   "Return actionable message event at point in STATE for ACTION."
   (let ((event (chirp-dm-conversation--event-at-point state)))
     (unless (and (listp event)
-                 (eq (plist-get event :kind) 'message)
-                 (stringp (plist-get event :encoded-event))
-                 (not (string-empty-p
-                       (plist-get event :encoded-event))))
+                 (map-let (:kind :encoded-event) event
+                   (and (eq kind 'message) (stringp encoded-event)
+                        (not (string-empty-p encoded-event)))))
       (user-error "Point is not on a message that can %s" action))
     event))
 
@@ -1703,10 +1687,8 @@ With ARG in the composer, insert a newline instead."
 
 (defun chirp-dm-conversation--finish-reaction (operation)
   "Consume exact pending reaction OPERATION and return its live Surface."
-  (let* ((surface (plist-get operation :surface))
-         (state (plist-get operation :state))
-         (key (plist-get operation :key))
-         (pending (plist-get state :pending-reactions)))
+  (pcase-let* (((map :surface :state :key) operation)
+               (pending (map-elt state :pending-reactions)))
     (when (and (appkit-surface-live-p surface)
                (eq state (appkit-surface-model surface))
                (eq operation (gethash key pending)))

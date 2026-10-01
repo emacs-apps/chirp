@@ -29,44 +29,36 @@
 
 When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
   (let* ((thread (if thread-status
-                     (vector `(("status" . ,thread-status)
-                               ("media_ids" . [])))
-                   []))
-         (media-ids (if media-id (vector media-id) []))
+                     (list `((status . ,thread-status)
+                             (media_ids . nil)))
+                   nil))
+         (media-ids (when media-id (list media-id)))
          (entities
           (if media-id
-              (vector
-               `(("media_key" . ,(format "3_%s" media-id))
-                 ("media_info" .
-                  (("__typename" . "ApiImage")
-                   ("original_img_url"
-                    . ,(or preview-url
-                           "https://pbs.twimg.com/media/x.jpg"))
-                   ("original_img_width" . 1200)
-                   ("original_img_height" . 800)))))
-            [])))
+              (list `((media_key . ,(format "3_%s" media-id))
+                      (media_info . ((__typename . "ApiImage")
+                                     (original_img_url . ,(or preview-url
+                                                              "https://pbs.twimg.com/media/x.jpg"))
+                                     (original_img_width . 1200)
+                                     (original_img_height . 800)))))
+            nil)))
     (chirp-unsent-test--payload-at-path
-     '("data" "viewer" "draft_list" "response_data")
-     (vector
-      `(("rest_id" . "2087")
-        ("media_entities" . ,entities)
-        ("tweet_create_request" .
-         (("status" . ,status)
-          ("media_ids" . ,media-ids)
-          ("thread_tweets" . ,thread))))))))
+     '(data viewer draft_list response_data)
+     (list `((rest_id . "2087")
+             (media_entities . ,entities)
+             (tweet_create_request . ((status . ,status)
+                                      (media_ids . ,media-ids)
+                                      (thread_tweets . ,thread))))))))
 
 (defun chirp-unsent-test--scheduled-payload (status execute-at)
   "Return a FetchScheduledTweets payload with STATUS and EXECUTE-AT."
   (chirp-unsent-test--payload-at-path
-   '("data" "viewer" "scheduled_tweet_list")
-   (vector
-    `(("rest_id" . "2090")
-      ("scheduling_info" .
-       (("execute_at" . ,execute-at)
-        ("state" . "Scheduled")))
-      ("tweet_create_request" .
-       (("status" . ,status)
-        ("media_ids" . [])))))))
+   '(data viewer scheduled_tweet_list)
+   (list `((rest_id . "2090")
+           (scheduling_info . ((execute_at . ,execute-at)
+                               (state . "Scheduled")))
+           (tweet_create_request . ((status . ,status)
+                                    (media_ids . nil)))))))
 
 (ert-deftest chirp-backend-fetch-unsent-normalizes-a-thread-draft ()
   "FetchDraftTweets should expose root text, thread texts, and IDs."
@@ -74,7 +66,8 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
     (cl-letf (((symbol-function 'chirp-x-graphql-request)
                (lambda (operation variables callback &rest _options)
                  (should (equal (plist-get operation :name) "FetchDraftTweets"))
-                 (should (eq (chirp-get variables "ascending") :json-false))
+                 (should (eq (alist-get "ascending" variables nil nil #'equal)
+                             :json-false))
                  (funcall callback
                           (chirp-unsent-test--draft-payload
                            "Nice" "Two Nices")))))
@@ -116,7 +109,7 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
                (lambda (operation variables callback &rest _options)
                  (should (equal (plist-get operation :name)
                                 "FetchScheduledTweets"))
-                 (should (eq (chirp-get variables "ascending") t))
+                 (should (eq (alist-get "ascending" variables nil nil #'equal) t))
                  (funcall callback
                           (chirp-unsent-test--scheduled-payload
                            "later" 1786700000000)))))
@@ -142,13 +135,14 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
                                           &rest _options)
                  (setq operation request-operation
                        variables request-variables)
-                 (funcall callback '(("data" . nil))))))
+                 (funcall callback '((data . nil))))))
       (chirp-backend-delete-unsent 'draft "2087" #'ignore)
       (should (equal (plist-get operation :name) "DeleteDraftTweet"))
-      (should (equal (chirp-get variables "draft_tweet_id") "2087"))
+      (should (equal (alist-get "draft_tweet_id" variables nil nil #'equal) "2087"))
       (chirp-backend-delete-unsent 'scheduled "2090" #'ignore)
       (should (equal (plist-get operation :name) "DeleteScheduledTweet"))
-      (should (equal (chirp-get variables "scheduled_tweet_id") "2090")))))
+      (should (equal (alist-get "scheduled_tweet_id" variables nil nil #'equal)
+                     "2090")))))
 
 (ert-deftest chirp-unsent-rows-use-buffer-menu-mark-column ()
   "The unsent list should keep a Buffer Menu style mark column."
@@ -295,7 +289,7 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
         (let ((column (current-column)))
           (funcall (nth 2 (car requests)) nil nil)
           (should (equal (mapcar (lambda (entry) (plist-get entry :id))
-                                chirp-unsent-entries)
+                                 chirp-unsent-entries)
                          '("b" "c" "other")))
           (should (equal (tabulated-list-get-id) "other"))
           (should (= column (current-column))))
@@ -304,8 +298,8 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
         (funcall (nth 3 (cadr requests)) "Delete failed")
         (should (equal error-message "Delete failed"))
         (should (equal (mapcar (lambda (request)
-                                (list (car request) (cadr request)))
-                              requests)
+                                 (list (car request) (cadr request)))
+                               requests)
                        '((draft "a") (draft "b"))))
         (should (equal (chirp-unsent--flagged-ids ?D) '("b" "c")))
         (should (equal (chirp-unsent--flagged-ids ?>) '("other")))
@@ -329,11 +323,14 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
         (should (eq chirp-unsent-kind 'scheduled))
         (should-not chirp-unsent-entries)
         (should-not (tabulated-list-get-id))
-        (should-error (chirp-unsent-execute) :type 'user-error)
+        (should-error (chirp-unsent-execute)
+                      :type 'user-error)
         (funcall failure "Fetch failed")
         (should-not chirp-unsent-entries)
-        (should-error (chirp-unsent-open) :type 'user-error)
-        (should-error (chirp-unsent-execute) :type 'user-error)))))
+        (should-error (chirp-unsent-open)
+                      :type 'user-error)
+        (should-error (chirp-unsent-execute)
+                      :type 'user-error)))))
 
 (ert-deftest chirp-unsent-replaced-controller-rejects-fetch-and-delete-results ()
   "Old callbacks cannot modify or clear status in a replacement controller."
@@ -366,12 +363,12 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
         (funcall (nth 2 (car requests)) nil nil)
         ;; The approved batch retains its original endpoint, even after reuse.
         (should (equal (mapcar (lambda (request)
-                                (list (car request) (cadr request)))
-                              requests)
+                                 (list (car request) (cadr request)))
+                               requests)
                        '((draft "a") (draft "b"))))
         (funcall (nth 3 (cadr requests)) "Old delete failed")
         (should (equal (mapcar (lambda (entry) (plist-get entry :texts))
-                              chirp-unsent-entries)
+                               chirp-unsent-entries)
                        '(("Replacement"))))
         (should (equal chirp--status-text "Replacement loading"))))))
 
@@ -411,7 +408,7 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
         (chirp-unsent-flag-delete)
         (chirp-unsent-test--goto "other")
         (chirp-unsent-apply-result source 'draft "a"
-                                  (chirp-unsent-test--entry "a" "Edited"))
+                                   (chirp-unsent-test--entry "a" "Edited"))
         (should (equal (tabulated-list-get-id) "other"))
         (should (equal (chirp-unsent--flagged-ids ?D) '("other")))
         (chirp-unsent-test--goto "a")
@@ -419,7 +416,7 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
                        '("Edited")))
         (should (equal (aref (tabulated-list-get-entry) 2) "Edited"))
         (chirp-unsent-apply-result source 'draft "new"
-                                  (chirp-unsent-test--entry "new" "Saved"))
+                                   (chirp-unsent-test--entry "new" "Saved"))
         (should (equal (tabulated-list-get-id) "a"))
         (chirp-unsent-test--goto "new")
         (should (equal (plist-get (chirp-unsent--entry-at-point) :texts)
@@ -431,7 +428,7 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
         (chirp-unsent-test--goto "other")
         (chirp-unsent-apply-result source 'draft "a")
         (should (equal (mapcar (lambda (entry) (plist-get entry :id))
-                              chirp-unsent-entries)
+                               chirp-unsent-entries)
                        '("new" "other")))
         (should (equal (tabulated-list-get-id) "other"))
         (should (equal (chirp-unsent--flagged-ids ?D) '("other")))
@@ -470,12 +467,12 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
         (chirp-unsent-mark)
         (chirp-unsent-apply-result source 'draft "a")
         (chirp-unsent-apply-result source 'draft "b"
-                                  (chirp-unsent-test--entry "b" "Saved"))
+                                   (chirp-unsent-test--entry "b" "Saved"))
         (funcall fetched
                  (mapcar #'chirp-unsent-test--entry '("a" "b" "other" "server"))
                  nil)
         (should (equal (mapcar (lambda (entry) (plist-get entry :id))
-                              chirp-unsent-entries)
+                               chirp-unsent-entries)
                        '("b" "other" "server")))
         (should (equal (plist-get (car chirp-unsent-entries) :texts) '("Saved")))
         (should (equal (chirp-unsent--flagged-ids ?>) '("other")))))))

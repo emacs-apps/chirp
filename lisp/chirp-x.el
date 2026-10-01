@@ -14,6 +14,8 @@
 (require 'browser-session)
 (require 'cl-lib)
 (require 'json)
+(require 'map)
+(require 'let-alist)
 (require 'subr-x)
 (require 'url)
 (require 'url-http)
@@ -639,28 +641,26 @@ client headers for a cookie-authenticated CDN request."
                              :array-type 'list
                              :null-object nil
                              :false-object nil))
-         (operations (chirp-get payload "graphql"))
+         (operations (map-nested-elt payload '(graphql)))
          (table (make-hash-table :test #'equal))
          (count 0))
     (unless (and (chirp-object-p operations)
                  (<= (length operations) 1000))
       (error "X query ID registry has an invalid shape"))
     (dolist (entry operations)
-      (let* ((raw-name (car entry))
-             (operation-name
-              (if (symbolp raw-name) (symbol-name raw-name) raw-name))
-             (operation (cdr entry))
-             (method (chirp-get operation "method"))
-             (query-id (chirp-get operation "queryId")))
-        (when (equal method "GET")
-          (unless (and (stringp operation-name)
-                       (string-match-p "\\`[[:alnum:]_]+\\'" operation-name)
-                       (chirp-x--nonblank-string query-id)
-                       (string-match-p
-                        "\\`[[:alnum:]_-]\\{22\\}\\'" query-id))
-            (error "X query ID registry contains an invalid read operation"))
-          (puthash operation-name query-id table)
-          (setq count (1+ count)))))
+      (pcase-let* ((`(,raw-name . ,operation) entry)
+                   (operation-name
+                    (if (symbolp raw-name) (symbol-name raw-name) raw-name)))
+        (let-alist (and (chirp-object-p operation) operation)
+          (when (equal .method "GET")
+            (unless (and (stringp operation-name)
+                         (string-match-p "\\`[[:alnum:]_]+\\'" operation-name)
+                         (chirp-x--nonblank-string .queryId)
+                         (string-match-p
+                          "\\`[[:alnum:]_-]\\{22\\}\\'" .queryId))
+              (error "X query ID registry contains an invalid read operation"))
+            (puthash operation-name .queryId table)
+            (setq count (1+ count))))))
     (when (zerop count)
       (error "X query ID registry contains no read operations"))
     table))
@@ -790,33 +790,32 @@ client headers for a cookie-authenticated CDN request."
 
 (defun chirp-x--graphql-errors (payload)
   "Return top-level or mutation-nested GraphQL errors from PAYLOAD."
-  (or (chirp-get payload "errors")
-      (when-let* ((data (chirp-get payload "data")))
+  (or (map-nested-elt payload '(errors))
+      (when-let* ((data (map-nested-elt payload '(data))))
         (cl-loop for (_key . value) in data
-                 for errors = (chirp-get value "errors")
+                 for errors = (map-nested-elt value '(errors))
                  when (consp errors)
                  return errors))))
 
 (defun chirp-x--graphql-error-message (payload)
   "Return a human-readable GraphQL error from PAYLOAD, or nil."
   (when-let* ((errors (chirp-x--graphql-errors payload)))
-    (let* ((first-error
-            (or (cl-find-if
-                 (lambda (item)
-                   (chirp-x--nonblank-string (chirp-get item "message")))
-                 errors)
-                (car errors)))
-           (message
-            (or (chirp-x--nonblank-string
-                 (chirp-get first-error "message"))
-                "GraphQL returned an error")))
-      (if-let* ((code (chirp-get first-error "code")))
-          (if (string-match-p
-               (format "(%s)\\'" (regexp-quote (format "%s" code)))
-               message)
-              message
-            (format "%s (%s)" message code))
-        message))))
+    (let ((first-error
+           (or (cl-find-if
+                (lambda (item)
+                  (chirp-x--nonblank-string (map-nested-elt item '(message))))
+                errors)
+               (car errors))))
+      (let-alist (and (chirp-object-p first-error) first-error)
+        (let ((message (or (chirp-x--nonblank-string .message)
+                           "GraphQL returned an error")))
+          (if .code
+              (if (string-match-p
+                   (format "(%s)\\'" (regexp-quote (format "%s" .code)))
+                   message)
+                  message
+                (format "%s (%s)" message .code))
+            message))))))
 
 (defun chirp-x--failure-message (http-status payload request-status)
   "Return a readable error from HTTP-STATUS, PAYLOAD, and REQUEST-STATUS."
@@ -1444,12 +1443,10 @@ plists.  No upload request is retried automatically."
                          :owner upload-owner))
                       (lambda (payload)
                         (let* ((result
-                                (chirp-get-in
-                                 payload
-                                 '("data" "xchat_finalize_media_upload")))
+                                (map-nested-elt payload '(data xchat_finalize_media_upload)))
                                (upload-error
                                 (and (chirp-object-p result)
-                                     (chirp-get result "upload_error"))))
+                                     (map-nested-elt result '(upload_error)))))
                           (cond
                            ((not (chirp-object-p result))
                             (fail
@@ -1506,18 +1503,16 @@ plists.  No upload request is retried automatically."
                  (initialize-result
                    (payload)
                    (let* ((result
-                           (chirp-get-in
-                            payload
-                            '("data" "xchat_initialize_media_upload")))
+                           (map-nested-elt payload '(data xchat_initialize_media_upload)))
                           (upload-error
                            (and (chirp-object-p result)
-                                (chirp-get result "upload_error")))
+                                (map-nested-elt result '(upload_error))))
                           (media-hash
                            (and (chirp-object-p result)
-                                (chirp-get result "media_hash_key")))
+                                (map-nested-elt result '(media_hash_key))))
                           (resume-id
                            (and (chirp-object-p result)
-                                (chirp-get result "resume_id"))))
+                                (map-nested-elt result '(resume_id)))))
                      (cond
                       ((not (chirp-object-p result))
                        (fail
@@ -1887,20 +1882,19 @@ MEDIA-ID identifies the upload and SEGMENT-INDEX is its zero-based part."
 
 (defun chirp-x--upload-media-id (payload)
   "Return the media identifier from INIT PAYLOAD, or nil."
-  (let ((identifier (or (chirp-get payload "media_id_string")
-                        (chirp-get payload "media_id"))))
+  (let ((identifier (or (map-nested-elt payload '(media_id_string))
+                        (map-nested-elt payload '(media_id)))))
     (and identifier (format "%s" identifier))))
 
 (defun chirp-x--upload-processing-error (processing-info)
   "Return a readable media processing error from PROCESSING-INFO."
-  (let* ((remote-error (chirp-get processing-info "error"))
-         (message (or (chirp-get remote-error "message")
-                      (chirp-get remote-error "name")
-                      "X could not process the uploaded media"))
-         (code (chirp-get remote-error "code")))
-    (if code
-        (format "%s (%s)" message code)
-      message)))
+  (let ((remote-error (map-nested-elt processing-info '(error))))
+    (let-alist (and (chirp-object-p remote-error) remote-error)
+      (let ((message (or .message .name
+                         "X could not process the uploaded media")))
+        (if .code
+            (format "%s (%s)" message .code)
+          message)))))
 
 (defun chirp-x--cancel-upload-poll (poll)
   "Cancel the upload timer described by POLL and settle its workflow."
@@ -2039,8 +2033,8 @@ upload mutation is retried automatically."
                      (media-id payload attempt)
                      (when (ensure-active)
                        (if-let* ((processing-info
-                                  (chirp-get payload "processing_info")))
-                           (pcase (chirp-get processing-info "state")
+                                  (map-nested-elt payload '(processing_info))))
+                           (pcase (map-nested-elt processing-info '(state))
                              ("succeeded" (succeed media-id))
                              ("failed"
                               (fail
@@ -2048,8 +2042,7 @@ upload mutation is retried automatically."
                                 processing-info)))
                              ((or "pending" "in_progress")
                               (let ((delay
-                                     (chirp-get processing-info
-                                                "check_after_secs")))
+                                     (map-nested-elt processing-info '(check_after_secs))))
                                 (schedule-status
                                  media-id attempt
                                  (if (numberp delay)

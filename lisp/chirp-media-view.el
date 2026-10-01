@@ -16,6 +16,7 @@
                   (surface &optional client-label &rest arguments))
 
 (require 'chirp-core)
+(require 'map)
 (require 'chirp-media)
 
 (defvar-local chirp--media-list nil
@@ -76,11 +77,11 @@
   (let (media-list index)
     (if (setq media-list (chirp-media-list-at-point))
         (setq index (or (chirp-media-index-at-point) 0))
-      (let ((entry (chirp-entry-at-point)))
+      (pcase-let* ((entry (chirp-entry-at-point))
+                   ((map :media :kind) entry))
         (setq media-list
-              (or (plist-get entry :media)
-                  (and (eq (plist-get entry :kind) 'tweet)
-                       (chirp-tweet-article-images entry)))
+              (or media
+                  (and (eq kind 'tweet) (chirp-tweet-article-images entry)))
               index 0)))
     (when media-list
       (or (chirp-media-video-selection media-list index)
@@ -179,20 +180,13 @@ rendered media list and item are already active."
 
 (defun chirp-media-view--present-start (_context input _observe resolve reject)
   "Present committed INPUT, borrowing its exact inline video session."
-  (let* ((intent (plist-get input :intent))
-         (source (plist-get intent :source))
-         (selection (plist-get intent :selection))
-         (media-list (chirp-media-selection-media-list selection))
-         (media (plist-get intent :media))
-         (index (plist-get intent :index))
-         (inline (plist-get intent :inline))
-         (video-p (chirp-media-video-like-p media))
-         (title (plist-get intent :title))
-         (file (plist-get input :file))
-         (reuse (plist-get intent :reuse))
-         (viewer (or (and (buffer-live-p reuse) reuse)
-                     (generate-new-buffer "*Chirp Media*")))
-         session opened-p canceling)
+  (pcase-let* (((map :intent :file) input)
+               ((map :source :selection :media :index :inline :title :reuse) intent)
+               (media-list (chirp-media-selection-media-list selection))
+               (video-p (chirp-media-video-like-p media))
+               (viewer (or (and (buffer-live-p reuse) reuse)
+                           (generate-new-buffer "*Chirp Media*")))
+               (session nil) (opened-p nil) (canceling nil))
     (condition-case condition
         (progn
           (unless (appkit-surface-live-p source)
@@ -211,12 +205,13 @@ rendered media list and item are already active."
                  (t (video-open file :kind 'image :buffer viewer))))
           (with-current-buffer viewer
             (chirp-media-view--set-state media-list index title (and (not video-p) file))
-            (setq-local chirp--media-source-buffer (plist-get intent :source-buffer)
-                        chirp--media-source-anchor (plist-get intent :anchor)
-                        chirp--media-source-window-state (plist-get intent :window-state)
-                        video-next-function (and (> (length media-list) 1) #'chirp-media-next)
-                        video-previous-function (and (> (length media-list) 1) #'chirp-media-previous)
-                        video-quit-function #'chirp-media-quit)
+            (pcase-let (((map :source-buffer :anchor :window-state) intent))
+              (setq-local chirp--media-source-buffer source-buffer
+                          chirp--media-source-anchor anchor
+                          chirp--media-source-window-state window-state
+                          video-next-function (and (> (length media-list) 1) #'chirp-media-next)
+                          video-previous-function (and (> (length media-list) 1) #'chirp-media-previous)
+                          video-quit-function #'chirp-media-quit))
             (when chirp--media-close-hook
               (remove-hook 'kill-buffer-hook chirp--media-close-hook t))
             (setq-local chirp--media-close-hook
@@ -234,8 +229,9 @@ rendered media list and item are already active."
            :cancel
            (lambda ()
              (unless (and (appkit-surface-live-p source)
-                          (eq viewer (plist-get (plist-get (appkit-surface-model source) :media-intent)
-                                                :reuse)))
+                          (eq viewer (map-nested-elt
+                                      (appkit-surface-model source)
+                                      '(:media-intent :reuse))))
                (when (buffer-live-p viewer) (setq canceling t) (kill-buffer viewer))))))
       ((error quit)
        (unless opened-p
@@ -254,13 +250,13 @@ rendered media list and item are already active."
 
 (defun chirp-media-view--acquire-start (context input observe resolve reject)
   "Acquire media without giving transport callbacks presentation authority."
-  (let* ((media (plist-get input :media))
-         (url (plist-get media :url))
-         (video-p (chirp-media-video-like-p media))
-         (cached (and (not video-p) (chirp-media-cached-file url "media" "jpg"))))
+  (pcase-let* (((map :media) input)
+               ((map :url :type) media)
+               (video-p (chirp-media-video-like-p media))
+               (cached (and (not video-p) (chirp-media-cached-file url "media" "jpg"))))
     (cond
      (video-p (funcall resolve nil) nil)
-     ((not (equal (plist-get media :type) "photo"))
+     ((not (equal type "photo"))
       (funcall reject "Unsupported media type") nil)
      (cached (funcall resolve cached) nil)
      (t (appkit-media-image-acquisition-start

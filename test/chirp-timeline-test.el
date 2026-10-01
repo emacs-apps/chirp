@@ -52,7 +52,7 @@
                        (list
                         '(:kind tweet :id "home" :text
                           "Retained\ndetail"))
-                       '(("pagination" ("nextCursor" . "home-cursor"))))
+                       '((pagination (nextCursor . "home-cursor"))))
               (appkit-loop-run-pass (appkit-surface-loop view))
               (let
                   ((home-state (appkit-surface-model view)) home-point)
@@ -82,8 +82,7 @@
                            (list
                             '(:kind tweet :id "following" :text
                               "Following"))
-                           '(("pagination"
-                              ("nextCursor" . "following-cursor"))))
+                           '((pagination (nextCursor . "following-cursor"))))
                   (appkit-loop-run-pass (appkit-surface-loop view))
                   (with-current-buffer first-buffer
                     (chirp-toggle-home-following))
@@ -367,7 +366,7 @@
                   '(:kind tweet :id "2" :text "Reply" :reply-to-id "1"
                     :reply-to-handle "alice")))
               (funcall (nth 0 callbacks) (list first reply)
-                       '(("pagination" ("nextCursor" . "older"))))
+                       '((pagination (nextCursor . "older"))))
               (appkit-loop-run-pass (appkit-surface-loop view))
               (let
                   ((first-node
@@ -431,7 +430,7 @@
               (funcall (plist-get (nth 0 requests) :success)
                        (list
                         '(:kind tweet :id "1" :text "Visible post"))
-                       '(("pagination" ("nextCursor" . "older-1"))))
+                       '((pagination (nextCursor . "older-1"))))
               (appkit-loop-run-pass (appkit-surface-loop view))
               (with-current-buffer buffer
                 (search-forward "Visible post"))
@@ -450,7 +449,7 @@
                 (funcall (plist-get (nth 1 requests) :success)
                          (list
                           '(:kind tweet :id "2" :text "Older post"))
-                         '(("pagination" ("nextCursor" . "older-2"))))
+                         '((pagination (nextCursor . "older-2"))))
                 (appkit-loop-run-pass (appkit-surface-loop view))
                 (should (= 1 rechecks)))
               (with-current-buffer buffer
@@ -494,7 +493,7 @@
                                chirp-timeline--scroll-observer)))
               (funcall (plist-get (nth 0 requests) :success)
                        (list '(:kind tweet :id "1" :text "Visible post"))
-                       '(("pagination" ("nextCursor" . "older-1"))))
+                       '((pagination (nextCursor . "older-1"))))
               (while (> (appkit-loop-pending-count (appkit-surface-loop view)) 0)
                 (appkit-loop-run-pass (appkit-surface-loop view)))
               (cl-letf (((symbol-function 'appkit-scroll-window-visible-range)
@@ -507,7 +506,7 @@
                 (should (= 2 (length requests)))
                 (setq messages nil)
                 (funcall (plist-get (nth 1 requests) :success) nil
-                         '(("pagination" ("nextCursor" . "older-2"))))
+                         '((pagination (nextCursor . "older-2"))))
                 (while (> (appkit-loop-pending-count (appkit-surface-loop view)) 0)
                   (appkit-loop-run-pass (appkit-surface-loop view)))
                 (let ((page (plist-get (appkit-surface-model view) :page)))
@@ -523,7 +522,7 @@
                 (should-not messages)
                 (funcall (plist-get (nth 2 requests) :success)
                          (list '(:kind tweet :id "2" :text "Older post"))
-                         '(("pagination" ("nextCursor" . "older-3"))))
+                         '((pagination (nextCursor . "older-3"))))
                 (should
                  (equal (mapcar (lambda (tweet) (plist-get tweet :id))
                                 (plist-get (appkit-surface-model view) :items))
@@ -570,7 +569,7 @@
               (funcall (plist-get (nth 0 requests) :success)
                        (list
                         '(:kind tweet :id "1" :text "Visible post"))
-                       '(("pagination" ("nextCursor" . "older-1"))))
+                       '((pagination (nextCursor . "older-1"))))
               (appkit-loop-run-pass (appkit-surface-loop view))
               (with-current-buffer buffer
                 (funcall
@@ -806,10 +805,10 @@
         (chirp-set-tweet-state-override "1" :liked-p t)
         (let ((tweet
                (chirp--tweet-from-x
-                '(("id" . "1")
-                  ("text" . "hello")
-                  ("liked" . chirp-json-false)
-                  ("author" . (("screenName" . "alice")))))))
+                '((id . "1")
+                  (text . "hello")
+                  (liked . chirp-json-false)
+                  (author . ((screenName . "alice")))))))
           (should-not (plist-get tweet :liked-p))
           (should (plist-get
                    (chirp-apply-tweet-state-overrides tweet)
@@ -821,37 +820,36 @@
   (let ((chirp-hide-promoted-posts t))
     (should (equal (mapcar (lambda (tweet) (plist-get tweet :id))
                            (chirp--top-level-tweets-from-x
-                            (list '(("id" . "1")
-                                    ("text" . "normal")
-                                    ("author" . (("screenName" . "alice")
-                                                 ("name" . "Alice"))))
-                                  '(("id" . "2")
-                                    ("text" . "ad")
-                                    ("isPromoted" . t)
-                                    ("author" . (("screenName" . "brand")
-                                                 ("name" . "Brand")))))))
+                            (list '((id . "1")
+                                    (text . "normal")
+                                    (author . ((screenName . "alice")
+                                                 (name . "Alice"))))
+                                  '((id . "2")
+                                    (text . "ad")
+                                    (isPromoted . t)
+                                    (author . ((screenName . "brand")
+                                                 (name . "Brand")))))))
                    '("1")))))
 
 (ert-deftest chirp-top-level-tweets-from-x-keep-retweet-identity ()
   "Self-retweets and their originals should remain distinct timeline entries."
   (let* ((retweeter
-          '(("rest_id" . "10")
-            ("legacy" . (("screen_name" . "alice")
-                         ("name" . "Alice")))))
+          '((rest_id . "10")
+            (legacy . ((screen_name . "alice")
+                         (name . "Alice")))))
          (author
-          '(("rest_id" . "20")
-            ("legacy" . (("screen_name" . "bob")
-                         ("name" . "Bob")))))
+          '((rest_id . "20")
+            (legacy . ((screen_name . "bob")
+                         (name . "Bob")))))
          (original
-          `(("rest_id" . "200")
-            ("core" . (("user_results" . (("result" . ,author)))))
-            ("legacy" . (("full_text" . "Original post")))))
+          `((rest_id . "200")
+            (core . ((user_results . ((result . ,author)))))
+            (legacy . ((full_text . "Original post")))))
          (retweet
-          `(("rest_id" . "100")
-            ("core" . (("user_results" . (("result" . ,retweeter)))))
-            ("legacy" .
-             (("full_text" . "RT @bob: Original post")
-              ("retweeted_status_result" . (("result" . ,original)))))))
+          `((rest_id . "100")
+            (core . ((user_results . ((result . ,retweeter)))))
+            (legacy . ((full_text . "RT @bob: Original post")
+             (retweeted_status_result . ((result . ,original)))))))
          (tweets (chirp--top-level-tweets-from-x
                   (list retweet original))))
     (should (equal (mapcar (lambda (tweet) (plist-get tweet :id))
@@ -928,15 +926,15 @@
   (let ((chirp-hide-promoted-posts nil))
     (should (equal (mapcar (lambda (tweet) (plist-get tweet :id))
                            (chirp--top-level-tweets-from-x
-                            (list '(("id" . "1")
-                                    ("text" . "normal")
-                                    ("author" . (("screenName" . "alice")
-                                                 ("name" . "Alice"))))
-                                  '(("id" . "2")
-                                    ("text" . "ad")
-                                    ("isPromoted" . t)
-                                    ("author" . (("screenName" . "brand")
-                                                 ("name" . "Brand")))))))
+                            (list '((id . "1")
+                                    (text . "normal")
+                                    (author . ((screenName . "alice")
+                                                 (name . "Alice"))))
+                                  '((id . "2")
+                                    (text . "ad")
+                                    (isPromoted . t)
+                                    (author . ((screenName . "brand")
+                                                 (name . "Brand")))))))
                    '("1" "2")))))
 
 (ert-deftest chirp-status-appears-in-mode-line ()
@@ -1000,10 +998,10 @@
             (((symbol-function 'chirp-backend-lists)
               (lambda (callback &optional _errback)
                 (funcall callback
-                         '((("id" . "1956792682412345678")
-                            ("name" . "Emacs") ("mode" . "private")
-                            ("sources" "owned")
-                            ("owner" ("screenName" . "lucius"))))
+                         '(((id . "1956792682412345678")
+                            (name . "Emacs") (mode . "private")
+                            (sources "owned")
+                            (owner (screenName . "lucius"))))
                          nil)))
              ((symbol-function 'completing-read)
               (lambda (prompt collection &rest _args)
@@ -1044,7 +1042,7 @@
       (setq buffer (chirp-timeline-open-list))
       (kill-buffer buffer)
       (funcall callback
-               '((("id" . "1") ("name" . "One")))
+               '(((id . "1") (name . "One")))
                nil))
     (should-not prompted)))
 

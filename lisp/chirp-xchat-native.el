@@ -12,6 +12,7 @@
 
 (require 'cl-lib)
 (require 'json)
+(require 'let-alist)
 (require 'subr-x)
 (require 'appkit-core)
 (require 'chirp-core)
@@ -349,14 +350,17 @@ set this option explicitly, and then unlock encrypted XChat support on demand."
 
 (defun chirp-xchat-native--decode-decrypt-output (raw)
   "Decode bounded native decryption output RAW into verified messages."
-  (let ((messages (alist-get 'messages raw))
-        (errors (alist-get 'errors raw)))
-    (unless (and (listp messages) (<= (length messages) 200))
-      (error "XChat native module returned invalid decrypted messages"))
-    (unless (and (listp errors) (<= (length errors) 200)
-                 (cl-every (lambda (entry) (stringp (cdr entry))) errors))
-      (error "XChat native module returned invalid decryption errors"))
-    (mapcar #'chirp-xchat-native--decode-message messages)))
+  (unless (chirp-object-p raw)
+    (error "XChat native module returned invalid decrypted messages"))
+  (let-alist raw
+    (let ((messages .messages)
+          (errors .errors))
+      (unless (and (listp messages) (<= (length messages) 200))
+        (error "XChat native module returned invalid decrypted messages"))
+      (unless (and (listp errors) (<= (length errors) 200)
+                   (cl-every (lambda (entry) (stringp (cdr entry))) errors))
+        (error "XChat native module returned invalid decryption errors"))
+      (mapcar #'chirp-xchat-native--decode-message messages))))
 
 ;;; Cryptographic Operations
 

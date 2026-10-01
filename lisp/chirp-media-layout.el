@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'map)
 
 (defconst chirp-media-layout-cover-gap 2
   "Pixel gutter between adjacent cover-grid cells.")
@@ -220,7 +221,7 @@ same large media bounds; multiple items use carousel cover boxes."
                 :widths (list width)
                 :overflow-p nil
                 :fit nil))
-      (let* ((default (list :ratio 0.68 :offset 0))
+      (pcase-let* ((default (list :ratio 0.68 :offset 0))
              (maximum
               (list :ratio chirp-media-layout-carousel-max-height-ratio
                     :offset 0))
@@ -231,22 +232,22 @@ same large media bounds; multiple items use carousel cover boxes."
                          (plist-get default :ratio)))
                   default
                 (chirp-media-layout--lower-ratio fit maximum)))
+             ((map (:ratio base-ratio)) base)
              (candidate
               (cond
                ((= (length aspects) 2)
                 (let ((two-fit
                        (chirp-media-layout--carousel-fit-candidate aspects)))
                   (if (or (null two-fit)
-                          (>= (plist-get two-fit :ratio)
-                              (plist-get base :ratio))
+                          (>= (map-elt two-fit :ratio) base-ratio)
                           (< (chirp-media-layout--carousel-visible-ratio
-                              (plist-get base :ratio) aspects)
+                              base-ratio aspects)
                              0.33))
                       base
                     two-fit)))
                ((>= (- 1
                        (chirp-media-layout--carousel-visible-ratio
-                        (plist-get base :ratio) aspects))
+                        base-ratio aspects))
                     0.33)
                 base)
                (t
@@ -272,16 +273,15 @@ same large media bounds; multiple items use carousel cover boxes."
                               (chirp-media-layout--lower-ratio
                                portrait
                                (list :ratio cap :offset 0)))))
-                    (if (> (plist-get portrait :ratio)
-                           (plist-get base :ratio))
+                    (if (> (map-elt portrait :ratio) base-ratio)
                         portrait
                       base))))))
-             (height-ratio (plist-get candidate :ratio))
+             ((map (:ratio height-ratio) :offset) candidate)
              (height
               (max 1
                    (round
                     (+ (* container-width height-ratio)
-                       (plist-get candidate :offset)))))
+                       offset))))
              (item-aspects
               (mapcar
                (lambda (aspect)
