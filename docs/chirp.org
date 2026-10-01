@@ -175,8 +175,9 @@ minutes by default.  Linux uses freedesktop notifications; macOS uses
 AppleScript.
 
 ~o t~ translates the selected tweet or quote below its unchanged original.
-Chirp uses X's translation endpoint with a 120-second deadline.  To use the
-optional, separately authenticated Respond backend instead:
+Chirp uses X's translation endpoint with a 120-second deadline.  HTML entities
+such as ~&amp;~ are decoded once, after all response chunks have been joined.
+To use the optional, separately authenticated Respond backend instead:
 
 #+begin_src emacs-lisp
 (setq chirp-translation-backend-function #'appkit-translate-respond-backend)

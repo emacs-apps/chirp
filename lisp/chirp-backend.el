@@ -2244,7 +2244,8 @@ ERRBACK receives request failures."
        :errback error-fn)))))
 
 (defun chirp-backend-translate (tweet-id language callback &optional errback)
-  "Translate TWEET-ID with Grok into LANGUAGE within 120 seconds."
+  "Translate TWEET-ID with Grok into LANGUAGE within 120 seconds.
+CALLBACK receives text with HTML entities decoded after joining chunks."
   (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
     (if (not (and (stringp language)
                   (string-match-p
@@ -2261,7 +2262,9 @@ ERRBACK receives request failures."
            (if-let* (((cl-every #'stringp chunks))
                      (translation (chirp-first-nonblank (apply #'concat chunks))))
                (funcall callback
-                        `(("id" . ,tweet-id) ("translation" . ,translation))
+                        `(("id" . ,tweet-id)
+                          ("translation"
+                           . ,(chirp-decode-html-entities translation)))
                         nil)
              (funcall error-fn "X did not return a translation"))))
        :method 'post

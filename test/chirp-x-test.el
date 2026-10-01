@@ -571,21 +571,29 @@
     (should (assoc-string "users" received t))))
 
 (ert-deftest chirp-x-translation-joins-streamed-and-cached-results ()
-  "Translation accepts cached JSON and concatenates every streamed text chunk."
+  "Translation preserves whitespace and decodes entities after joining chunks."
   (require 'chirp-backend)
-  (dolist (body '("{\"result\":{\"text\":\"译文 的\\n第二行\"}}"
-                  "{\"result\":{\"text\":\"译文\"}}\n{\"result\":{\"text\":\" \"}}\n{\"result\":{\"text\":\"的\\n第二行\"}}\n"))
+  (dolist (chunks '(("  Record &amp; Tuple\n&lt;T&gt; &quot;引号&quot; &apos;单引号&apos; &#38; &#x1F389; &amp;lt;  ")
+                    ("  Record &a" "mp; Tuple\n&lt" ";T&gt; &quot;引号&quot; &apos;单引号&apos; &#3"
+                     "8; &#x1F" "389; &amp;l" "t;  ")))
     (let (received)
       (cl-letf (((symbol-function 'chirp-x-credentials)
                  (lambda () '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
                 ((symbol-function 'chirp-x--retrieve)
                  (lambda (_url callback &rest _options)
-                   (chirp-x-test--response 200 body callback))))
+                   (chirp-x-test--response
+                    200
+                    (mapconcat
+                     (lambda (text)
+                       (json-encode `((result . ((text . ,text))))))
+                     chunks "\n")
+                    callback))))
         (chirp-backend-translate
          "123" "zh" (lambda (data _envelope)
                       (setq received (chirp-get data "translation")))
          (lambda (message) (ert-fail message))))
-      (should (equal received "译文 的\n第二行")))))
+      (should (equal received
+                     "  Record & Tuple\n<T> \"引号\" '单引号' & 🎉 &lt;  ")))))
 
 (ert-deftest chirp-x-translation-rejects-incomplete-or-failed-streams ()
   "A valid prefix must not turn truncated, errored, or failed HTTP data into success."
