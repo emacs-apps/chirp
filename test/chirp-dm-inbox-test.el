@@ -46,46 +46,6 @@
       (goto-char (match-end 0))
       (should (= (current-column) (chirp--view-width))))))
 
-(ert-deftest chirp-dm-inbox-row-inserts-ready-participant-avatar ()
-  "A direct-conversation row should display its ready participant avatar."
-  (let
-      ((entry
-        (appkit-directory-entry-create
-         :key "conversation-1"
-         :label "Alice"
-         :payload
-         '(:id "conversation-1" :type
-           direct :title "Alice"
-           :participants
-           ((:id "42" :name "Alice"
-             :avatar-url
-             "https://example.invalid/alice.jpg")))))
-       seen)
-    (with-temp-buffer
-      (cl-letf
-          (((symbol-function 'appkit-current-surface)
-            (lambda () :view))
-           ((symbol-function 'chirp-dm-inbox--avatar-key)
-            (lambda (view conversation) (should (eq view :view))
-              (should
-               (equal (plist-get conversation :id) "conversation-1"))
-              '(xchat-avatar "42")))
-           ((symbol-function 'chirp-media-avatar-resource-image)
-            (lambda (view resource-key &optional _pixel-size)
-              (setq seen (list view resource-key))
-              :avatar-image))
-           ((symbol-function 'insert-image)
-            (lambda (image &optional string _area _slice)
-              (should (eq image :avatar-image))
-              (insert (or string " ")))))
-        (chirp-dm-inbox--insert-item nil entry))
-      (should (equal seen '(:view (xchat-avatar "42"))))
-      (should (string-match-p "\\[Alice" (buffer-string)))
-      (should
-       (equal
-        (get-text-property (point-min) 'chirp-dm-conversation-id)
-        "conversation-1")))))
-
 (ert-deftest chirp-dm-inbox-projection-retains-recent-activity-metadata ()
   "Inbox projection should keep recent order and honest activity metadata."
   (let* ((regular

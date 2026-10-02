@@ -13,6 +13,7 @@
 (require 'map)
 (require 'subr-x)
 (require 'appkit-core)
+(require 'appkit-chat-avatar)
 (require 'appkit-directory)
 (require 'appkit-name-color)
 (require 'appkit-surface)
@@ -37,10 +38,6 @@
 
 (defconst chirp-dm-inbox--request-key 'dm-inbox
   "Operation key for one inbox view's active transport.")
-
-;;; Implementation
-(defconst chirp-dm-inbox--icon-slot-width 4
-  "Columns reserved for one direct-message inbox avatar.")
 
 ;;; Inbox
 
@@ -270,9 +267,7 @@
                (chirp-media-avatar-resource-image view resource-key)))
          (fallback (if (eq (plist-get conversation :type) 'group) "#" "@"))
          (start (point)))
-    (if image
-        (insert-image image fallback)
-      (insert fallback))
+    (insert (appkit-chat-avatar-one-line-string image fallback))
     (add-text-properties
      start (point)
      (list 'face (if resource-key 'default 'shadow)
@@ -325,7 +320,7 @@
         t)))
      :indent 2
      :width (chirp--view-width)
-     :icon-slot-width chirp-dm-inbox--icon-slot-width
+     :icon-slot-width 'auto
      :context-width-spec '(0.34 18 36))))
 
 (defun chirp-dm-inbox--activate-item (_surface entry)

@@ -29,7 +29,6 @@
 (require 'appkit-media-resource)
 (require 'appkit-media-effect)
 (require 'appkit-resource)
-(require 'appkit-chat-avatar)
 (require 'appkit-task-queue)
 (require 'chirp-core)
 (require 'chirp-backend)
@@ -47,14 +46,6 @@
   "~/Downloads/"
   "Directory used as the default target for downloaded media."
   :type 'directory
-  :group 'chirp)
-
-(defcustom chirp-avatar-size 28
-  "Baseline avatar size relative to one text line.
-
-28 means exactly one default-face line at the current text scale.
-Larger values grow the avatar relative to that line."
-  :type 'integer
   :group 'chirp)
 
 (defcustom chirp-media-thumbnail-size 256
@@ -1307,22 +1298,13 @@ When ANIMATED-GIF-P is non-nil, add a subtle GIF label to the badge."
      chirp-media-thumbnail-size
      (string= (plist-get media :type) "animated_gif"))))
 
-(defun chirp-media--avatar-pixel-size ()
-  "Return avatar pixel size for the current buffer's text scale.
-
-`chirp-avatar-size' is a baseline ratio where 28 is exactly one text line."
-  (let* ((line-height (appkit-chat-avatar-line-pixel-height))
-         (size-factor (/ (float (max 1 chirp-avatar-size)) 28.0)))
-    (max 8 (round (* line-height size-factor)))))
-
 (defun chirp-media-avatar-image (url)
-  "Return a small avatar image descriptor for URL."
+  "Return a canonical circular avatar descriptor for URL."
   (when-let* ((file (if chirp-media-render-from-cache-only
                         (chirp-media-cached-file url "avatars" "jpg")
-                      (chirp-media-local-file url "avatars" "jpg")))
-              (size (chirp-media--avatar-pixel-size)))
-    (or (appkit-media-circular-image-from-file file size)
-        (chirp-media--scaled-image file size size))))
+                      (chirp-media-local-file url "avatars" "jpg"))))
+    (or (appkit-media-circular-image-from-file file 28)
+        (chirp-media--scaled-image file 28 28))))
 
 (defun chirp-media-xchat-avatar-resource-key (identity url)
   "Return the stable avatar resource key for IDENTITY and URL, or nil."
@@ -1342,14 +1324,17 @@ When ANIMATED-GIF-P is non-nil, add a subtle GIF label to the badge."
 
 (defun chirp-media-avatar-resource-image
     (view resource-key &optional pixel-size)
-  "Return VIEW's cached avatar RESOURCE-KEY as an image descriptor.\n\nPIXEL-SIZE defaults to the current one-line avatar size."
+  "Return VIEW's cached avatar RESOURCE-KEY as an image descriptor.
+
+PIXEL-SIZE selects the circular source crop resolution, defaulting to 28.
+One-line display geometry is applied to a copy by Appkit."
   (when-let*
       ((entry
         (appkit-resource-state view resource-key))
        ((eq (appkit-resource-state-status entry) 'ready))
        (file (appkit-resource-state-value entry))
        ((chirp-media--valid-cache-file-p file))
-       (size (max 1 (or pixel-size (chirp-media--avatar-pixel-size)))))
+       (size (max 1 (or pixel-size 28))))
     (or (appkit-media-circular-image-from-file file size)
         (chirp-media--scaled-image file size size))))
 

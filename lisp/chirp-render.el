@@ -32,6 +32,7 @@
 (require 'subr-x)
 (require 'map)
 (require 'chirp-translate)
+(require 'appkit-chat-avatar)
 (require 'appkit-chat-ins)
 (require 'appkit-projection)
 (require 'appkit-discussion)
@@ -889,11 +890,8 @@ Precede the line with PREFIX using PREFIX-FACE when provided."
 Associate the avatar with HANDLE when provided."
   (when chirp-show-avatars
     (let ((start (point)))
-      (if-let* ((image (chirp-media-avatar-image url)))
-          (progn
-            (insert-image image " ")
-            (insert " "))
-        (insert "  "))
+      (insert (appkit-chat-avatar-one-line-string
+               (chirp-media-avatar-image url) "  "))
       (chirp-render--add-profile-action start (point) handle))))
 
 (defun chirp-render--thumbnail-width (rows)

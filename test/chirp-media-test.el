@@ -828,35 +828,6 @@ rerender and creates a CPU loop."
     (should (equal copied-target "/tmp/chirp-photo.jpg"))
     (should (equal final-message "Downloaded /tmp/chirp-photo.jpg"))))
 
-(ert-deftest chirp-media-avatar-pixel-size-follows-current-line-height ()
-  "Avatar pixels should track the current line height and `chirp-avatar-size'."
-  (let ((chirp-avatar-size 28)
-        (line-height 21))
-    (cl-letf (((symbol-function 'appkit-chat-avatar-line-pixel-height)
-               (lambda () line-height)))
-      (should (= 21 (chirp-media--avatar-pixel-size)))
-      (setq line-height 35)
-      (should (= 35 (chirp-media--avatar-pixel-size)))
-      (setq chirp-avatar-size 14)
-      (should (= 18 (chirp-media--avatar-pixel-size))))))
-
-(ert-deftest chirp-media-avatar-image-uses-current-line-pixel-size ()
-  "Avatar descriptors should be built at the current line pixel size."
-  (let ((chirp-avatar-size 28)
-        (chirp-media-render-from-cache-only t)
-        captured-size)
-    (cl-letf (((symbol-function 'appkit-chat-avatar-line-pixel-height)
-               (lambda () 35))
-              ((symbol-function 'chirp-media-cached-file)
-               (lambda (&rest _args) "/tmp/chirp-avatar.jpg"))
-              ((symbol-function 'appkit-media-circular-image-from-file)
-               (lambda (_file size)
-                 (setq captured-size size)
-                 '(image :type svg :data "avatar"))))
-      (should (equal (chirp-media-avatar-image "https://example.com/a.jpg")
-                     '(image :type svg :data "avatar")))
-      (should (= captured-size 35)))))
-
 (ert-deftest chirp-projection-preserves-inline-host-on-same-width-return ()
   "Returning to an unchanged layout preserves its inline host."
   (save-window-excursion
