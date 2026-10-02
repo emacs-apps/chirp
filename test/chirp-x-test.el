@@ -766,6 +766,63 @@
     (should (equal (alist-get "Content-Type" captured-headers nil nil #'string=)
                    "application/x-www-form-urlencoded"))))
 
+(ert-deftest chirp-x-poll-vote-authenticates-caps-form-and-decodes-results ()
+  "Poll votes send session credentials to caps and return its actual counts."
+  (require 'chirp-backend)
+  (let ((chirp--app nil)
+        (tweet '(:id "42"
+                 :poll (:card-uri "card://24" :card-name "poll2choice_text_only"
+                        :options ((:id "1" :label "A" :count 0)
+                                  (:id "2" :label "B" :count 0))
+                        :end-time 4102444800 :counts-final-p nil)))
+        captured-url captured-method captured-body captured-headers result)
+    (unwind-protect
+        (cl-letf (((symbol-function 'chirp-x-transaction-source-prepare)
+                   #'chirp-x-test--prepare-transaction)
+                  ((symbol-function 'chirp-x-credentials)
+                   (lambda ()
+                     '(:auth-token "auth" :ct0 "csrf" :bearer-token "bearer")))
+                  ((symbol-function 'chirp-x--retrieve)
+                   (lambda (url callback _callback-args _silent _inhibit-cookies)
+                     (setq captured-url url
+                           captured-method url-request-method
+                           captured-body url-request-data
+                           captured-headers url-request-extra-headers)
+                     (chirp-x-test--response
+                      200
+                      (concat
+                       "{\"card\":{\"url\":\"card://24\",\"name\":\"poll2choice_text_only\","
+                       "\"binding_values\":{"
+                       "\"choice1_label\":{\"string_value\":\"A\"},"
+                       "\"choice2_label\":{\"string_value\":\"B\"},"
+                       "\"choice1_count\":{\"string_value\":\"5\"},"
+                       "\"choice2_count\":{\"string_value\":\"3\"},"
+                       "\"selected_choice\":{\"string_value\":\"1\"},"
+                       "\"end_datetime_utc\":{\"string_value\":\"2100-01-01T00:00:00Z\"},"
+                       "\"counts_are_final\":{\"boolean_value\":false}}}}")
+                      callback))))
+          (chirp-backend-vote-poll
+           tweet "1" (lambda (poll _envelope) (setq result poll)) #'ert-fail)
+          (should (equal captured-url "https://caps.x.com/v2/capi/passthrough/1"))
+          (should (equal captured-method "POST"))
+          (dolist (pair '(("twitter:string:card_uri" . "card://24")
+                          ("twitter:long:original_tweet_id" . "42")
+                          ("twitter:string:response_card_name" . "poll2choice_text_only")
+                          ("twitter:string:cards_platform" . "Web-12")
+                          ("twitter:string:selected_choice" . "1")))
+            (should (member (concat (car pair) "=" (cdr pair))
+                            (split-string (url-unhex-string captured-body) "&"))))
+          (dolist (pair '(("Authorization" . "Bearer bearer")
+                          ("Cookie" . "auth_token=auth; ct0=csrf")
+                          ("x-csrf-token" . "csrf")
+                          ("Content-Type" . "application/x-www-form-urlencoded")))
+            (should (equal (cdr (assoc-string (car pair) captured-headers t))
+                           (cdr pair))))
+          (should (= (plist-get result :total-votes) 8))
+          (should (equal (plist-get result :selected-choice) "1"))
+          (should-not (plist-get result :counts-final-p)))
+      (chirp-stop))))
+
 (ert-deftest chirp-x-api-rejects-untrusted-paths-before-authentication ()
   "REST paths must not escape the fixed authenticated API roots."
   (let (authenticated requested failure)

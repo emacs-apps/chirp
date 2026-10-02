@@ -24,6 +24,8 @@
 (declare-function chirp-toggle-like-at-point "chirp-actions" ())
 (declare-function chirp-toggle-bookmark-at-point "chirp-actions" ())
 (declare-function chirp-quote-at-point "chirp-actions" ())
+(declare-function chirp-poll-vote "chirp-actions" (tweet choice-id))
+(declare-function chirp-poll-pending-p "chirp-actions" (tweet-id))
 (declare-function chirp-edit-history-open-tweet "chirp-edit-history" (tweet))
 (declare-function chirp-media-open-dedicated "chirp-media-view"
                   (selection &optional title buffer external-fallback))
@@ -185,6 +187,21 @@ Set this to nil or an empty string to disable tweet separators."
 (defface chirp-active-metric-face
   '((t :inherit (bold success)))
   "Face used for active tweet state metrics."
+  :group 'chirp)
+
+(defface chirp-poll-option-face
+  '((t :inherit button))
+  "Face used for available poll choices."
+  :group 'chirp)
+
+(defface chirp-poll-winner-face
+  '((t :inherit (bold success)))
+  "Face used for poll choices tied for the most votes."
+  :group 'chirp)
+
+(defface chirp-poll-selected-face
+  '((t :inherit (bold font-lock-keyword-face)))
+  "Face used for the viewer's poll choice."
   :group 'chirp)
 
 (defface chirp-liked-metric-face
@@ -786,6 +803,97 @@ PREFIX supplies the card's outer nesting indentation."
 Precede each card with PREFIX using PREFIX-FACE when provided."
   (dolist (card (chirp-media-link-cards-for-tweet tweet))
     (chirp-render--insert-link-card card prefix prefix-face)))
+
+;;; Polls
+
+(defun chirp-render--poll-status (poll state)
+  "Return the visible status of POLL, including pending vote STATE.
+Only the server's final-counts flag identifies final results."
+  (cond
+   ((eq state 'unknown)
+    "Vote outcome unknown; refresh to check X")
+   (state "Submitting vote")
+   ((plist-get poll :counts-final-p) "Final results")
+   ((chirp-poll-closed-p poll) "Voting closed; results not final")
+   ((numberp (plist-get poll :end-time))
+    (let ((seconds (max 1 (ceiling (- (plist-get poll :end-time)
+                                    (float-time))))))
+      (cond
+       ((>= seconds 86400)
+        (format "%dd %dh left" (/ seconds 86400) (/ (% seconds 86400) 3600)))
+       ((>= seconds 3600)
+        (format "%dh %dm left" (/ seconds 3600) (/ (% seconds 3600) 60)))
+       ((>= seconds 60) (format "%dm left" (/ seconds 60)))
+       (t "Less than a minute left"))))
+   (t "Closing time unavailable")))
+
+(defun chirp-render--insert-poll (tweet prefix write-actions-p)
+  "Insert TWEET's poll as a card nested below PREFIX.
+WRITE-ACTIONS-P permits voting only in an open, unvoted poll.  Results
+remain hidden until the viewer has voted or voting has closed."
+  (when-let* ((poll (plist-get tweet :poll))
+              (options (plist-get poll :options)))
+    (let* ((selected (plist-get poll :selected-choice))
+           (results-p (or selected (chirp-poll-closed-p poll)))
+           (state (and (fboundp 'chirp-poll-pending-p)
+                       (chirp-poll-pending-p (plist-get tweet :id))))
+           (votable-p (and write-actions-p
+                           (not state)
+                           (chirp-poll-votable-p poll)))
+           (total (plist-get poll :total-votes))
+           (maximum (apply #'max (mapcar (lambda (option)
+                                          (plist-get option :count))
+                                        options))))
+      (chirp-render--with-card
+       prefix
+       (lambda (card-prefix)
+         (let ((bar-width
+                (max 4 (min 20 (- (chirp--view-width)
+                                  (string-width
+                                   (appkit-ui-prefix-string card-prefix))
+                                  12)))))
+           (dolist (option options)
+             (let* ((id (plist-get option :id))
+                    (count (plist-get option :count))
+                    (selected-p (equal selected id))
+                    (winner-p (and results-p (> maximum 0)
+                                   (= count maximum)))
+                    (faces (append
+                            (when selected-p '(chirp-poll-selected-face))
+                            (when winner-p '(chirp-poll-winner-face))))
+                    (label (concat (if selected-p "[x] " "[ ] ")
+                                   (chirp-clean-text
+                                    (plist-get option :label))))
+                    (start (point)))
+               (if votable-p
+                   (appkit-ui-insert-action-button
+                    label
+                    (lambda ()
+                      ;; A previous click may still be awaiting a redraw.
+                      (when (and (not (chirp-poll-pending-p
+                                       (plist-get tweet :id)))
+                                 (chirp-poll-votable-p poll))
+                        (chirp-poll-vote tweet id)))
+                    :face 'chirp-poll-option-face
+                    :help-echo "Vote for this choice (votes cannot be changed)")
+                 (insert (if faces (propertize label 'face faces) label)))
+               (when results-p
+                 (let ((ratio (if (> total 0) (/ (float count) total) 0.0)))
+                   (insert
+                    (propertize
+                     (format "  %.1f%%  [%s]"
+                             (* 100 ratio)
+                             (appkit-ui-progress-bar ratio bar-width ?= ?.))
+                     'face (or faces 'chirp-meta-face)))))
+               (insert "\n")
+               (appkit-ui-apply-line-prefix start (point) card-prefix)))
+           (appkit-ui-insert-prefixed-lines
+            card-prefix
+            (format "%d %s · %s"
+                    total (if (= total 1) "vote" "votes")
+                    (chirp-render--poll-status poll state))
+            :face 'chirp-meta-face))))
+      (insert "\n"))))
 
 ;;; Quoted Tweets and Replies
 
@@ -1688,6 +1796,7 @@ newlines after the metrics row."
      (chirp-render--trailing-urls tweet) prefix prefix-face)
     (chirp-render-insert-media-strip
      (plist-get tweet :media) prefix prefix-face media-presentation)
+    (chirp-render--insert-poll tweet prefix write-actions-p)
     (chirp-render--insert-quoted-tweet
      tweet prefix prefix-face write-actions-p)
     (chirp-render--insert-reply-control tweet prefix prefix-face)

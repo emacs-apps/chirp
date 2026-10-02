@@ -1355,6 +1355,81 @@ ERRBACK receives a single human-readable string."
          (funcall error-fn
                   (format "Unknown Chirp backend action: %s" (car args))))))))
 
+;;; Polls
+
+(defun chirp-backend--poll-result (object)
+  "Return OBJECT's poll only when every result count came from the server."
+  (when-let* ((poll (chirp--poll-from-x object))
+              (bindings (chirp--tweet-card-bindings object)))
+    (and (cl-every
+          (lambda (option)
+            (let ((count (chirp--card-binding-raw-string
+                          bindings (format "choice%s_count"
+                                           (plist-get option :id)))))
+              (and count (string-match-p "\\`[0-9]+\\'" count))))
+          (plist-get poll :options))
+         poll)))
+
+(defun chirp-backend-vote-poll (tweet choice-id callback &optional error-fn)
+  "Vote for CHOICE-ID on TWEET and return the authoritative poll to CALLBACK.
+CALLBACK receives the normalized poll and the write response envelope.
+ERROR-FN receives a readable error; an accepted write whose results cannot
+be refreshed is reported as an unknown write outcome, never as safe to retry."
+  (let* ((poll (plist-get tweet :poll))
+         (tweet-id (plist-get tweet :id))
+         (card-uri (plist-get poll :card-uri))
+         (card-name (plist-get poll :card-name))
+         (error-fn (or error-fn (lambda (text) (message "%s" text)))))
+    (cond
+     ((not (and (stringp tweet-id)
+                (string-match-p "\\`[0-9]+\\'" tweet-id)))
+      (funcall error-fn "Poll voting requires a numeric tweet ID"))
+     ((not (chirp-poll-votable-p poll))
+      (funcall error-fn "This poll is closed, already voted on, or incomplete"))
+     ((not (cl-find choice-id (plist-get poll :options)
+                    :key (lambda (option) (plist-get option :id)) :test #'equal))
+      (funcall error-fn "Poll choice is invalid"))
+     (t
+      ;; X's caps API returns {card: {url, name, binding_values}}.
+      ;; Request/response contract: twikit/client/v11.py V11Client.vote and
+      ;; twikit/client/client.py Client.vote (d60/twikit).
+      (chirp-x-api-request
+       'caps "capi/passthrough/1"
+       (lambda (payload)
+         (chirp-backend-invalidate-thread tweet-id)
+         (cl-labels
+             ((finish (updated)
+                (if (and updated
+                         (equal (plist-get updated :card-uri) card-uri))
+                    (progn
+                      ;; The accepted vote confirms selection, not a locally
+                      ;; incremented count; all counts remain server supplied.
+                      (unless (plist-get updated :selected-choice)
+                        (setf (plist-get updated :selected-choice) choice-id))
+                      (funcall callback updated payload))
+                  (fail "X did not return the voted poll")))
+              (fail (text)
+                (funcall error-fn
+                         (chirp-x-unknown-write-outcome
+                          (concat "Poll results could not be refreshed. " text)))))
+           (let ((updated (chirp-backend--poll-result payload)))
+             (if (and updated
+                      (equal (plist-get updated :card-uri) card-uri))
+                 (finish updated)
+               ;; Bypass timeline caches and any in-flight pre-vote read.
+               (chirp-backend-read-created-tweet
+                tweet-id
+                (lambda (fresh)
+                  (finish (chirp-backend--poll-result (plist-get fresh :raw))))
+                #'fail nil)))))
+       :method 'post
+       :form `(("twitter:string:card_uri" . ,card-uri)
+               ("twitter:long:original_tweet_id" . ,tweet-id)
+               ("twitter:string:response_card_name" . ,card-name)
+               ("twitter:string:cards_platform" . "Web-12")
+               ("twitter:string:selected_choice" . ,choice-id))
+       :errback error-fn)))))
+
 ;;; Direct Messages
 
 (defun chirp-backend-envelope-next-cursor (envelope)

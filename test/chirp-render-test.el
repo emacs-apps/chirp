@@ -51,6 +51,178 @@
       (chirp-render-insert-tweet-row tweet previous)
       (setq previous tweet))))
 
+(defun chirp-test--poll-tweet ()
+  "Return an open poll with the supplied example's four result counts."
+  (list :kind 'tweet :id "2105977652825796816"
+        :text "Which behavior do you prefer?"
+        :author-name "RustRover" :author-handle "rustrover"
+        :poll (list :card-uri "card://2105977651903004673"
+                    :card-name "poll4choice_text_only"
+                    :options '((:id "1" :label "Both" :count 125)
+                               (:id "2" :label "Only the first" :count 82)
+                               (:id "3" :label "Only the second" :count 67)
+                               (:id "4" :label "Neither" :count 25))
+                    :selected-choice nil
+                    :end-time (+ (float-time) 3600)
+                    :counts-final-p nil :total-votes 299)))
+
+(ert-deftest chirp-render-poll-final-results ()
+  "Final results include every answer, its share, and the exact total."
+  (let* ((tweet (chirp-test--poll-tweet))
+         (poll (plist-get tweet :poll))
+         (chirp-show-avatars nil))
+    (setf (plist-get poll :counts-final-p) t)
+    (with-temp-buffer
+      (chirp-render-insert-tweet tweet)
+      (dolist (answer '(("Both" . "41.8%")
+                        ("Only the first" . "27.4%")
+                        ("Only the second" . "22.4%")
+                        ("Neither" . "8.4%")))
+        (goto-char (point-min))
+        (search-forward (car answer))
+        (let ((position (match-beginning 0))
+              (line-end (line-end-position)))
+          (should-not (button-at position))
+          (should (search-forward (cdr answer) line-end t))
+          (should (eq (not (null
+                            (chirp-test--face-member-p
+                             'chirp-poll-winner-face
+                             (get-text-property position 'face))))
+                      (equal (car answer) "Both")))))
+      (goto-char (point-min))
+      (should (search-forward "299" nil t)))))
+
+(ert-deftest chirp-render-poll-zero-and-tied-results ()
+  "Empty polls have empty bars; tied leaders and selection stay distinct."
+  (dolist (count '(0 5))
+    (let* ((tweet (chirp-test--poll-tweet))
+           (poll (plist-get tweet :poll))
+           (chirp-show-avatars nil))
+      (setf (plist-get poll :options)
+            (list (list :id "1" :label "First option" :count count)
+                  (list :id "2" :label "Second option" :count count))
+            (plist-get poll :total-votes) (* 2 count)
+            (plist-get poll :selected-choice) "2")
+      (with-temp-buffer
+        (chirp-render-insert-tweet tweet)
+        (dolist (label '("First option" "Second option"))
+          (goto-char (point-min))
+          (search-forward label)
+          (let* ((position (match-beginning 0))
+                 (face (get-text-property position 'face))
+                 (end (line-end-position)))
+            (should-not (button-at position))
+            (should (eq (> count 0)
+                        (not (null (chirp-test--face-member-p
+                                    'chirp-poll-winner-face face)))))
+            (should (eq (equal label "Second option")
+                        (not (null (chirp-test--face-member-p
+                                    'chirp-poll-selected-face face)))))
+            (should (search-forward (if (= count 0) "0.0%" "50.0%") end t))
+            (should (eq (> count 0)
+                        (not (null (search-forward "=" end t)))))))))))
+
+(ert-deftest chirp-render-poll-voting-availability ()
+  "Only open, unvoted, writable polls have actionable answer buttons."
+  (dolist (state '(open selected elapsed final no-deadline no-card
+                       pending unknown historical historical-quoted))
+    (let* ((tweet (chirp-test--poll-tweet))
+           (poll (plist-get tweet :poll))
+           (chirp-show-avatars nil))
+      (pcase state
+        ('selected (setf (plist-get poll :selected-choice) "1"))
+        ('elapsed (setf (plist-get poll :end-time) (1- (float-time))))
+        ('final (setf (plist-get poll :counts-final-p) t))
+        ('no-deadline (setf (plist-get poll :end-time) nil))
+        ('no-card (setf (plist-get poll :card-uri) nil)))
+      (with-temp-buffer
+        (cl-letf (((symbol-function 'chirp-poll-pending-p)
+                   (lambda (_id) (and (memq state '(pending unknown)) state))))
+          (if (memq state '(historical historical-quoted))
+              (chirp-render-insert-edit-history-row
+               (list :key '(edit-version "old") :latest-p nil
+                     :tweet (if (eq state 'historical-quoted)
+                                (list :kind 'tweet :id "outer"
+                                      :text "Historical quote"
+                                      :quoted-tweet tweet)
+                              tweet)))
+            (chirp-render-insert-tweet tweet)))
+        (dolist (label '("Both" "Only the first" "Only the second" "Neither"))
+          (goto-char (point-min))
+          (search-forward label)
+          (should (eq (eq state 'open)
+                      (not (null (button-at (match-beginning 0)))))))
+        (goto-char (point-min))
+        (should (eq (not (null (memq state '(selected elapsed final))))
+                    (not (null (search-forward "%" nil t)))))))))
+
+(ert-deftest chirp-render-poll-nested-surfaces-preserve-labels-and-indent ()
+  "Polls retain long labels and card geometry in every shared tweet surface."
+  (let* ((tweet (chirp-test--poll-tweet))
+         (label (concat (make-string 140 ?a) "\ncontinued answer"))
+         (chirp-show-avatars nil)
+         (border (appkit-ui-vbar-string 'chirp-quoted-tweet-border-face)))
+    (setf (plist-get (plist-get tweet :poll) :options)
+          (list (list :id "1" :label label :count 0)
+                (list :id "2" :label "Second answer" :count 0)))
+    (dolist (surface '(timeline focus embedded quoted))
+      (with-temp-buffer
+        (chirp-view-mode)
+        (let ((inhibit-read-only t))
+          (pcase surface
+            ('timeline (chirp-render-insert-tweet tweet))
+            ('focus
+             (chirp-render-insert-discussion-entry
+              (chirp-test--discussion-row tweet t)))
+            ('embedded
+             (chirp-render-insert-tweet-card tweet :write-actions-p t))
+            ('quoted
+             (chirp-render-insert-tweet
+              (list :kind 'tweet :id "outer" :text "Outer tweet"
+                    :quoted-tweet tweet)))))
+        (goto-char (point-min))
+        (should (search-forward label nil t))
+        (let ((label-start (match-beginning 0)))
+          (should (button-at label-start))
+          (dolist (property '(line-prefix wrap-prefix))
+            (goto-char (point-min))
+            (search-forward "Which behavior do you prefer?")
+            (let ((body-prefix (or (get-text-property
+                                    (match-beginning 0) property)
+                                   "")))
+              (should (equal (concat body-prefix border)
+                             (get-text-property label-start property)))
+              (goto-char label-start)
+              (search-forward "continued answer")
+              (should (equal (concat body-prefix border)
+                             (get-text-property
+                              (match-beginning 0) property))))))))))
+
+(ert-deftest chirp-render-poll-pending-blocks-stale-buttons ()
+  "An answer button cannot submit twice before pending views redraw."
+  (let* ((tweet (chirp-test--poll-tweet))
+         (chirp-show-avatars nil)
+         pending submissions)
+    (with-temp-buffer
+      (chirp-view-mode)
+      (cl-letf (((symbol-function 'chirp-poll-pending-p)
+                 (lambda (_id) pending))
+                ((symbol-function 'chirp-poll-vote)
+                 (lambda (target choice)
+                   (push (cons (plist-get target :id) choice) submissions)
+                   (setq pending 'pending))))
+        (let ((inhibit-read-only t))
+          (chirp-render-insert-tweet
+           (list :kind 'tweet :id "outer" :text "A quoted poll"
+                 :quoted-tweet tweet)))
+        (goto-char (point-min))
+        (search-forward "Only the second")
+        (goto-char (match-beginning 0))
+        (push-button)
+        (push-button)
+        (should (equal submissions '(("2105977652825796816" . "3"))))
+        (should buffer-read-only)))))
+
 (defun chirp-test--sample-article-tweet ()
   "Return a normalized tweet payload with article metadata."
   (chirp--tweet-from-x

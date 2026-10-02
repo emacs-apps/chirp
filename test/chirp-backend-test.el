@@ -97,6 +97,247 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
      edit_history_timeline timeline)
    entries))
 
+(defun chirp-backend-test--poll-card (&optional counts selected final end)
+  "Return a legacy poll card with COUNTS, SELECTED, FINAL, and END bindings."
+  (copy-tree
+   `((name . "poll4choice_text_only")
+    (url . "card://2105977651903004673")
+    (binding_values
+     . ,(append
+         (cl-loop for label in '("Both" "Only the first" "Only the second" "Neither")
+                  for count in (or counts '(125 82 67 25))
+                  for index from 1
+                  append
+                  (list (cons (intern (format "choice%d_label" index))
+                              `((string_value . ,label)))
+                        (cons (intern (format "choice%d_count" index))
+                              `((string_value . ,(number-to-string count))))))
+         `((counts_are_final . ((boolean_value . ,final)))
+           (end_datetime_utc . ((string_value . ,(or end "2100-01-01T00:00:00Z")))))
+         (when selected `((selected_choice . ((string_value . ,selected))))))))))
+
+(defun chirp-backend-test--poll-tweet (&optional card)
+  "Return a raw tweet carrying CARD or the four-choice poll fixture."
+  `((rest_id . "2105977652825796816")
+    (legacy . ((full_text . "Which do you use?")))
+    (card . ((legacy . ,(or card (chirp-backend-test--poll-card)))))))
+
+(ert-deftest chirp-poll-normalizes-binding-shapes-and-example-results ()
+  "GraphQL arrays and legacy maps expose the same authoritative poll state."
+  (dolist (shape '(alist list vector))
+    (let* ((card (chirp-backend-test--poll-card
+                  nil "2" t "2026-10-02T18:06:14Z"))
+           (bindings (alist-get 'binding_values card)))
+      (unless (eq shape 'alist)
+        (setq bindings
+              (mapcar (lambda (binding)
+                        `((key . ,(symbol-name (car binding)))
+                          (value . ,(cdr binding))))
+                      bindings))
+        (setf (alist-get 'binding_values card)
+              (if (eq shape 'vector) (vconcat bindings) bindings)))
+      (let* ((tweet (chirp--tweet-from-x (chirp-backend-test--poll-tweet card)))
+             (poll (plist-get tweet :poll)))
+        (should (equal (plist-get poll :card-uri) "card://2105977651903004673"))
+        (should (equal (plist-get poll :card-name) "poll4choice_text_only"))
+        (should (equal (plist-get poll :options)
+                       '((:id "1" :label "Both" :count 125)
+                         (:id "2" :label "Only the first" :count 82)
+                         (:id "3" :label "Only the second" :count 67)
+                         (:id "4" :label "Neither" :count 25))))
+        (should (= (plist-get poll :total-votes) 299))
+        (should (equal (plist-get poll :selected-choice) "2"))
+        (should (= (plist-get poll :end-time)
+                   (float-time (date-to-time "2026-10-02T18:06:14Z"))))
+        (should (plist-get poll :counts-final-p))
+        (should (chirp-poll-closed-p poll))
+        (should-not (chirp-poll-votable-p poll))
+        (should-not (plist-get tweet :link-card))))))
+
+(ert-deftest chirp-poll-zero-votes-false-booleans-and-deadlines ()
+  "False JSON sentinels do not close open polls; unknown deadlines cannot vote."
+  (dolist (false '(nil :json-false :false chirp-json-false "false"))
+    (let ((poll (chirp--poll-from-x
+                 (chirp-backend-test--poll-tweet
+                  (chirp-backend-test--poll-card '(0 0 0 0) nil false)))))
+      (should (= (plist-get poll :total-votes) 0))
+      (should-not (plist-get poll :counts-final-p))
+      (should (chirp-poll-votable-p poll))
+      (setf (plist-get poll :end-time) 1)
+      (should (chirp-poll-closed-p poll))
+      (should-not (chirp-poll-votable-p poll))
+      (setf (plist-get poll :end-time) nil)
+      (should-not (chirp-poll-votable-p poll))))
+  (let ((poll (chirp--poll-from-x
+               (chirp-backend-test--poll-tweet
+                (chirp-backend-test--poll-card nil nil nil "not a date")))))
+    (should-not (plist-get poll :end-time))
+    (should-not (chirp-poll-votable-p poll))))
+
+(ert-deftest chirp-poll-supports-two-three-options-and-rejects-website-cards ()
+  "The card type determines the option count, never incidental label bindings."
+  (dolist (size '(2 3))
+    (let ((card (chirp-backend-test--poll-card)))
+      (setf (alist-get 'name card) (format "poll%dchoice_text_only" size))
+      (let ((poll (chirp--poll-from-x (chirp-backend-test--poll-tweet card))))
+        (should (= (length (plist-get poll :options)) size))
+        (should (chirp-poll-votable-p poll)))))
+  (let ((card (chirp-backend-test--poll-card)))
+    (setf (alist-get 'name card) "summary")
+    (should-not (chirp--poll-from-x (chirp-backend-test--poll-tweet card))))
+  (let* ((card (chirp-backend-test--poll-card))
+         (bindings (alist-get 'binding_values card)))
+    (setf (alist-get 'choice2_label bindings) nil)
+    (should-not (chirp--poll-from-x (chirp-backend-test--poll-tweet card)))))
+
+(ert-deftest chirp-poll-preserves-quoted-and-retweeted-polls ()
+  "Nested tweet paths preserve poll identity rather than the wrapper's ID."
+  (let* ((raw (chirp-backend-test--poll-tweet))
+         (quote (chirp--tweet-from-x
+                 `((rest_id . "10") (legacy . ((full_text . "quote")))
+                   (quoted_status_result . ((result . ,raw))))))
+         (retweet (chirp--tweet-from-x
+                   `((rest_id . "11")
+                     (legacy . ((retweeted_status_result . ((result . ,raw)))))))))
+    (should (= (plist-get (plist-get (plist-get quote :quoted-tweet) :poll)
+                         :total-votes) 299))
+    (should (equal (plist-get retweet :id) "2105977652825796816"))
+    (should (equal (plist-get retweet :retweet-id) "11"))
+    (should (= (plist-get (plist-get retweet :poll) :total-votes) 299))))
+
+(ert-deftest chirp-poll-hides-card-placeholders-without-hiding-external-links ()
+  "Poll attachment URLs disappear while ordinary links remain useful."
+  (dolist (entities '(nil
+                     (((url . "https://t.co/poll") (expanded_url . "card://2105977651903004673")
+                       (indices . (5 22))))))
+    (let ((raw (chirp-backend-test--poll-tweet)))
+      (setf (alist-get 'legacy raw)
+            `((full_text . "Vote https://t.co/poll")
+              (entities . ((urls . ,entities)))))
+      (let ((tweet (chirp--tweet-from-x raw)))
+        (should (equal (plist-get tweet :text) "Vote"))
+        (should-not (plist-get tweet :urls)))))
+  (let ((raw (chirp-backend-test--poll-tweet)))
+    (setf (alist-get 'legacy raw)
+          '((full_text . "See https://t.co/site https://t.co/poll")
+            (entities . ((urls . (((url . "https://t.co/site")
+                                   (expanded_url . "https://example.org/")
+                                   (display_url . "example.org")
+                                   (indices . (4 21)))))))))
+    (let ((tweet (chirp--tweet-from-x raw)))
+      (should (equal (plist-get tweet :text) "See example.org"))
+      (should (equal (plist-get tweet :urls) '("https://example.org/"))))))
+
+(ert-deftest chirp-poll-retains-image-and-video-media ()
+  "Media poll cards keep their attachment alongside poll options."
+  (dolist (type '(image video))
+    (let* ((card (chirp-backend-test--poll-card))
+           (bindings (alist-get 'binding_values card)))
+      (setf (alist-get 'name card) (format "poll4choice_%s" type))
+      (setf (alist-get 'binding_values card)
+            (append bindings
+                    '((image_large . ((image_value . ((url . "https://pbs.twimg.com/poll.jpg")
+                                                      (width . 800) (height . 600)))))
+                      (player_stream_url . ((string_value . "https://video.twimg.com/poll.mp4")))
+                      (player_image . ((image_value . ((url . "https://pbs.twimg.com/poll.jpg"))))))))
+      (let* ((tweet (chirp--tweet-from-x (chirp-backend-test--poll-tweet card)))
+             (media (car (plist-get tweet :media))))
+        (should (plist-get tweet :poll))
+        (should (equal (plist-get media :type) (if (eq type 'image) "photo" "video")))
+        (should (equal (plist-get media :url)
+                       (if (eq type 'image) "https://pbs.twimg.com/poll.jpg"
+                         "https://video.twimg.com/poll.mp4")))))))
+
+(ert-deftest chirp-backend-poll-vote-returns-server-counts-and-selection ()
+  "Voting accepts concurrent voters' counts rather than locally adding one."
+  (let ((chirp--app nil)
+        (tweet (chirp--tweet-from-x (chirp-backend-test--poll-tweet)))
+        result)
+    (unwind-protect
+        (cl-letf (((symbol-function 'chirp-x-api-request)
+                   (lambda (_service _path callback &rest _keys)
+                     (funcall callback
+                              `((card . ,(chirp-backend-test--poll-card
+                                          '(130 90 68 25))))))))
+          (chirp-backend-vote-poll tweet "2"
+                                  (lambda (poll _envelope) (setq result poll))
+                                  #'ert-fail)
+          (should (= (plist-get result :total-votes) 313))
+          (should (= (plist-get (nth 1 (plist-get result :options)) :count) 90))
+          (should (equal (plist-get result :selected-choice) "2"))
+          (should (= (plist-get (plist-get tweet :poll) :total-votes) 299)))
+      (chirp-stop))))
+
+(ert-deftest chirp-backend-poll-vote-refreshes-and-preserves-uncertain-outcomes ()
+  "Missing write results refresh once; refresh failure is never safe to retry."
+  (let ((chirp--app nil)
+        (tweet (chirp--tweet-from-x (chirp-backend-test--poll-tweet)))
+        result failure fail-refresh)
+    (unwind-protect
+        (cl-letf (((symbol-function 'chirp-x-api-request)
+                   (lambda (_service _path callback &rest _keys)
+                     (funcall callback '((ok . t)))))
+                  ((symbol-function 'chirp-backend-read-created-tweet)
+                   (lambda (_id callback errback _owner)
+                     (if fail-refresh
+                         (funcall errback "offline")
+                       (funcall callback
+                                (chirp--tweet-from-x
+                                 (chirp-backend-test--poll-tweet
+                                  (chirp-backend-test--poll-card '(126 90 67 25) "2"))))))))
+          (chirp-backend-vote-poll tweet "2"
+                                  (lambda (poll _envelope) (setq result poll))
+                                  #'ert-fail)
+          (should (= (plist-get result :total-votes) 308))
+          (should (equal (plist-get result :selected-choice) "2"))
+          (setq fail-refresh t result nil)
+          (chirp-backend-vote-poll tweet "2"
+                                  (lambda (&rest _) (ert-fail "Unexpected success"))
+                                  (lambda (text) (setq failure text)))
+          (should (string-prefix-p "X write outcome is unknown" failure))
+          (should (string-match-p "offline" failure)))
+      (chirp-stop))))
+
+(ert-deftest chirp-backend-poll-vote-does-not-invent-missing-result-counts ()
+  "A partial successful card must refresh, not replace real counts with zeros."
+  (let ((chirp--app nil)
+        (tweet (chirp--tweet-from-x (chirp-backend-test--poll-tweet)))
+        failure)
+    (unwind-protect
+        (cl-letf (((symbol-function 'chirp-x-api-request)
+                   (lambda (_service _path callback &rest _keys)
+                     (let* ((card (chirp-backend-test--poll-card))
+                            (bindings (alist-get 'binding_values card)))
+                       (setf (alist-get 'choice2_count bindings) nil)
+                       (funcall callback `((card . ,card))))))
+                  ((symbol-function 'chirp-backend-read-created-tweet)
+                   (lambda (_id _callback errback _owner)
+                     (funcall errback "results unavailable"))))
+          (chirp-backend-vote-poll
+           tweet "2" (lambda (&rest _) (ert-fail "Invented poll results"))
+           (lambda (text) (setq failure text)))
+          (should (string-prefix-p "X write outcome is unknown" failure))
+          (should (= (plist-get (plist-get tweet :poll) :total-votes) 299)))
+      (chirp-stop))))
+
+(ert-deftest chirp-backend-poll-vote-propagates-errors-and-rejects-ineligible-votes ()
+  "Server rejection propagates, and closed, selected, or invalid votes never post."
+  (let ((tweet (chirp--tweet-from-x (chirp-backend-test--poll-tweet)))
+        (requests 0) failure)
+    (cl-letf (((symbol-function 'chirp-x-api-request)
+               (lambda (_service _path _callback &rest keys)
+                 (cl-incf requests)
+                 (funcall (plist-get keys :errback) "X request failed (HTTP 403)"))))
+      (chirp-backend-vote-poll tweet "1" #'ignore (lambda (text) (setq failure text)))
+      (should (equal failure "X request failed (HTTP 403)"))
+      (chirp-backend-vote-poll tweet "9" #'ignore #'ignore)
+      (setf (plist-get (plist-get tweet :poll) :selected-choice) "2")
+      (chirp-backend-vote-poll tweet "1" #'ignore #'ignore)
+      (setf (plist-get (plist-get tweet :poll) :selected-choice) nil
+            (plist-get (plist-get tweet :poll) :counts-final-p) t)
+      (chirp-backend-vote-poll tweet "1" #'ignore #'ignore)
+      (should (= requests 1)))))
+
 (ert-deftest chirp-stop-discards-session-owned-backend-state ()
   "Restarting Chirp should use new completed and in-flight cache tables."
   (let ((chirp--app nil))

@@ -92,6 +92,7 @@ over dynamically refreshed read IDs and built-in fallbacks."
 (defconst chirp-x--rest-base-urls
   '((web . "https://x.com/i/api/")
     (legacy . "https://api.x.com/1.1/")
+    (caps . "https://caps.x.com/v2/")
     (upload . "https://upload.twitter.com/i/media/")
     (upload-legacy . "https://upload.twitter.com/1.1/"))
   "Trusted X web API roots that may receive session credentials.")
@@ -1239,8 +1240,9 @@ TIMEOUT-MESSAGE describes that terminal failure."
              timeout timeout-message (response-type 'json))
   "Request an authenticated X API PATH from SERVICE asynchronously.
 
-SERVICE is `web' for x.com/i/api or `legacy' for api.x.com/1.1.  METHOD may be
-`get' or `post'.  QUERY and FORM are string-keyed alists.  FORM and JSON are
+SERVICE is `web' for x.com/i/api, `legacy' for api.x.com/1.1, or `caps'
+for caps.x.com/v2 poll cards.  METHOD may be `get' or `post'.
+QUERY and FORM are string-keyed alists.  FORM and JSON are
 mutually exclusive POST bodies; JSON is encoded as application/json.
 CALLBACK receives decoded data, and ERRBACK receives one readable error string.
 RESPONSE-TYPE selects `json', `json-stream', or `binary'.  OWNER optionally

@@ -1737,6 +1737,130 @@ Return a list of (compose source foreign)."
       (chirp-stop)
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
+(defun chirp-test--action-poll-tweet ()
+  "Return an open, unvoted poll with independent mutable state."
+  (copy-tree
+   '(:kind tweet :id "poll-1" :text "Choose one"
+     :poll (:card-uri "card://1" :card-name "poll2choice_text_only"
+            :end-time 4102444800 :counts-final-p nil :selected-choice nil
+            :total-votes 0
+            :options ((:id "1" :label "First" :count 0)
+                      (:id "2" :label "Second" :count 0))))))
+
+(ert-deftest chirp-poll-vote-reconciles-nested-results-without-freezing-counts ()
+  "Votes commit only after acceptance, once, across original and quoted rows."
+  (let* ((tweet (chirp-test--action-poll-tweet))
+         (quoted (copy-tree tweet))
+         (state (list :type 'collection :status '(:phase idle)
+                      :items (list tweet
+                                   (list :kind 'tweet :id "quote-1"
+                                         :text "Quoted poll"
+                                         :quoted-tweet quoted))))
+         (accepted
+          '(:card-uri "card://1" :card-name "poll2choice_text_only"
+            :end-time 4102444800 :selected-choice "2" :total-votes 3
+            :options ((:id "1" :label "First" :count 1)
+                      (:id "2" :label "Second" :count 2))))
+         complete (writes 0) confirm)
+    (chirp-test--with-action-surface
+     state
+     (lambda (surface)
+       (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) confirm))
+                 ((symbol-function 'chirp-backend-vote-poll)
+                  (lambda (_tweet _choice callback &optional _errback)
+                    (cl-incf writes)
+                    (setq complete callback))))
+         (chirp-poll-vote tweet "2")
+         (should (= writes 0))
+         (should-not (chirp-poll-pending-p "poll-1"))
+         (setq confirm t)
+         (chirp-poll-vote tweet "2")
+         (should-error (chirp-poll-vote quoted "1") :type 'user-error)
+         (should (= writes 1))
+         (should-not (plist-get (plist-get tweet :poll) :selected-choice))
+         (should (= (plist-get (plist-get tweet :poll) :total-votes) 0))
+         (with-temp-buffer (funcall complete (copy-tree accepted) nil))
+         (appkit-loop-run-pass (appkit-surface-loop surface))
+         (should (equal (plist-get tweet :poll) accepted))
+         (should (equal (plist-get quoted :poll) accepted))
+         (should-not (chirp-poll-pending-p "poll-1"))
+         (should (string-match-p "66\\.7%" (buffer-string)))
+         (should-error (chirp-poll-vote quoted "1") :type 'user-error)
+         (let* ((fresh (chirp-test--action-poll-tweet))
+                (poll (plist-get fresh :poll)))
+           (setf (plist-get poll :total-votes) 10
+                 (plist-get (car (plist-get poll :options)) :count) 6
+                 (plist-get (cadr (plist-get poll :options)) :count) 4)
+           (chirp-apply-tweet-state-overrides fresh)
+           (should (= (plist-get poll :total-votes) 10))
+           (should (equal (plist-get poll :selected-choice) "2")))
+         ;; A duplicate completion cannot overwrite a newer result.
+         (setf (plist-get (plist-get tweet :poll) :total-votes) 20)
+         (funcall complete (copy-tree accepted) nil)
+         (appkit-loop-run-pass (appkit-surface-loop surface))
+         (should (= (plist-get (plist-get tweet :poll) :total-votes) 20)))))))
+
+(ert-deftest chirp-poll-failure-keeps-counts-and-fences-unknown-outcomes ()
+  "A rejection allows another choice; an uncertain write requires server truth."
+  (dolist (unknown '(nil t))
+    (let* ((tweet (chirp-test--action-poll-tweet))
+           (before (copy-tree (plist-get tweet :poll)))
+           (state (list :type 'collection :status '(:phase idle)
+                        :items (list tweet)))
+           fail (writes 0))
+      (chirp-test--with-action-surface
+       state
+       (lambda (surface)
+         (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                   ((symbol-function 'chirp-actions-show-error) #'ignore)
+                   ((symbol-function 'chirp-backend-vote-poll)
+                    (lambda (_tweet _choice _callback &optional errback)
+                      (cl-incf writes)
+                      (setq fail errback))))
+           (chirp-poll-vote tweet "1")
+           (funcall fail (if unknown
+                             "X write outcome is unknown: connection closed"
+                           "X rejected this vote"))
+           (appkit-loop-run-pass (appkit-surface-loop surface))
+           (should (equal (plist-get tweet :poll) before))
+           (if unknown
+               (progn
+                 (should-error (chirp-poll-vote tweet "2") :type 'user-error)
+                 (should (= writes 1))
+                 (let ((fresh (chirp-test--action-poll-tweet)))
+                   (setf (plist-get (plist-get fresh :poll) :selected-choice) "1")
+                   (chirp-apply-tweet-state-overrides fresh)
+                   (should-not (chirp-poll-pending-p "poll-1"))
+                   (should-error (chirp-poll-vote tweet "2") :type 'user-error)
+                   (should-error (chirp-poll-vote fresh "2") :type 'user-error)))
+             (chirp-poll-vote tweet "2")
+             (should (= writes 2)))))))))
+
+(ert-deftest chirp-poll-completion-cannot-change-successor-app ()
+  "A late vote acknowledgement belongs only to the App that submitted it."
+  (let* ((tweet (chirp-test--action-poll-tweet))
+         (state (list :type 'collection :status '(:phase idle)
+                      :items (list tweet)))
+         complete)
+    (chirp-test--with-action-surface
+     state
+     (lambda (_surface)
+       (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                 ((symbol-function 'chirp-backend-vote-poll)
+                  (lambda (_tweet _choice callback &optional _errback)
+                    (setq complete callback))))
+         (chirp-poll-vote tweet "1")
+         (chirp-stop)
+         (let* ((session (chirp--session))
+                (cache (chirp--session-backend-read-cache session))
+                (poll (copy-tree (plist-get tweet :poll))))
+           (puthash "new-session" 'retained cache)
+           (setf (plist-get poll :selected-choice) "1")
+           (funcall complete poll nil)
+           (should (eq (gethash "new-session" cache) 'retained))
+           (should-not
+            (gethash "poll-1" (chirp--session-tweet-state-overrides session)))))))))
+
 (provide 'chirp-actions-test)
 
 ;;; chirp-actions-test.el ends here

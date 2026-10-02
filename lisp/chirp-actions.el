@@ -492,6 +492,90 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
           app surfaces (list 'chirp-tweet-delete id))
          (message "Tweet deleted."))))))
 
+;;; Polls
+
+(defun chirp-poll-pending-p (tweet-id)
+  "Return TWEET-ID's pending or unknown vote state in the live App."
+  (when (appkit-app-live-p chirp--app)
+    (plist-get
+     (gethash tweet-id
+              (chirp--session-tweet-state-overrides
+               (appkit-app-model chirp--app)))
+     :poll-vote-state)))
+
+(defun chirp-poll--ensure-votable (tweet choice-id)
+  "Require that TWEET still permits voting for CHOICE-ID."
+  (unless (plist-get tweet :id)
+    (user-error "This poll has no tweet ID"))
+  (pcase (chirp-poll-pending-p (plist-get tweet :id))
+    ('pending (user-error "A vote is already being submitted"))
+    ('unknown (user-error "Vote outcome unknown; refresh to check X")))
+  (let ((poll (plist-get (chirp-apply-tweet-state-overrides tweet) :poll)))
+    (unless (chirp-poll-votable-p poll)
+      (user-error "This poll is closed, already voted on, or unavailable"))
+    (or (cl-find choice-id (plist-get poll :options)
+                 :key (lambda (option) (plist-get option :id))
+                 :test #'equal)
+        (user-error "This poll has no such choice"))))
+
+(defun chirp-poll-vote (tweet choice-id)
+  "Confirm and submit one irreversible vote for CHOICE-ID on TWEET."
+  (let ((option (chirp-poll--ensure-votable tweet choice-id)))
+    (when (y-or-n-p (format "Vote for \"%s\"? This cannot be changed. "
+                            (plist-get option :label)))
+      ;; Confirmation can run the event loop while another view changes.
+      (chirp-poll--ensure-votable tweet choice-id)
+      (let* ((tweet-id (plist-get tweet :id))
+             (app (chirp-app))
+             (surfaces (chirp-actions--tweet-surfaces app tweet-id))
+             settled)
+        (cl-labels
+            ((publish-state
+              (state)
+              (chirp-actions--publish-tweet-result
+               app surfaces
+               (list 'chirp-tweet-state tweet-id :poll-vote-state state)))
+             (fail
+              (error-message)
+              (unless settled
+                (setq settled t)
+                (when (appkit-app-live-p app)
+                  (appkit-app-send app '(chirp-invalidate-cache))
+                  (publish-state
+                   (and (chirp-actions--unknown-write-outcome-p error-message)
+                        'unknown))
+                  (chirp-actions-show-error error-message)))))
+          (publish-state 'pending)
+          (condition-case err
+              (chirp-backend-vote-poll
+               tweet choice-id
+               (lambda (poll _envelope)
+                 (unless settled
+                   (setq settled t)
+                   (when (appkit-app-live-p app)
+                     (appkit-app-send app '(chirp-invalidate-cache))
+                     (chirp-actions--publish-tweet-result
+                      app surfaces (list 'chirp-tweet-state tweet-id :poll poll))
+                     (publish-state nil)
+                     (message "Vote submitted."))))
+               #'fail)
+            (error (fail (error-message-string err)))))))))
+
+(defun chirp-poll-vote-at-point ()
+  "Choose and submit an answer to the poll at point."
+  (interactive)
+  (let* ((tweet (chirp-actions--tweet-at-point))
+         (options (plist-get (plist-get tweet :poll) :options))
+         (choices
+          (mapcar (lambda (option)
+                    (cons (format "%s. %s" (plist-get option :id)
+                                  (plist-get option :label))
+                          (plist-get option :id)))
+                  options)))
+    (unless choices (user-error "This tweet has no poll"))
+    (chirp-poll-vote
+     tweet (cdr (assoc (completing-read "Poll choice: " choices nil t) choices)))))
+
 ;;; Compose State
 
 (autoload 'chirp-unsent-capture-source "chirp-unsent")

@@ -1359,7 +1359,7 @@ RANGE is an optional display-text range.  REPLYP enables the leading
 (defun chirp--omit-text-entity-p (entity context)
   "Return non-nil when ENTITY should be omitted in CONTEXT.
 
-Media and quoted-tweet permalinks stay out of the body, as on the web.
+Media, polls, and quoted-tweet permalinks stay out of the body, as on the web.
 Ordinary URL entities stay in place as their `display_url'."
   (pcase (plist-get entity :kind)
     ('media t)
@@ -1367,6 +1367,7 @@ Ordinary URL entities stay in place as their `display_url'."
      (let ((url (plist-get entity :url)))
        (or (null (chirp--url-entity-label entity))
            (chirp--media-url-p url (plist-get context :media))
+           (member url (plist-get context :poll-urls))
            (cl-some (lambda (tweet)
                       (chirp--tweet-permalink-p url tweet))
                     (delq nil (list (plist-get context :quoted-tweet)
@@ -1532,7 +1533,7 @@ SPAN offsets are Emacs character positions in DISPLAY."
 
 (defun chirp--filter-display-urls (urls context)
   "Return genuine external URLS described by CONTEXT.
-CONTEXT is a plist containing the current tweet, quoted tweet, and media."
+CONTEXT contains the current tweet, quoted tweet, media, and poll URLs."
   (let* ((tweet (plist-get context :tweet))
          (quoted-tweet (plist-get context :quoted-tweet))
          (media (plist-get context :media))
@@ -1540,6 +1541,7 @@ CONTEXT is a plist containing the current tweet, quoted tweet, and media."
     (cl-remove-if
      (lambda (url)
        (or (chirp--media-url-p url media)
+           (member url (plist-get context :poll-urls))
            (cl-some (lambda (candidate)
                       (chirp--tweet-permalink-p url candidate))
                     tweets)))
@@ -1829,15 +1831,30 @@ Retweets use their wrapper ID so the wrapper and original remain distinct."
 (defun chirp-apply-tweet-state-overrides (tweet)
   "Apply current session state overrides to normalized TWEET and return it."
   (when tweet
-    (let ((overrides
-           (and-let* ((tweet-id (plist-get tweet :id)))
-             (copy-sequence
-              (gethash tweet-id
-                       (chirp--session-tweet-state-overrides
-                        (chirp--session)))))))
+    (let* ((tweet-id (plist-get tweet :id))
+           (overrides
+            (copy-sequence
+             (gethash tweet-id
+                      (chirp--session-tweet-state-overrides
+                       (chirp--session)))))
+           (poll (plist-get tweet :poll)))
+      (when-let* ((choice (plist-get poll :selected-choice))
+                  ((not (equal choice
+                               (plist-get overrides :poll-selected-choice)))))
+        (chirp-set-tweet-state-override tweet-id :poll-selected-choice choice))
+      (when (and poll
+                 (eq (plist-get overrides :poll-vote-state) 'unknown)
+                 (plist-get poll :selected-choice))
+        (chirp-set-tweet-state-override tweet-id :poll-vote-state nil)
+        (setq overrides (plist-put overrides :poll-vote-state nil)))
       (while overrides
-        (setq tweet
-              (plist-put tweet (pop overrides) (pop overrides)))))
+        (let ((key (pop overrides))
+              (value (pop overrides)))
+          (if (eq key :poll-selected-choice)
+              ;; A confirmed vote is immutable; counts still come from X.
+              (when (and poll (not (plist-get poll :selected-choice)))
+                (setf (plist-get poll :selected-choice) value))
+            (setq tweet (plist-put tweet key value))))))
     (when-let* ((quoted (plist-get tweet :quoted-tweet)))
       (plist-put tweet :quoted-tweet
                  (chirp-apply-tweet-state-overrides quoted)))
@@ -2012,7 +2029,13 @@ Retweets use their wrapper ID so the wrapper and original remain distinct."
               (delete-p (eq (car message) 'chirp-tweet-delete))
               (key (if delete-p :deleted-p (nth 2 message)))
               (value (if delete-p t (nth 3 message))))
-         (puthash tweet-id (plist-put (gethash tweet-id table) key value) table)
+         (if (eq key :poll)
+             (puthash tweet-id
+                      (plist-put (gethash tweet-id table)
+                                 :poll-selected-choice
+                                 (plist-get value :selected-choice))
+                      table)
+           (puthash tweet-id (plist-put (gethash tweet-id table) key value) table))
          (unless (eq (car message) 'chirp-tweet-state-override)
            (maphash
             (lambda (_kind state) (chirp--apply-tweet-result state message))
@@ -2356,6 +2379,102 @@ A present false value takes precedence over lower-priority representations."
            for text = (and raw (chirp-clean-text raw))
            when (and text (not (string-empty-p text)))
            return text))
+
+;;;; Poll Cards
+
+(defun chirp-poll-closed-p (poll)
+  "Return non-nil when POLL has final counts or its deadline has passed."
+  (or (eq (plist-get poll :counts-final-p) t)
+      (let ((end (plist-get poll :end-time)))
+        (and (numberp end) (<= end (float-time))))))
+
+(defun chirp-poll-votable-p (poll)
+  "Return non-nil when POLL is open, complete, and not already voted on.
+An unknown deadline is not sufficient evidence that voting is still open."
+  (and (<= 2 (length (plist-get poll :options)) 4)
+       (chirp-first-nonblank (plist-get poll :card-uri))
+       (chirp-first-nonblank (plist-get poll :card-name))
+       (numberp (plist-get poll :end-time))
+       (not (chirp-poll-closed-p poll))
+       (not (plist-get poll :selected-choice))))
+
+(defun chirp--poll-from-x (object)
+  "Return OBJECT's text, image, or video poll card as a Chirp plist."
+  (when-let* ((card (chirp--tweet-card object))
+              (legacy (chirp--tweet-card-legacy object))
+              (name (chirp-first-nonblank
+                     (map-nested-elt legacy '(name))
+                     (map-nested-elt card '(name))))
+              ((string-match
+                "\\(?:\\`\\|:\\)poll\\([2-4]\\)choice_\\(?:text_only\\|image\\|video\\)\\'"
+                name))
+              (size (string-to-number (match-string 1 name)))
+              (bindings (chirp--tweet-card-bindings object)))
+    (let* ((options
+            (cl-loop for index from 1 to size
+                     for label = (chirp--card-binding-string
+                                  bindings (format "choice%d_label" index))
+                     for count = (chirp--card-binding-raw-string
+                                  bindings (format "choice%d_count" index))
+                     when label
+                     collect (list :id (number-to-string index) :label label
+                                   :count (if (and count
+                                                   (string-match-p "\\`[0-9]+\\'" count))
+                                              (string-to-number count) 0))))
+           (end (chirp--card-binding-raw-string bindings "end_datetime_utc"))
+           (selected (chirp--card-binding-raw-string bindings "selected_choice"))
+           (final (map-nested-elt
+                   (chirp--card-binding bindings "counts_are_final")
+                   '(boolean_value)))
+           (uri (chirp-first-nonblank
+                 (map-nested-elt card '(rest_id))
+                 (map-nested-elt legacy '(url))
+                 (chirp--card-binding-raw-string bindings "card_uri"))))
+      (when (= (length options) size)
+        (list :card-uri uri :card-name name :options options
+              :selected-choice
+              (and (cl-find selected options :key (lambda (option)
+                                                    (plist-get option :id))
+                            :test #'equal)
+                   selected)
+              :end-time (and end
+                             (condition-case nil
+                                 (float-time (date-to-time end))
+                               (error nil)))
+              :counts-final-p (or (eq final t) (equal final 1)
+                                  (and (stringp final)
+                                       (member (downcase final) '("true" "1"))
+                                       t))
+              :total-votes (cl-loop for option in options
+                                    sum (plist-get option :count)))))))
+
+(defun chirp--poll-card-urls (object poll)
+  "Return card-only URLs carried by OBJECT's POLL, excluding destinations."
+  (when poll
+    (delq nil (list (plist-get poll :card-uri)
+                    (map-nested-elt (chirp--tweet-card-legacy object) '(url))
+                    (chirp--card-binding-raw-string
+                     (chirp--tweet-card-bindings object) "card_url")))))
+
+(defun chirp--poll-card-media-from-x (object poll)
+  "Return media embedded in OBJECT's POLL card, when present."
+  (when poll
+    (let* ((bindings (chirp--tweet-card-bindings object))
+           (name (plist-get poll :card-name))
+           (image (map-nested-elt
+                   (chirp--card-binding bindings "image_large") '(image_value)))
+           (stream (chirp--card-binding-raw-string bindings "player_stream_url"))
+           (preview (chirp--card-binding-image-url bindings)))
+      (cond
+       ((and (string-suffix-p "_image" name)
+             (map-nested-elt image '(url)))
+        (list (list :type "photo" :url (map-nested-elt image '(url))
+                    :width (map-nested-elt image '(width))
+                    :height (map-nested-elt image '(height)))))
+       ((and (string-suffix-p "_video" name) stream)
+        (list (list :type "video" :url stream :preview-url preview)))))))
+
+;;;; Website Cards
 
 (defun chirp--card-binding-image-url (bindings)
   "Return the best website-card image URL from BINDINGS, or nil."
@@ -2753,15 +2872,18 @@ over the card's `t.co` permalink."
 		      ("related" 'related)
 		      (_ nil)))
 		   (all-urls (chirp-extract-tweet-urls object legacy))
+		   (poll (chirp--poll-from-x object))
 		   (media
 		    (or (chirp--media-list-from-x
 			 (or .media
 			     (map-nested-elt object '(extended_entities media))
 			     (map-nested-elt legacy '(extended_entities media))
 			     (map-nested-elt legacy '(entities media))))
-			(chirp--unified-card-media-from-x object)))
+			(chirp--unified-card-media-from-x object)
+			(chirp--poll-card-media-from-x object poll)))
 		   (url-context (list :tweet tweet-identity
 				      :quoted-tweet quoted-tweet
+				      :poll-urls (chirp--poll-card-urls object poll)
 				      :media media))
 		   (media-url-covered-p
 		    (and media
@@ -2771,7 +2893,8 @@ over the card's `t.co` permalink."
 				  all-urls)))
 		   (covered-short-url-count
 		    (+ (length all-urls)
-		       (if (and media (not media-url-covered-p)) 1 0)))
+		       (if (and media (not media-url-covered-p)) 1 0)
+		       (if poll 1 0)))
 		   (walk-entities
 		    (if (>= covered-short-url-count
 			    (chirp-short-url-count visible-raw))
@@ -2888,6 +3011,7 @@ over the card's `t.co` permalink."
 		:url url
 		:urls urls
 		:link-card link-card
+		:poll poll
 		:mentions mentions
 		:hashtags hashtags
 		:text-entities text-entities
