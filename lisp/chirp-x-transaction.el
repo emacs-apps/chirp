@@ -82,7 +82,8 @@
 (defun chirp-x-transaction-bootstrap (html)
   "Parse public transaction metadata from HTML.
 Return :key (48 unibyte verification bytes), :frames (four parsed SVG row
-vectors), and :script-url (a trusted static asset URL).  Never retain HTML."
+vectors), and :script-url (a trusted static asset URL).  Never retain HTML.
+Script text uses `dom-inner-text' without inserting whitespace between nodes."
   (unless (fboundp 'libxml-parse-html-region)
     (chirp-x-transaction--fail "Emacs needs built-in libxml HTML support"))
   (let* ((case-fold-search nil)
@@ -117,7 +118,7 @@ vectors), and :script-url (a trusted static asset URL).  Never retain HTML."
       (chirp-x-transaction--fail "missing animation frame"))
     (list :key key :frames frames
           :script-url (chirp-x-transaction--script-url
-                       (mapcar #'dom-text (dom-by-tag dom 'script))))))
+                       (mapcar #'dom-inner-text (dom-by-tag dom 'script))))))
 
 (defun chirp-x-transaction--indices (script)
   "Extract the row index and three time indices from static SCRIPT."
