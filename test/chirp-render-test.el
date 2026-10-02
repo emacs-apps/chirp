@@ -1243,6 +1243,40 @@
           (chirp-open-at-point))
         (should (equal opened "https://github.com/example/project"))))))
 
+(ert-deftest chirp-render-nested-cards-preserve-parent-and-wrap-geometry ()
+  "Cards add only their border inside timeline, thread, and quoted bodies."
+  (let* ((tweet (chirp-test--sample-quoted-tweet))
+         (quoted (plist-get tweet :quoted-tweet))
+         (chirp-show-avatars nil)
+         (chirp-show-tweet-media nil))
+    (setf (plist-get tweet :link-card)
+          '(:url "https://example.com/outer" :title "Outer link")
+          (plist-get quoted :link-card)
+          '(:url "https://example.com/nested" :title "Nested link"))
+    (dolist (threadp '(nil t))
+      (with-temp-buffer
+        (chirp-view-mode)
+        (let ((inhibit-read-only t))
+          (if threadp
+              (chirp-render-insert-discussion-entry
+               (chirp-test--discussion-row tweet nil '(tweet "parent") 2 'tree))
+            (chirp-render-insert-tweet tweet)))
+        (let ((border (appkit-ui-vbar-string 'chirp-quoted-tweet-border-face)))
+          (dolist (property '(line-prefix wrap-prefix))
+            (cl-labels
+                ((prefix-at
+                  (text)
+                  (goto-char (point-min))
+                  (search-forward text)
+                  (or (get-text-property (match-beginning 0) property) "")))
+              (let* ((body-prefix (prefix-at "Commentary"))
+                     (quoted-prefix (prefix-at "Quoted body text")))
+                (should (equal (concat body-prefix border)
+                               (prefix-at "Outer link")))
+                (should (equal (concat body-prefix border) quoted-prefix))
+                (should (equal (concat quoted-prefix border)
+                               (prefix-at "Nested link")))))))))))
+
 (ert-deftest chirp-render-link-card-slices-cached-preview-image ()
   "A cached website-card image should be inserted as Appkit slices."
   (let ((tweet
@@ -1614,23 +1648,6 @@
       (search-forward "@bob")
       (should (eq (get-text-property (match-beginning 0) 'face)
                   'chirp-link-face)))))
-
-(ert-deftest chirp-render-quoted-tweet-lines-use-wrap-prefix ()
-  "Quoted tweet body lines should keep the card prefix on visual wraps."
-  (let ((tweet (chirp-test--sample-quoted-tweet)))
-    (with-temp-buffer
-      (chirp-view-mode)
-      (cl-letf (((symbol-function 'chirp-media-avatar-image) (lambda (&rest _args) nil))
-                ((symbol-function 'chirp-media-thumbnail-image) (lambda (&rest _args) nil)))
-        (let ((inhibit-read-only t))
-          (chirp-render-insert-tweet tweet)))
-      (goto-char (point-min))
-      (search-forward "Quoted body text")
-      (let* ((needle "Quoted body text")
-             (pos (- (point) (length needle)))
-             (wrap-prefix (get-text-property pos 'wrap-prefix)))
-        (should (stringp wrap-prefix))
-        (should (>= (string-width wrap-prefix) 3))))))
 
 (ert-deftest chirp-render-quoted-tweet-media-uses-gapless-image-slices ()
   "Quoted tweet media should use the card prefix on gapless image slices."
