@@ -144,28 +144,6 @@
                     messages)))
       (delete-directory directory t))))
 
-(ert-deftest chirp-x-capture-browser-session-uses-its-profile-root ()
-  "X capture should select Chirp's fixed isolated profile root."
-  (let* ((directory (make-temp-file "chirp-x-login-" t))
-         (chirp-x-browser-session-profile-root
-          (expand-file-name "browser-session/" directory))
-         (chirp-x--browser-session-request nil)
-         arguments
-         capture-file)
-    (unwind-protect
-        (cl-letf (((symbol-function 'browser-session-capture)
-                   (lambda (&rest value)
-                     (setq arguments value
-                           capture-file (plist-get value :output-file))
-                     'asynchronous-capture)))
-          (chirp-x-capture-browser-session)
-          (should (equal (plist-get arguments :profile-root)
-                         chirp-x-browser-session-profile-root))
-          (should-not (plist-get arguments :profile-directory)))
-      (when capture-file
-        (ignore-errors (delete-file capture-file)))
-      (delete-directory directory t))))
-
 (ert-deftest chirp-x-capture-browser-session-rejects-wrong-origin ()
   "A non-X capture should not replace Chirp's existing auth file."
   (let* ((directory (make-temp-file "chirp-x-login-" t))

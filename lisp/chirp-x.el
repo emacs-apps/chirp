@@ -45,15 +45,6 @@
   :type 'file
   :group 'chirp-x)
 
-(defcustom chirp-x-browser-session-profile-root
-  (locate-user-emacs-file "chirp/browser-session/")
-  "Root for Chirp's persistent isolated X login profiles.
-
-`browser-session' creates a browser-specific profile below this root.  This
-must not be an ordinary browser profile directory."
-  :type 'directory
-  :group 'chirp-x)
-
 (defcustom chirp-x-bearer-token
   (concat "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs"
           "%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA")
@@ -386,7 +377,6 @@ When RESTART-RUNNING is non-nil, permit one supported browser restart."
                  :url chirp-x--browser-session-url
                  :cookies chirp-x--browser-session-cookie-names
                  :output-file capture-file
-                 :profile-root chirp-x-browser-session-profile-root
                  :restart-running restart-running
                  :callback (lambda (_metadata)
                              (setq settled t)

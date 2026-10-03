@@ -3,11 +3,9 @@
 
 * Sign in
 
-~M-x chirp-login~ opens or attaches a supported browser at
-~https://x.com~.  Chirp uses the isolated root in
-~chirp-x-browser-session-profile-root~, which defaults to
-~(locate-user-emacs-file "chirp/browser-session/")~.  It imports only
-the ~auth_token~ and ~ct0~ cookies into ~chirp-x-auth-file~
+~M-x chirp-login~ opens a supported browser at ~https://x.com~ using
+browser-session's shared persistent profile.  Chirp imports only the
+~auth_token~ and ~ct0~ cookies into ~chirp-x-auth-file~
 (~(locate-user-emacs-file "chirp/auth.json")~, mode ~0600~).
 
 Ordinary commands then use that private auth file.  Run
@@ -17,11 +15,10 @@ headers, ~CHIRP_X_AUTH_TOKEN~, ~CHIRP_X_CT0~, or ~auth-source~.
 ~M-x chirp-forget-browser-session~ deletes the auth file without
 signing out of the browser.
 
-Configure the browser, proxy, or Firefox/Zen behavior through
-browser-session's public customization variables before login.  Do
-not point ~chirp-x-browser-session-profile-root~ at a daily-use
-browser profile.  Set ~CHIRP_X_BEARER_TOKEN~ only if X rotates its
-public web token.
+Configure ~browser-session-browser~, ~browser-session-profile-directory~,
+~browser-session-profile-root~, and proxy settings once for all consumers.
+Chirp no longer creates its own browser profile; old profile directories are
+left untouched. Set ~CHIRP_X_BEARER_TOKEN~ only if X rotates its public web token.
 
 After a definitive stale-query error, Chirp refreshes read-operation
 query IDs from the current ~TwitterInternalAPIDocument~ registry.
