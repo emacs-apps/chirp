@@ -17,6 +17,7 @@
 (require 'appkit-chat-compose)
 (require 'appkit-evil)
 (require 'appkit-media-image)
+(require 'appkit-media-resource)
 (require 'chirp-core)
 (require 'chirp-backend)
 (require 'chirp-media)
@@ -31,6 +32,14 @@
 Files created here are owned by the compose buffer and removed when the draft is
 cancelled, the attachment is removed, or the send completes."
   :type 'directory
+  :group 'chirp)
+
+(defcustom chirp-compose-attach-commands
+  '(("media" . chirp-compose-attach-file)
+    ("clipboard" . chirp-compose-attach-clipboard))
+  "Attachment actions offered by `chirp-compose-attach'.
+Public posts support images and MP4 videos, not generic documents."
+  :type '(alist :key-type string :value-type function)
   :group 'chirp)
 
 ;;; Constants
@@ -107,8 +116,9 @@ Only `unknown' persists because it changes whether repeating a write is safe.")
   "C-c C-s" #'chirp-compose-save
   "C-c C-t" #'chirp-compose-schedule
   "C-c C-k" #'chirp-compose-cancel
-  "C-c C-a" #'chirp-compose-attach-image
-  "C-c C-v" #'chirp-compose-paste-image
+  "C-c C-a" #'chirp-compose-attach
+  "C-c C-f" #'chirp-compose-attach-file
+  "C-c C-v" #'chirp-compose-attach-clipboard
   "C-c C-d" #'chirp-compose-remove-image
   "C-c C-e" #'chirp-compose-describe-image
   "C-c C-n" #'chirp-compose-add-post
@@ -980,89 +990,6 @@ When called interactively, prompt for AUDIENCE."
      ((>= (length attachments) 4)
       (user-error "Up to 4 attached images are supported")))))
 
-(defun chirp-compose--mime-extension (mime-type)
-  "Return a file extension for MIME-TYPE."
-  (pcase (downcase (or mime-type ""))
-    ("image/png" ".png")
-    ((or "image/jpeg" "image/jpg") ".jpg")
-    ("image/gif" ".gif")
-    ("image/webp" ".webp")
-    ("image/bmp" ".bmp")
-    (_ ".img")))
-
-(defun chirp-compose--process-lines (program &rest args)
-  "Return PROGRAM output lines for ARGS, or nil on failure."
-  (with-temp-buffer
-    (let ((status (apply #'process-file program nil (current-buffer) nil args)))
-      (when (and (numberp status)
-                 (zerop status))
-        (split-string (buffer-string) "\n" t "[ \t\r]+")))))
-
-(defun chirp-compose--first-image-type (types)
-  "Return the first image MIME type in TYPES."
-  (cl-find-if (lambda (type)
-                (string-prefix-p "image/" type))
-              types))
-
-(defun chirp-compose--clipboard-image-backend ()
-  "Return a plist describing how to paste an image from the clipboard."
-  (let ((wl-paste (executable-find "wl-paste"))
-        (pngpaste (executable-find "pngpaste"))
-        (xclip (executable-find "xclip")))
-    (or
-     (when wl-paste
-       (when-let* ((mime-type (chirp-compose--first-image-type
-                               (chirp-compose--process-lines wl-paste "--list-types"))))
-         (list :kind 'stdout
-               :program wl-paste
-               :args (list "--no-newline" "--type" mime-type)
-               :extension (chirp-compose--mime-extension mime-type))))
-     (when pngpaste
-       (list :kind 'filearg
-             :program pngpaste
-             :args nil
-             :extension ".png"))
-     (when xclip
-       (when-let* ((mime-type (chirp-compose--first-image-type
-                               (chirp-compose--process-lines
-                                xclip "-selection" "clipboard" "-t" "TARGETS" "-o"))))
-         (list :kind 'stdout
-               :program xclip
-               :args (list "-selection" "clipboard" "-t" mime-type "-o")
-               :extension (chirp-compose--mime-extension mime-type)))))))
-
-(defun chirp-compose--write-command-output-to-file (program args file)
-  "Write PROGRAM ARGS output to FILE, returning non-nil on success."
-  (let ((coding-system-for-read 'binary)
-        (coding-system-for-write 'binary))
-    (with-temp-buffer
-      (set-buffer-multibyte nil)
-      (let ((status (apply #'process-file program nil (current-buffer) nil args)))
-        (when (and (numberp status)
-                   (zerop status)
-                   (> (buffer-size) 0))
-          (write-region nil nil file nil 'silent)
-          t)))))
-
-(defun chirp-compose--paste-image-to-file (backend file)
-  "Paste clipboard image using BACKEND into FILE."
-  (pcase (plist-get backend :kind)
-    ('stdout
-     (chirp-compose--write-command-output-to-file
-      (plist-get backend :program)
-      (plist-get backend :args)
-      file))
-    ('filearg
-     (let ((status (apply #'process-file
-                          (plist-get backend :program)
-                          nil nil nil
-                          (append (plist-get backend :args)
-                                  (list file)))))
-       (and (numberp status)
-            (zerop status)
-            (file-exists-p file)
-            (> (file-attribute-size (file-attributes file)) 0))))
-    (_ nil)))
 
 (defun chirp-compose--drop-temp-attachment (file)
   "Delete FILE when it is a temporary compose attachment."
@@ -1093,15 +1020,27 @@ When called interactively, prompt for AUDIENCE."
       (when (file-exists-p file)
         (delete-file file)))))
 
+(defun chirp-compose--validate-media-file (path)
+  "Return local PATH after validating the public upload's supported format."
+  (let ((file (expand-file-name path)))
+    (unless (and (not (file-remote-p file))
+                 (file-regular-p file) (file-readable-p file))
+      (user-error "Attachment must be a readable local regular file"))
+    (condition-case err
+        (let* ((type (chirp-x--upload-media-type file))
+               (size (file-attribute-size (file-attributes file)))
+               (limit (chirp-x--upload-size-limit type)))
+          (unless (<= 1 size limit)
+            (user-error "%s attachments must contain between 1 byte and %s"
+                        type (file-size-human-readable limit))))
+      (error (user-error "%s" (error-message-string err))))
+    file))
+
 (defun chirp-compose--add-attachment (path &optional temporary)
   "Attach PATH to the current draft.
 
 When TEMPORARY is non-nil, PATH is owned by the current compose buffer."
-  (let ((file (expand-file-name path)))
-    (unless (file-regular-p file)
-      (user-error "Attachment is not a regular file"))
-    (unless (file-readable-p file)
-      (user-error "Attachment is not readable"))
+  (let ((file (chirp-compose--validate-media-file path)))
     (chirp-compose--ensure-can-attach file)
     (let ((item (or (chirp-compose--current-item)
                     (user-error "No compose item at point")))
@@ -1119,43 +1058,88 @@ When TEMPORARY is non-nil, PATH is owned by the current compose buffer."
                     (append chirp-compose-temp-attachments (list file))))
       file)))
 
-(defun chirp-compose-attach-image (path)
-  "Attach image or MP4 video PATH to the current draft."
-  (interactive (list (read-file-name "Attach media: " nil nil t)))
+(defun chirp-compose--reject-document-prefix (prefix)
+  "Reject PREFIX because public posts have no document attachment kind."
+  (when prefix
+    (user-error "Public posts support images and MP4, not generic documents")))
+
+(defun chirp-compose-attach-file (path &optional prefix)
+  "Stage supported image or MP4 PATH; reject document-forcing PREFIX."
+  (interactive
+   (progn
+     (chirp-compose--ensure-idle)
+     (chirp-compose--reject-document-prefix current-prefix-arg)
+     (list (read-file-name "Attach image or MP4: " nil nil t)
+           current-prefix-arg)))
   (chirp-compose--ensure-idle)
+  (chirp-compose--reject-document-prefix prefix)
   (message "Attached %s"
            (file-name-nondirectory
             (chirp-compose--add-attachment path))))
 
-(defun chirp-compose-paste-image ()
-  "Paste one image from the clipboard into the current draft."
-  (interactive)
+(defun chirp-compose-attach (action)
+  "Choose extensible attachment ACTION without submitting the draft."
+  (interactive
+   (progn
+     (chirp-compose--ensure-idle)
+     (chirp-compose--reject-document-prefix current-prefix-arg)
+     (list (completing-read "Attachment action: "
+                            chirp-compose-attach-commands nil t))))
   (chirp-compose--ensure-idle)
-  (when (cl-some #'chirp-compose--video-attachment-p
-                 (chirp-compose--item-attachments))
-    (user-error "A video cannot be mixed with other attachments"))
-  (chirp-compose--ensure-can-attach "clipboard.png")
-  (let* ((backend (chirp-compose--clipboard-image-backend))
-         (file nil)
-         (attached nil))
-    (unless backend
-      (user-error "No clipboard image available or no supported paste backend"))
-    (setq file (make-temp-file
-                (expand-file-name "chirp-compose-"
-                                  (chirp-compose--temp-directory))
-                nil
-                (plist-get backend :extension)))
-    (unwind-protect
-        (progn
-          (unless (chirp-compose--paste-image-to-file backend file)
-            (user-error "Clipboard does not currently contain an image"))
-          (chirp-compose--add-attachment file t)
-          (setq attached t)
-          (message "Pasted %s" (file-name-nondirectory file)))
-      (unless attached
-        (ignore-errors
-          (when (and file (file-exists-p file))
-            (delete-file file)))))))
+  (chirp-compose--reject-document-prefix current-prefix-arg)
+  (let ((command (cdr (assoc-string action chirp-compose-attach-commands t))))
+    (unless (commandp command)
+      (user-error "Invalid attachment action: %s" action))
+    (call-interactively command)))
+
+(defun chirp-compose--validate-clipboard-files (files)
+  "Validate all FILES against the current draft before staging any of them."
+  (let* ((existing (chirp-compose--attachment-paths))
+         (paths (mapcar #'chirp-compose--validate-media-file files))
+         (all (append existing paths)))
+    (unless (= (length all) (length (delete-dups (copy-sequence all))))
+      (user-error "Media already attached"))
+    (if (cl-some #'chirp-compose--video-path-p all)
+        (when (> (length all) 1)
+          (user-error "A video cannot be mixed with other attachments"))
+      (when (> (length all) 4)
+        (user-error "Up to 4 attached images are supported")))
+    paths))
+
+(defun chirp-compose-attach-clipboard (&optional prefix)
+  "Stage clipboard local files or image bytes without sending.
+PREFIX cannot force a document because public posts do not support documents."
+  (interactive "P")
+  (chirp-compose--ensure-idle)
+  (chirp-compose--reject-document-prefix prefix)
+  (let ((source (appkit-media-clipboard-source)))
+    (if-let* ((files (plist-get source :files)))
+        (let ((paths (chirp-compose--validate-clipboard-files files)))
+          (dolist (path paths)
+            (chirp-compose--add-attachment path)))
+      (let* ((suffix (plist-get source :suffix))
+             (data (plist-get source :data))
+             (file nil)
+             (attached nil))
+        (unless (and data suffix)
+          (user-error "Clipboard contains no supported local files or image"))
+        (chirp-compose--validate-clipboard-files nil)
+        (chirp-compose--ensure-can-attach (concat "clipboard" suffix))
+        (condition-case err
+            (chirp-x--upload-media-type (concat "clipboard" suffix))
+          (error (user-error "%s" (error-message-string err))))
+        (unwind-protect
+            (progn
+              (setq file (make-temp-file
+                          (expand-file-name "chirp-compose-"
+                                            (chirp-compose--temp-directory))
+                          nil suffix))
+              (let ((coding-system-for-write 'binary))
+                (write-region data nil file nil 'silent))
+              (chirp-compose--add-attachment file t)
+              (setq attached t))
+          (unless attached
+            (when file (ignore-errors (delete-file file)))))))))
 
 (defun chirp-compose-remove-image ()
   "Remove one image attachment from the current draft."

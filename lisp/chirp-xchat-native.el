@@ -38,6 +38,8 @@
                   "chirp-xchat-native-module" (session input-json))
 (declare-function chirp-xchat-native-prepare-media
                   "chirp-xchat-native-module" (session input-json))
+(declare-function chirp-xchat-native-detect-media-type
+                  "chirp-xchat-native-module" (file))
 (declare-function chirp-xchat-native-release-media
                   "chirp-xchat-native-module" (session stage-id))
 (declare-function chirp-xchat-native-recovery-start
@@ -87,6 +89,7 @@ set this option explicitly, and then unlock encrypted XChat support on demand."
                       chirp-xchat-native-encrypt-reply
                       chirp-xchat-native-encrypt-reaction
                       chirp-xchat-native-prepare-media
+                      chirp-xchat-native-detect-media-type
                       chirp-xchat-native-release-media
                       chirp-xchat-native-recovery-start
                       chirp-xchat-native-recovery-poll
@@ -423,6 +426,18 @@ set this option explicitly, and then unlock encrypted XChat support on demand."
         (clear-string input-base64))
       (when (stringp output-base64)
         (clear-string output-base64)))))
+
+(defun chirp-xchat-native-file-attachment-kind (file)
+  "Return FILE's composer kind using native upload byte detection.
+This inspection neither encrypts nor uploads FILE and needs no conversation key."
+  (chirp-xchat-native-load)
+  (pcase (chirp-xchat-native-detect-media-type (expand-file-name file))
+    (1 'photo)
+    (2 'gif)
+    (3 'video)
+    (4 'audio)
+    ((or 5 6) 'file)
+    (_ (error "XChat native module returned an invalid media type"))))
 
 (defun chirp-xchat-native-prepare-media-file (conversation-id file)
   "Encrypt FILE for CONVERSATION-ID and return native staging metadata."

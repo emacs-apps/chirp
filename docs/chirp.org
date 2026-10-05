@@ -79,8 +79,9 @@ Conversations decode signature-verified plain text through Appkit's semantic mar
 | ~r~ | reply to the message at point |
 | ~!~ | add or remove a prompted reaction |
 | ~N~ | fetch older message history.  Evil: ~g n~ |
-| ~C-c C-a~ | open the typed photo, GIF, video, audio, or file selector |
-| ~C-c C-f~ | attach a document directly |
+| ~C-c C-a~ | choose a photo, GIF, video, audio, document, or clipboard staging action |
+| ~C-c C-f~ | stage a local file with native byte inference; ~C-u~ forces a document |
+| ~C-c C-v~ | stage clipboard local files or image bytes; ~C-u~ forces a document |
 | ~C-c C-k~ | cancel the current reply context |
 | ~RET~ in composer | send the captured draft |
 | ~C-u RET~ | insert a composer newline |
@@ -97,7 +98,14 @@ Decrypted files use ~chirp-cache-directory~, like other Chirp media.  Protect or
 
 *** Outgoing attachments
 
-Use ~C-c C-a~ to choose a photo, GIF, video, audio file, or document; ~C-c C-f~ attaches a document directly.  Photos and GIFs keep inline draft previews, while the other kinds use typed cards.  The chosen kind belongs to the captured draft: native byte detection verifies photo, GIF, video, and audio selections, while the document kind intentionally accepts any file.
+~C-c C-a~ chooses a typed attachment action; ~C-c C-f~ infers photo, GIF, video,
+audio, or document from native upload byte detection, not the filename.
+~C-c C-v~ stages clipboard local files or PNG/JPEG/BMP bytes.  A universal prefix
+forces a document; the chooser also has an explicit file action.  These commands
+do not send.  Photos and GIFs keep inline previews; other kinds use typed cards.
+Private clipboard sources survive captured sends and failure, and are removed
+after acknowledgment, draft removal, or buffer shutdown.  Ordinary user files
+are never deleted.  Rebuild the native module when updating this interface.
 
 On send, the native module validates and encrypts each file under the conversation's latest verified key.  Chirp then initializes the upload, sends bounded encrypted parts to TON, finalizes it, and encrypts the message envelope under the same key version.  Uploads use the browser session already captured by ~chirp-login~; no separate media credential is required.  Temporary ciphertext is removed after success, failure, or cancellation.
 
@@ -137,8 +145,9 @@ position stay intact; failed requests leave the displayed relationship unchanged
 
 | Key | Action |
 |-----+--------|
-| ~C-c C-a~ | attach images (up to 4) or one MP4 |
-| ~C-c C-v~ | paste one clipboard image |
+| ~C-c C-a~ | choose a media or clipboard staging action |
+| ~C-c C-f~ | stage supported images (up to 4) or one MP4 |
+| ~C-c C-v~ | stage clipboard local files or supported image bytes |
 | ~C-c C-d~ | remove an attachment |
 | ~C-c C-e~ | edit alt text |
 | ~C-c C-n~ | commit the current part and start the next |
@@ -157,6 +166,11 @@ X drafts and ~x t~ opens scheduled posts.
 JPEG, PNG, and WebP attachments may be at most 5 MiB; GIFs 15 MiB;
 MP4 videos 512 MiB, uploaded in 1 MiB chunks.  Premium accounts can
 exceed the standard 280 weighted-character limit.
+
+These commands only stage drafts.  Public posts have no generic-document kind:
+document-forcing prefixes and unsupported BMP images are rejected without
+changing the draft.  Clipboard URI files remain user-owned; private pixel
+sources live until removal, cancellation, or confirmed publication.
 
 * Notifications and translation
 

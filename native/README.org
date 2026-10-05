@@ -43,6 +43,8 @@ from crates.io.  Build products stay in the crate's ignored ~target/~.
   in a session-owned temporary file, and pins the final message to the
   same verified key version.  Release, failure, cancellation, and session
   destruction remove staged ciphertext.
+  Local picker inference uses the same SDK byte detector without encryption,
+  staging, or a session.  Explicit documents retain their document kind.
 - Lisp owns authenticated GraphQL and TON uploads, including the
   transport-only upload UUID, cookies, and CSRF.  Native code receives
   no X credentials and makes no X API calls.  Bounded synchronous SDK

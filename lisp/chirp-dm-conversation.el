@@ -17,6 +17,7 @@
 (require 'appkit-compose)
 (require 'appkit-chatbuf)
 (require 'appkit-media)
+(require 'appkit-media-resource)
 (require 'appkit-ui)
 (require 'appkit-chat-history)
 (require 'appkit-chat-timeline)
@@ -34,6 +35,7 @@
 (require 'chirp-dm-state)
 (require 'chirp-x)
 (require 'chirp-xchat)
+(require 'chirp-xchat-native)
 
 (declare-function chirp-xchat-native-decrypt-events
                   "chirp-xchat-native" (conversation-id events signing-keys))
@@ -57,8 +59,9 @@ Set this to nil to disable automatic pagination.  Manual loading with
   '(("photo" . chirp-dm-attach-photo)
     ("video" . chirp-dm-attach-video)
     ("audio" . chirp-dm-attach-audio)
-    ("file" . chirp-dm-attach-file)
-    ("gif" . chirp-dm-attach-gif))
+    ("file" . chirp-dm-attach-document)
+    ("gif" . chirp-dm-attach-gif)
+    ("clipboard" . chirp-dm-attach-clipboard))
   "Attachment type candidates offered by `chirp-dm-attach'."
   :type '(alist :key-type string :value-type function)
   :group 'chirp)
@@ -67,6 +70,9 @@ Set this to nil to disable automatic pagination.  Manual loading with
 
 (defvar chirp-dm-conversation--next-instance 0
   "Monotonic identity source for fresh direct-message views.")
+
+(defvar-local chirp-dm-conversation--temporary-attachments nil
+  "Private clipboard paths owned by this draft and its active send capture.")
 
 ;;; Constants
 
@@ -800,6 +806,7 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
                  (unless (string-empty-p (string-trim detail))
                    (appkit-chatbuf-input-history-push detail))
                  (appkit-chatbuf-input-set-text "")
+                 (chirp-dm-conversation--prune-temporary-attachments)
                  (when (nth 6 message) (appkit-chatbuf-aux-reset)))))
             ('reaction-start
              (puthash (plist-get value :key) value
@@ -1138,76 +1145,171 @@ Disjoint focused fragments are bridged through older history before merging."
             (propertize filename 'help-echo path)
             (if size (format " (%s)" size) ""))))
 
-(defun chirp-dm-conversation--queue-attachment (file attachment-kind)
-  "Queue FILE with typed ATTACHMENT-KIND in the current XChat composer."
+(defun chirp-dm-conversation--ensure-attachment-editable ()
+  "Reject attachment mutation outside an editable conversation composer."
   (unless (chirp-dm-conversation--current-view)
     (user-error "Current view is not a direct-message conversation"))
   (when (appkit-compose-operation-active-p)
     (user-error "A direct message is already being sent"))
-  (unless (memq attachment-kind
-                chirp-dm-conversation--attachment-kinds)
+  (barf-if-buffer-read-only))
+
+(defun chirp-dm-conversation--prepare-attachment (file attachment-kind)
+  "Validate local FILE and return an unstaged typed ATTACHMENT-KIND object."
+  (unless (memq attachment-kind chirp-dm-conversation--attachment-kinds)
     (user-error "Unsupported XChat attachment kind: %s" attachment-kind))
   (let* ((path (expand-file-name file))
-         (attributes (and (file-regular-p path) (file-attributes path)))
+         (attributes (and (not (file-remote-p path))
+                          (file-regular-p path) (file-attributes path)))
          (size (and attributes (file-attribute-size attributes))))
     (unless (and attributes (file-readable-p path)
                  (integerp size) (> size 0)
                  (<= size (* 50 1024 1024)))
       (user-error
-       "XChat attachment must be a readable file between 1 byte and 50 MiB"))
-    (let* ((capture (appkit-markup-compose-capture))
-           (attachments
-            (chirp-dm-conversation--capture-attachments capture))
-           (multi-p (memq attachment-kind '(photo gif video))))
-      (when (>= (length attachments) 10)
-        (user-error "XChat messages support at most 10 attachments"))
-      (when (or (and attachments (not multi-p))
-                (cl-some
-                 (lambda (attachment)
-                   (not
-                    (memq (plist-get attachment :attachment-kind)
-                          '(photo gif video))))
-                 attachments))
-        (user-error
-         "Files and audio must be the only attachment in an XChat message")))
-    (let ((object
-           (list :kind chirp-dm-conversation--attachment-object-kind
-                 :attachment-kind attachment-kind
-                 :path path
-                 :filename (file-name-nondirectory path))))
-      (goto-char
-       (or (appkit-chatbuf-input-logical-end-position) (point-max)))
-      (appkit-chatbuf-input-insert
-       (chirp-dm-conversation--attachment-display-text object)
-       :object object)
-      (message "XChat %s queued: %s"
-               attachment-kind (file-name-nondirectory path))
-      object)))
+       "XChat attachment must be a readable local file between 1 byte and 50 MiB"))
+    (list :kind chirp-dm-conversation--attachment-object-kind
+          :attachment-kind attachment-kind
+          :path path :filename (file-name-nondirectory path))))
 
-(defun chirp-dm-attach-file (file)
-  "Queue local FILE as a document in the current XChat composer."
-  (interactive (list (read-file-name "Attach file: " nil nil t)))
+(defun chirp-dm-conversation--queue-attachments (objects)
+  "Stage all validated OBJECTS, or reject their combined capabilities first."
+  (chirp-dm-conversation--ensure-attachment-editable)
+  (let ((all (append
+              (chirp-dm-conversation--capture-attachments
+               (appkit-markup-compose-capture))
+              objects)))
+    (when (> (length all) 10)
+      (user-error "XChat messages support at most 10 attachments"))
+    (when (and (> (length all) 1)
+               (cl-some (lambda (object)
+                          (not (memq (plist-get object :attachment-kind)
+                                     '(photo gif video))))
+                        all))
+      (user-error
+       "Files and audio must be the only attachment in an XChat message")))
+  ;; Prepare every preview before changing the source.
+  (let ((previews (mapcar #'chirp-dm-conversation--attachment-display-text
+                          objects)))
+    (goto-char
+     (or (appkit-chatbuf-input-logical-end-position) (point-max)))
+    (atomic-change-group
+      (cl-mapc (lambda (object preview)
+                 (appkit-chatbuf-input-insert preview :object object))
+               objects previews)))
+  objects)
+
+(defun chirp-dm-conversation--queue-attachment (file attachment-kind)
+  "Queue local FILE with typed ATTACHMENT-KIND without uploading it."
+  (chirp-dm-conversation--ensure-attachment-editable)
+  (car (chirp-dm-conversation--queue-attachments
+        (list (chirp-dm-conversation--prepare-attachment file attachment-kind)))))
+
+(defun chirp-dm-conversation--detected-attachment (file &optional document)
+  "Prepare FILE with native byte inference, or force DOCUMENT."
+  ;; Validate local ownership and size before asking the native detector.
+  (let ((object (chirp-dm-conversation--prepare-attachment file 'file)))
+    (unless document
+      (setf (plist-get object :attachment-kind)
+            (chirp-xchat-native-file-attachment-kind (plist-get object :path))))
+    object))
+
+(defun chirp-dm-attach-file (file &optional document)
+  "Stage local FILE with native media detection; DOCUMENT forces a file."
+  (interactive
+   (progn
+     (chirp-dm-conversation--ensure-attachment-editable)
+     (list (read-file-name "Attach file or media: " nil nil t)
+           current-prefix-arg)))
+  (chirp-dm-conversation--ensure-attachment-editable)
+  (car (chirp-dm-conversation--queue-attachments
+        (list (chirp-dm-conversation--detected-attachment file document)))))
+
+(defun chirp-dm-attach-document (file)
+  "Stage local FILE explicitly as an XChat document."
+  (interactive (list (read-file-name "Attach document: " nil nil t)))
   (chirp-dm-conversation--queue-attachment file 'file))
 
-(defun chirp-dm-attach-photo (file)
-  "Queue local image FILE as a photo in the current XChat composer."
-  (interactive (list (read-file-name "Attach photo: " nil nil t)))
-  (chirp-dm-conversation--queue-attachment file 'photo))
+(defun chirp-dm-conversation--cleanup-temporary-attachments ()
+  "Delete this buffer's private paths after Appkit retires the send capture."
+  (dolist (file chirp-dm-conversation--temporary-attachments)
+    (ignore-errors (delete-file file)))
+  (setq chirp-dm-conversation--temporary-attachments nil))
 
-(defun chirp-dm-attach-video (file)
-  "Queue local video FILE as a video in the current XChat composer."
-  (interactive (list (read-file-name "Attach video: " nil nil t)))
-  (chirp-dm-conversation--queue-attachment file 'video))
+(defun chirp-dm-conversation--prune-temporary-attachments ()
+  "Delete private files no longer referenced by an editable draft.
+An active send capture retains its files through failure or acknowledgment."
+  (when (and chirp-dm-conversation--temporary-attachments
+             (not (appkit-compose-operation-active-p)))
+    (let ((input (or (appkit-chatbuf-input-string) ""))
+          (position 0)
+          retained)
+      (while (< position (length input))
+        (let ((object (get-text-property
+                       position appkit-chatbuf-input-object-property input)))
+          (when (chirp-dm-conversation--attachment-object-p object)
+            (push (plist-get object :path) retained)))
+        (setq position
+              (next-single-property-change
+               position appkit-chatbuf-input-object-property
+               input (length input))))
+      (setq chirp-dm-conversation--temporary-attachments
+            (cl-delete-if
+             (lambda (file)
+               (unless (member file retained)
+                 (ignore-errors (delete-file file))
+                 t))
+             chirp-dm-conversation--temporary-attachments)))))
 
-(defun chirp-dm-attach-audio (file)
-  "Queue local audio FILE as audio in the current XChat composer."
-  (interactive (list (read-file-name "Attach audio: " nil nil t)))
-  (chirp-dm-conversation--queue-attachment file 'audio))
+(defun chirp-dm-attach-clipboard (&optional document)
+  "Stage clipboard local files or image bytes; DOCUMENT forces a document."
+  (interactive "P")
+  (chirp-dm-conversation--ensure-attachment-editable)
+  (let ((source (appkit-media-clipboard-source)))
+    (if-let* ((files (plist-get source :files)))
+        (chirp-dm-conversation--queue-attachments
+         (mapcar (lambda (file)
+                   (chirp-dm-conversation--detected-attachment file document))
+                 files))
+      (let ((data (plist-get source :data))
+            (suffix (plist-get source :suffix))
+            file staged)
+        (unless (and data suffix)
+          (user-error "Clipboard contains no supported local files or image"))
+        (unwind-protect
+            (progn
+              (setq file (make-temp-file "chirp-dm-clipboard-" nil suffix))
+              (set-file-modes file #o600)
+              (let ((coding-system-for-write 'binary))
+                (write-region data nil file nil 'silent))
+              (chirp-dm-conversation--queue-attachments
+               (list (chirp-dm-conversation--detected-attachment file document)))
+              (push file chirp-dm-conversation--temporary-attachments)
+              (setq staged t))
+          (unless staged
+            (when file (ignore-errors (delete-file file)))))))))
 
-(defun chirp-dm-attach-gif (file)
-  "Queue local GIF FILE as an animation in the current XChat composer."
-  (interactive (list (read-file-name "Attach GIF: " nil nil t)))
-  (chirp-dm-conversation--queue-attachment file 'gif))
+(defun chirp-dm-attach-photo (file &optional document)
+  "Stage local image FILE as a photo; DOCUMENT forces a file."
+  (interactive
+   (list (read-file-name "Attach photo: " nil nil t) current-prefix-arg))
+  (chirp-dm-conversation--queue-attachment file (if document 'file 'photo)))
+
+(defun chirp-dm-attach-video (file &optional document)
+  "Stage local video FILE as a video; DOCUMENT forces a file."
+  (interactive
+   (list (read-file-name "Attach video: " nil nil t) current-prefix-arg))
+  (chirp-dm-conversation--queue-attachment file (if document 'file 'video)))
+
+(defun chirp-dm-attach-audio (file &optional document)
+  "Stage local audio FILE as audio; DOCUMENT forces a file."
+  (interactive
+   (list (read-file-name "Attach audio: " nil nil t) current-prefix-arg))
+  (chirp-dm-conversation--queue-attachment file (if document 'file 'audio)))
+
+(defun chirp-dm-attach-gif (file &optional document)
+  "Stage local GIF FILE as an animation; DOCUMENT forces a file."
+  (interactive
+   (list (read-file-name "Attach GIF: " nil nil t) current-prefix-arg))
+  (chirp-dm-conversation--queue-attachment file (if document 'file 'gif)))
 
 (defun chirp-dm-attach (attach-type)
   "Choose ATTACH-TYPE and invoke its configured XChat attachment command."
@@ -1594,6 +1696,7 @@ With ARG in the composer, insert a newline instead."
   "RET" #'chirp-dm-return-dwim
   "C-c C-a" #'chirp-dm-attach
   "C-c C-f" #'chirp-dm-attach-file
+  "C-c C-v" #'chirp-dm-attach-clipboard
   "C-c C-c" #'chirp-dm-submit
   "C-c C-k" #'chirp-dm-cancel-reply
   "C-c C-r" #'chirp-dm-refresh-conversation
@@ -1611,6 +1714,7 @@ With ARG in the composer, insert a newline instead."
       "RET" #'chirp-dm-return-dwim
       "Z a" #'chirp-dm-attach
       "Z f" #'chirp-dm-attach-file
+      "Z v" #'chirp-dm-attach-clipboard
       :i
       "RET" #'newline
       "<return>" #'newline
@@ -1636,6 +1740,11 @@ With ARG in the composer, insert a newline instead."
   (appkit-markup-compose-setup
    :codecs '(plain)
    :object-classifier #'chirp-dm-conversation--classify-compose-object)
+  (add-hook 'post-command-hook
+            #'chirp-dm-conversation--prune-temporary-attachments nil t)
+  ;; Appkit's existing shutdown hook cancels transport before releasing bytes.
+  (add-hook 'kill-buffer-hook
+            #'chirp-dm-conversation--cleanup-temporary-attachments t t)
   (add-hook 'chirp-dm-conversation--timeline-mode-hook
             #'appkit-evil-normalize-keymaps nil t)
   (appkit-chatbuf-use-timeline-mode #'chirp-dm-conversation--timeline-mode))

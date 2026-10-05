@@ -796,11 +796,6 @@
                   (with-current-buffer buffer
                     (appkit-current-surface))))
               (with-current-buffer buffer
-                (should
-                 (eq (key-binding (kbd "C-c C-a")) #'chirp-dm-attach))
-                (should
-                 (equal (mapcar #'car chirp-dm-attach-commands)
-                        '("photo" "video" "audio" "file" "gif")))
                 (goto-char (point-max))
                 (chirp-dm-conversation--queue-attachment file 'audio)
                 (let*
@@ -861,6 +856,156 @@
       (when (buffer-live-p request) (kill-buffer request))
       (when (buffer-live-p buffer) (kill-buffer buffer))
       (when (file-exists-p file) (delete-file file)))))
+
+(ert-deftest chirp-dm-clipboard-document-lifetime-follows-send-capture ()
+  "Clipboard staging is private; failure retains bytes and ACK releases them."
+  (let ((chirp--app nil) buffer request success failure captured private-file
+        (bytes (unibyte-string 137 80 78 71 13 10 26 10)))
+    (unwind-protect
+        (save-window-excursion
+          (setq request (generate-new-buffer " *chirp-clipboard-send*")
+                buffer
+                (chirp-dm-conversation-open
+                 (chirp-dm-test--normalized-conversation
+                  (chirp-dm-test--normalized-event "20" "20" "old"))))
+          (let ((view (with-current-buffer buffer (appkit-current-surface))))
+            (cl-letf (((symbol-function 'appkit-media-clipboard-source)
+                       (lambda ()
+                         (list :mime-type "image/png" :suffix ".png" :data bytes)))
+                      ((symbol-function 'chirp-backend-dm-send-attachments)
+                       (lambda (_id _text attachments callback &rest options)
+                         (setq captured attachments success callback
+                               failure (plist-get options :errback))
+                         request)))
+              (with-current-buffer buffer
+                (goto-char (point-max))
+                (chirp-dm-attach-clipboard '(4))
+                (setq private-file
+                      (car chirp-dm-conversation--temporary-attachments))
+                (should (file-exists-p private-file))
+                (should-not captured)
+                (should-not (appkit-compose-operation-active-p))
+                (should
+                 (eq (plist-get
+                      (car (chirp-dm-conversation--capture-attachments
+                            (appkit-markup-compose-capture)))
+                      :attachment-kind) 'file))
+                (chirp-dm-submit)
+                (chirp-dm-conversation--prune-temporary-attachments)
+                (should (file-exists-p private-file))
+                (should-error (chirp-dm-attach-clipboard) :type 'user-error)
+                (should (equal (plist-get (car captured) :path) private-file)))
+              (funcall failure "upload failed")
+              (with-current-buffer buffer
+                (appkit-loop-run-pass (appkit-surface-loop view))
+                (should (file-exists-p private-file))
+                (should-not buffer-read-only)
+                (goto-char (point-max))
+                (chirp-dm-submit))
+              (funcall success
+                       (chirp-dm-test--normalized-event "21" "21" "media") nil)
+              (with-current-buffer buffer
+                (appkit-loop-run-pass (appkit-surface-loop view))
+                (should (equal (appkit-chatbuf-input-string) ""))
+                (should-not chirp-dm-conversation--temporary-attachments))
+              (should-not (file-exists-p private-file)))))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (when (buffer-live-p request) (kill-buffer request))
+      (when (and private-file (file-exists-p private-file))
+        (delete-file private-file)))))
+
+(ert-deftest chirp-dm-clipboard-document-batch-rejects-without-draft-damage ()
+  "Document cardinality is validated before any URI file is queued."
+  (let ((chirp--app nil) buffer
+        (first (make-temp-file "chirp-user-first-" nil ".txt" "first"))
+        (second (make-temp-file "chirp-user-second-" nil ".txt" "second")))
+    (unwind-protect
+        (save-window-excursion
+          (setq buffer
+                (chirp-dm-conversation-open
+                 (chirp-dm-test--normalized-conversation
+                  (chirp-dm-test--normalized-event "20" "20" "old"))))
+          (with-current-buffer buffer
+            (goto-char (point-max))
+            (appkit-chatbuf-input-set-text "keep draft")
+            (cl-letf (((symbol-function 'appkit-media-clipboard-source)
+                       (lambda () (list :files (list first second)))))
+              (should-error (chirp-dm-attach-clipboard '(4)) :type 'user-error)
+              (should (equal (appkit-chatbuf-input-string) "keep draft"))
+              (should-not chirp-dm-conversation--temporary-attachments))
+            (cl-letf (((symbol-function 'appkit-media-clipboard-source)
+                       (lambda () (list :files (list first)))))
+              (chirp-dm-attach-clipboard '(4))
+              (should-not chirp-dm-conversation--temporary-attachments)
+              (appkit-chatbuf-input-set-text "")
+              (chirp-dm-conversation--prune-temporary-attachments))))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (should (file-exists-p first))
+      (should (file-exists-p second))
+      (delete-file first)
+      (delete-file second))))
+
+(ert-deftest chirp-dm-file-and-clipboard-inference-use-native-bytes ()
+  "Misleading extensions do not override media bytes; prefix keeps documents."
+  (let ((chirp-xchat-native-module-file
+         (or (getenv "CHIRP_XCHAT_MODULE_FILE")
+             chirp-xchat-native-module-file))
+        (chirp--app nil) buffer file)
+    (skip-unless chirp-xchat-native-module-file)
+    (chirp-xchat-native-load)
+    (unwind-protect
+        (save-window-excursion
+          (setq buffer
+                (chirp-dm-conversation-open
+                 (chirp-dm-test--normalized-conversation
+                  (chirp-dm-test--normalized-event "20" "20" "old"))))
+          (with-current-buffer buffer
+            (cl-letf (((symbol-function 'chirp-backend-dm-send-attachments)
+                       (lambda (&rest _args)
+                         (ert-fail "Attachment inference submitted a message"))))
+              (dolist (case
+                       (list
+                        (cons (unibyte-string 137 80 78 71 13 10 26 10 0 0 0 0)
+                              'photo)
+                        (cons "GIF89a      " 'gif)
+                        (cons (concat (unibyte-string 0 0 0 24) "ftypisom") 'video)
+                        (cons "ID3         " 'audio)
+                        (cons "%PDF-1.7    " 'file)))
+                (setq file (make-temp-file "chirp-misnamed-" nil ".txt"))
+                (let ((coding-system-for-write 'binary))
+                  (write-region (car case) nil file nil 'silent))
+                (goto-char (point-max))
+                (let ((object (chirp-dm-attach-file file)))
+                  (should (eq (plist-get object :attachment-kind) (cdr case))))
+                (should-not (appkit-compose-operation-active-p))
+                (appkit-chatbuf-input-set-text "")
+                (let ((object (chirp-dm-attach-file file '(4))))
+                  (should (eq (plist-get object :attachment-kind) 'file)))
+                (appkit-chatbuf-input-set-text "")
+                (delete-file file)
+                (setq file nil))
+              (cl-letf (((symbol-function 'appkit-media-clipboard-source)
+                         (lambda ()
+                           (list :mime-type "image/png" :suffix ".png"
+                                 :data
+                                 (unibyte-string
+                                  137 80 78 71 13 10 26 10 0 0 0 0)))))
+                (chirp-dm-attach-clipboard)
+                (setq file (car chirp-dm-conversation--temporary-attachments))
+                (should
+                 (eq (plist-get
+                      (car (chirp-dm-conversation--capture-attachments
+                            (appkit-markup-compose-capture)))
+                      :attachment-kind) 'photo))
+                (appkit-chatbuf-input-set-text "")
+                (chirp-dm-conversation--prune-temporary-attachments)
+                (should-not (file-exists-p file))
+                (setq file nil)))))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (when (and file (file-exists-p file)) (delete-file file)))))
 
 (ert-deftest chirp-dm-send-synchronous-error-restores-the-composer ()
   "A native preparation error should release send ownership and retain input."

@@ -569,14 +569,7 @@ impl NativeSession {
         let (width, height) = dimensions
             .map(|value| (i64::from(value.width), i64::from(value.height)))
             .unwrap_or((0, 0));
-        let media_type = match mime_type.as_str() {
-            "image/gif" => 2,
-            "image/svg+xml" => 6,
-            value if value.starts_with("image/") => 1,
-            value if value.starts_with("video/") => 3,
-            value if value.starts_with("audio/") => 4,
-            _ => 5,
-        };
+        let media_type = media_type_for_mime(&mime_type);
 
         let mut staged_file = NamedTempFile::new()
             .map_err(|_| NativeError::Xdk("media staging file could not be created".into()))?;
@@ -1846,6 +1839,49 @@ fn init(env: &Env) -> Result<()> {
 #[defun]
 fn version() -> Result<&'static str> {
     Ok(MODULE_VERSION)
+}
+
+fn media_type_for_mime(mime_type: &str) -> i32 {
+    match mime_type {
+        "image/gif" => 2,
+        "image/svg+xml" => 6,
+        value if value.starts_with("image/") => 1,
+        value if value.starts_with("video/") => 3,
+        value if value.starts_with("audio/") => 4,
+        _ => 5,
+    }
+}
+
+/// Inspect local bytes using the upload detector, without encryption or staging.
+#[defun]
+fn detect_media_type(env: &Env, file_path: String) -> Result<i64> {
+    let inspect = || -> std::result::Result<i64, NativeError> {
+        if file_path.is_empty() || file_path.len() > MAX_MEDIA_PATH_BYTES {
+            return Err(NativeError::InvalidInput(
+                "XChat media path is invalid".into(),
+            ));
+        }
+        let mut file = File::open(&file_path)
+            .map_err(|_| NativeError::InvalidInput("XChat media file is not readable".into()))?;
+        let metadata = file.metadata().map_err(|_| {
+            NativeError::InvalidInput("XChat media file metadata is unavailable".into())
+        })?;
+        if !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_MEDIA_PLAINTEXT_BYTES as u64
+        {
+            return Err(NativeError::InvalidInput(
+                "XChat media file must contain between 1 byte and 50 MiB".into(),
+            ));
+        }
+        let mut probe = vec![0; (metadata.len() as usize).min(MEDIA_PROBE_BYTES)];
+        file.read_exact(&mut probe)
+            .map_err(|_| NativeError::InvalidInput("XChat media file could not be read".into()))?;
+        Ok(i64::from(media_type_for_mime(
+            chat_xdk_core::utils::detect_mime_type(&probe).unwrap_or("application/octet-stream"),
+        )))
+    };
+    inspect().or_signal(env, "chirp-xchat-native-error")
 }
 
 /// Create and return an opaque XChat crypto session.
