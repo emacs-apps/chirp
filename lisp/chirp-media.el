@@ -1353,7 +1353,9 @@ and slice metadata come from `appkit-media-preview-image-from-file'."
     (file crop-spec max-width max-height)
   "Return a preview for FILE within MAX-WIDTH and MAX-HEIGHT.
 
-When CROP-SPEC is non-nil, center-crop to that fixed box instead."
+When CROP-SPEC is non-nil, center-crop to that fixed box instead.
+Plain crops retain their original source for passive playback; inset crops
+remain static so playback cannot replace their composited geometry."
   (pcase-let* ((structuredp (and (listp crop-spec)
                                 (keywordp (car crop-spec))))
                ((map (:width crop-width) (:height crop-height) :insets)
@@ -1365,8 +1367,11 @@ When CROP-SPEC is non-nil, center-crop to that fixed box instead."
              (if insets
                  (appkit-media-cropped-preview-image-from-file
                   file width height insets)
-               (appkit-media-cropped-preview-image-from-file
-                file width height)))
+               (appkit-media-image-with-resource
+                (appkit-media-cropped-preview-image-from-file
+                 file width height)
+                (appkit-media-resource-create :file file)
+                :interaction nil :fit 'cover)))
         (appkit-media-preview-image-from-file
          file max-width max-height))))
 

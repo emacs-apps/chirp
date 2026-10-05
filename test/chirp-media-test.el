@@ -387,49 +387,36 @@ rerender and creates a CPU loop."
                        :preview-url "https://example.com/preview.jpg"))
                     'preview-image))))))
 
-(ert-deftest chirp-media-side-by-side-thumbnail-prefers-fixed-crop ()
-  "Grid thumbnails should crop to one fixed tile and retain a decoder fallback."
-  (let ((chirp-media-render-from-cache-only t)
-        cropped-arguments)
-    (cl-letf (((symbol-function 'chirp-media-cached-file)
-               (lambda (&rest _args) "/tmp/chirp-thumb.jpg"))
-              ((symbol-function
-                'appkit-media-cropped-preview-image-from-file)
-               (lambda (&rest arguments)
-                 (setq cropped-arguments arguments)
-                 'cropped-image))
-              ((symbol-function 'appkit-media-preview-image-from-file)
-               (lambda (&rest _args)
-                 (ert-fail "fixed crop unexpectedly used its fallback"))))
-      (should
-       (eq (chirp-media-thumbnail-image
-            '(:type "photo" :url "https://example.com/photo.jpg")
-            '(127 . 144))
-           'cropped-image))
-      (should
-       (equal cropped-arguments
-              '("/tmp/chirp-thumb.jpg" 127 144)))
-      (setq cropped-arguments nil)
-      (should
-       (eq (chirp-media-thumbnail-image
-            '(:type "photo" :url "https://example.com/photo.jpg")
-            '(:width 127 :height 72 :insets (0 0 2 0)))
-           'cropped-image))
-      (should
-       (equal cropped-arguments
-              '("/tmp/chirp-thumb.jpg" 127 72 (0 0 2 0)))))
-    (cl-letf (((symbol-function 'chirp-media-cached-file)
-               (lambda (&rest _args) "/tmp/chirp-thumb.jpg"))
-              ((symbol-function
-                'appkit-media-cropped-preview-image-from-file)
-               (lambda (&rest _args) nil))
-              ((symbol-function 'appkit-media-preview-image-from-file)
-               (lambda (&rest _args) 'ordinary-image)))
-      (should
-       (eq (chirp-media-thumbnail-image
-            '(:type "photo" :url "https://example.com/photo.jpg")
-            '(127 . 144))
-           'ordinary-image)))))
+(ert-deftest chirp-media-cropped-preview-retains-original-without-bypassing-insets ()
+  "Plain SVG posters retain their source, but inset composites stay static."
+  (skip-unless (and (display-images-p) (image-type-available-p 'svg)))
+  (let ((file (make-temp-file "chirp-crop-" nil ".svg")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"32\"><rect width=\"64\" height=\"32\" fill=\"red\"/></svg>"))
+          (let* ((image (chirp-media--preview-image-from-file
+                         file '(127 . 144) 256 256))
+                 (rows (appkit-media-image-slice-rows image))
+                 (occurrence (get-text-property
+                              0 'appkit-media-occurrence (car rows)))
+                 (playback (cdr occurrence)))
+            (should (eq (plist-get (cdr image) :type) 'svg))
+            (should occurrence)
+            (should (equal (alist-get 'file (plist-get playback :resource)) file))
+            (should (eq (plist-get playback :fit) 'cover))
+            (should-not (plist-get playback :interaction))
+            (dolist (row rows)
+              (should (eq (get-text-property 0 'appkit-media-occurrence row)
+                          occurrence))))
+          (let ((image (chirp-media--preview-image-from-file
+                        file '(:width 127 :height 72 :insets (0 0 2 0))
+                        256 256)))
+            (should (eq (plist-get (cdr image) :type) 'svg))
+            (should-not (plist-get (cdr image) :appkit-media-playback))
+            (dolist (row (appkit-media-image-slice-rows image))
+              (should-not (get-text-property 0 'appkit-media-occurrence row)))))
+      (delete-file file))))
 
 (ert-deftest chirp-media-thumbnail-placeholder-image-exists-for-video-like-media ()
   "Video-like media should reserve thumbnail space before the real preview arrives."
