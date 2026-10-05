@@ -302,3 +302,22 @@ dedicated reader.  Explicit external playback and download remain separate.
 
 Set ~chirp-video-player-command~ to another player, or ~nil~ to open externally
 requested videos in the browser.
+
+* Primary timeline ownership
+
+Home and Following retain separate in-session page state while sharing one
+Surface.  Its reducer owns page transitions, request generations, cursors,
+pending posts and semantic reading positions.  App-level entity updates may
+refresh tweet contents without taking ownership of pagination.
+
+Initial, refresh and older-page reads are managed Effects.  Transport
+callbacks only settle gates; typed terminal messages must still match the
+exact feed state and request generation.  Switching feeds or closing the
+Surface revokes delivery authority before physical cancellation.
+
+Media prefetch and quote enrichment use a fixed-purpose post-commit Effect
+bound to the original App and exact feed owner.  Its deferred start keeps
+synchronous cache hits outside an active Loop pass.  Switching or closing
+cancels pending starts; already shared acquisitions retain their own
+lifetimes.  Collection/search controllers and the DM websocket service have
+separate lifecycles, not the primary timeline's reducer/Effect contract.

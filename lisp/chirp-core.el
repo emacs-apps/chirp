@@ -56,6 +56,7 @@
 (declare-function chirp-toggle-follow-user-at-point "chirp-actions" ())
 (declare-function chirp-load-more "chirp-timeline" (&optional anchor-id))
 (declare-function chirp-toggle-home-following "chirp-timeline" ())
+(declare-function chirp-timeline--update "chirp-timeline" (context state message))
 (declare-function chirp-media-at-point "chirp-media" ())
 (declare-function chirp-media-open "chirp-media-view" (media-list index &optional title buffer))
 (declare-function chirp-media-open-at-point "chirp-media-view" ())
@@ -3115,6 +3116,8 @@ over the card's `t.co` permalink."
     (appkit-next
      :model model
      :render message))
+   ((eq (car-safe message) 'chirp-timeline)
+    (chirp-timeline--update context model message))
    ((eq (car-safe message) 'chirp-model)
     (let ((state (cadr message)))
       (dolist (pair '((:media-intent) (:media-phase . idle) (:media-error)))
