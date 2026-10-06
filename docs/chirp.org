@@ -78,15 +78,21 @@ Conversations decode signature-verified plain text through Appkit's semantic mar
 | mouse-1 | activate a local link or attachment |
 | ~r~ | reply to the message at point |
 | ~!~ | add or remove a prompted reaction |
-| ~N~ | fetch older message history.  Evil: ~g n~ |
+| ~<~ | fetch older message history.  Evil: ~g +~ |
 | ~C-c C-a~ | choose a photo, GIF, video, audio, document, or clipboard staging action |
 | ~C-c C-f~ | stage a local file with native byte inference; ~C-u~ forces a document |
 | ~C-c C-v~ | stage clipboard local files or image bytes; ~C-u~ forces a document |
 | ~C-c C-k~ | cancel the current reply context |
 | ~RET~ in composer | send the captured draft |
 | ~C-u RET~ | insert a composer newline |
+| ~S-RET~ / ~S-<return>~ | insert a composer newline without sending |
 | ~C-c C-c~ | send the captured draft |
 | ~M-p~ / ~M-n~ | previous or next sent input |
+
+Native and Evil use the same Return policy, including Evil insert state;
+~RET~ and the hardware Return event both send only from the composer.
+Application menus use ~C-c t~ (Evil ~g a~); ~M-g~ (Evil ~g A~) opens destinations.
+Attachment staging also uses Evil ~Z a~ / ~Z f~ / ~Z v~; it never sends.
 
 ** Attachments
 
@@ -123,7 +129,7 @@ Direct-message reads never send read acknowledgments.  Text, replies, reactions,
 | ~.~ | show pending new Home or Following posts and move to the newest entry |
 | ~TAB~ | Home/Following, or profile subviews |
 | ~n~ / ~p~ | next or previous entry.  Evil: ~g j~ / ~g k~ |
-| ~N~ | older posts, conversations, or message history.  Evil: ~g n~ |
+| ~N~ | older posts or conversations.  Evil: ~g n~; DM message history uses ~<~ / ~g +~ |
 | ~q~ | close the window; Home and Following keep the buffer |
 | ~RET~ | Appkit action at point, or open the tweet or profile |
 | mouse-1 | activate a local link or control |
@@ -131,11 +137,16 @@ Direct-message reads never send read acknowledgments.  Text, replies, reactions,
 | ~D~ | download current media.  Evil: ~g d~ |
 | ~A~ | author profile.  Evil: ~g u~ |
 | ~S~ | add a spam phrase; ~C-u S~ starts from the display name.  Evil: ~g S~ |
-| ~x~ | application menu (~chirp-dispatch~).  Evil: ~g a~ |
-| ~o~ | tweet operations (~chirp-transient-tweet-operate~), also under ~x o~.  Evil: ~o~ |
-| ~o r~ | reply, or refuse when X limits replies |
+| ~?~ | application menu (~chirp-dispatch~).  Evil: ~g a~; ~M-g~ / ~g A~ opens destinations |
+| ~o~ | tweet operations (~chirp-transient-tweet-operate~).  Evil: ~o~ |
+| ~r~ / ~o r~ | reply, or refuse when X limits replies |
 | ~o t~ | translate the tweet |
 | ~o o~ | open in a browser.  Evil: also ~g x~ |
+
+Common read-only actions also include ~c~ compose, ~s~ search (Evil ~g s~),
+~!~ like, ~l~ copy the post link (Evil ~Z l~), and ~d~ delete
+(Evil ~D~ / ~d d~).  Help uses ~C-c C-h~ / Evil ~g ?~; Evil's bare ~?~
+continues to search, and visual ~o~ retains its normal editing meaning.
 
 ~Follow~ / ~Following~ updates only the matching profile summary or user-list
 row after X confirms the action.  Loaded posts, pagination, and the reading
@@ -152,16 +163,22 @@ position stay intact; failed requests leave the displayed relationship unchanged
 | ~C-c C-e~ | edit alt text |
 | ~C-c C-n~ | commit the current part and start the next |
 | ~C-c C-p~ | drop the current extra part |
-| ~RET~ / ~e~ | load a draft row back into the composer |
+| ~RET~ / ~e~ / Evil ~i~ on a draft row | edit that exact committed part; never publish |
+| ~RET~ / ~S-RET~ / ~S-<return>~ in input | insert a newline; never publish |
+| ~C-c C-o~ | edit live draft options and attachments without publishing |
+| ~C-c t~ / ~M-g~ | application menu / destinations (Evil ~g a~ / ~g A~) |
 | ~M-TAB~ | complete a handle after ~@~ |
 | ~C-c C-s~ | save as an unsent X draft |
 | ~C-c C-t~ | schedule for a local time |
 | ~C-c C-c~ | send and keep the draft until X acknowledges |
 | ~C-c C-k~ | cancel an in-flight submit, or close when idle |
 
-Click ~Audience~ on a post or quote to choose who can reply.  Video
-uploads show ~Uploading video n/N~ in the status strip.  ~x d~ opens
-X drafts and ~x t~ opens scheduled posts.
+Click ~Audience~ on a post or quote, or use draft options, to choose who
+can reply.  Video uploads show ~Uploading video n/N~ in the status strip.
+~? d~ opens X drafts and ~? t~ opens scheduled posts from read-only views.
+Evil attachment controls are ~Z a~ / ~Z f~ / ~Z v~ / ~Z d~ for chooser,
+file, clipboard, and detach.  Shared native/modal bindings come from semantic
+roles and can be customized with ~appkit-binding-overrides~.
 
 JPEG, PNG, and WebP attachments may be at most 5 MiB; GIFs 15 MiB;
 MP4 videos 512 MiB, uploaded in 1 MiB chunks.  Premium accounts can

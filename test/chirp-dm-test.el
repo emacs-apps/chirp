@@ -630,6 +630,53 @@
       (dolist (buffer buffers)
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+(ert-deftest chirp-dm-semantic-return-captures-newlines-and-preserves-failed-send ()
+  "Native and modal Return share prefix policy and real send ownership."
+  (dolist (state (append '(nil)
+                        (when (require 'evil nil t) '(normal motion insert))))
+    (dolist (event '("RET" "<return>"))
+      (let ((chirp--app nil) buffer captured (sends 0))
+        (unwind-protect
+            (save-window-excursion
+              (cl-letf (((symbol-function 'chirp-backend-dm-send-text)
+                         (lambda (conversation-id text _success &rest options)
+                           (cl-incf sends)
+                           (setq captured (list conversation-id text))
+                           (funcall (plist-get options :errback) "Rejected"))))
+                (setq buffer
+                      (chirp-dm-conversation-open
+                       (chirp-dm-test--normalized-conversation
+                        (chirp-dm-test--normalized-event "20" "20" "old"))))
+                (with-current-buffer buffer
+                  (when state
+                    (let ((appkit-evil-enable-integration t))
+                      (chirp-dm-conversation--setup-evil))
+                    (evil-local-mode 1)
+                    (evil-change-state state))
+                  (goto-char (point-min))
+                  (appkit-chatbuf-update-context-mode)
+                  (call-interactively (key-binding (kbd event)))
+                  (should (appkit-chatbuf-point-in-input-p))
+                  (should (= sends 0))
+                  (insert "first")
+                  (appkit-chatbuf-update-context-mode)
+                  (let ((current-prefix-arg '(4)))
+                    (call-interactively (key-binding (kbd event))))
+                  (insert "second")
+                  (should (equal (appkit-chatbuf-input-string) "first\nsecond"))
+                  (should (= sends 0))
+                  (call-interactively (key-binding (kbd event)))
+                  (should (= sends 1))
+                  (should (equal captured '("conversation-1" "first\nsecond")))
+                  (should-not (appkit-compose-operation-active-p))
+                  (should-not buffer-read-only)
+                  (should (equal (appkit-chatbuf-input-string) "first\nsecond"))
+                  (should (= (length (chirp-dm-conversation--events
+                                      (appkit-surface-model (appkit-current-surface))))
+                             1)))))
+          (chirp-stop)
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
 (ert-deftest chirp-dm-send-commits-verified-ack-without-focused-reload ()
   "Acknowledged sends retain other windows, nodes and drafts without a read."
   (let ((chirp--app nil) buffers success (reads 0) old-node)

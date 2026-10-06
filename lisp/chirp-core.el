@@ -10,8 +10,8 @@
 
 ;;; Code:
 
-(declare-function turn-off-evil-snipe-mode "evil-snipe" ())
-(declare-function turn-off-evil-snipe-override-mode "evil-snipe" ())
+
+
 (declare-function chirp-search "chirp" (query))
 (declare-function chirp-compose-post "chirp-actions" ())
 (declare-function chirp-reply-at-point "chirp-actions" ())
@@ -33,6 +33,7 @@
 (require 'warnings)
 (require 'appkit-core)
 (require 'appkit-evil)
+(require 'appkit-bindings)
 (require 'appkit-surface)
 (require 'appkit-projection)
 (require 'appkit-ui)
@@ -336,12 +337,8 @@ commands still work, and displays alt text when the backend provides it."
 
 (defvar-keymap chirp-view-mode-map
   :doc "Keymap for `chirp-view-mode'."
-  "g" #'chirp-refresh
   "TAB" #'chirp-toggle-home-following
-  "n" #'chirp-next-entry
-  "p" #'chirp-previous-entry
   "N" #'chirp-load-more
-  "RET" #'chirp-open-at-point
   "C-RET" #'chirp-media-open-dedicated-at-point
   "S-RET" #'chirp-media-open-external-at-point
   "M-RET" #'chirp-open-entry-at-point
@@ -349,10 +346,25 @@ commands still work, and displays alt text when the backend provides it."
   "m" #'chirp-open-primary-media
   "D" #'chirp-media-download-at-point
   "A" #'chirp-open-author-at-point
-  "S" #'chirp-thread-add-spam-rule
-  "x" #'chirp-dispatch
-  "o" #'chirp-transient-tweet-operate
-  "q" #'chirp-quit-current-buffer)
+  "S" #'chirp-thread-add-spam-rule)
+
+(appkit-bindings-define 'chirp-view-mode-map 'read-only
+  'activate #'chirp-open-at-point
+  'app-menu #'chirp-dispatch
+  'navigation #'chirp-dispatch
+  'refresh #'chirp-refresh
+  'next-item #'chirp-next-entry
+  'previous-item #'chirp-previous-entry
+  'help #'describe-mode
+  'quit #'chirp-quit-current-buffer
+  'quit-cancel #'evil-quit
+  'message-menu #'chirp-transient-tweet-operate
+  'compose #'chirp-compose-post
+  'search #'chirp-search
+  'reply #'chirp-reply-at-point
+  'react #'chirp-toggle-like-at-point
+  'copy-link #'chirp-copy-fixupx-url-at-point
+  'delete #'chirp-delete-at-point)
 
 (define-derived-mode chirp-view-mode appkit-discussion-mode "Chirp"
   "Major mode for Chirp buffers."
@@ -366,36 +378,22 @@ commands still work, and displays alt text when the backend provides it."
   "Install optional Evil bindings for Chirp browsing views."
   (when appkit-evil-enable-integration
     (appkit-evil-set-initial-states '(chirp-view-mode) 'normal)
-    (appkit-evil-define-readonly-keys 'chirp-view-mode-map)
+    (appkit-bindings-enable-evil 'chirp-view-mode-map)
+    (appkit-bindings-enable-evil 'chirp-dm-inbox--mode-map)
     (appkit-evil-map
       :map chirp-view-mode-map
       :nm
-      "RET" #'chirp-open-at-point
-      "<return>" #'chirp-open-at-point
       "TAB" #'chirp-toggle-home-following
-      "g r" #'chirp-refresh
-      "g j" #'chirp-next-entry
-      "g k" #'chirp-previous-entry
       "g n" #'chirp-load-more
       "g m" #'chirp-open-primary-media
       "g d" #'chirp-media-download-at-point
       "g u" #'chirp-open-author-at-point
       "g S" #'chirp-thread-add-spam-rule
-      "g a" #'chirp-dispatch
-      "o" #'chirp-transient-tweet-operate
       "g x" #'chirp-browse-at-point
-      "g s" #'chirp-search
-      "c" #'chirp-compose-post
-      "r" #'chirp-reply-at-point
       "Q" #'chirp-quote-at-point
       "s" #'chirp-toggle-bookmark-at-point
-      "!" #'chirp-toggle-like-at-point
-      "Z l" #'chirp-copy-fixupx-url-at-point
-      "D" #'chirp-delete-at-point
-      "d d" #'chirp-delete-at-point
       :map chirp-dm-inbox--mode-map
       :nm
-      "g r" #'chirp-dm-refresh-inbox
       "g n" #'chirp-dm-load-more-inbox)
     (appkit-evil-normalize-buffers '(chirp-view-mode))))
 
@@ -3175,12 +3173,7 @@ over the card's `t.co` permalink."
                        (appkit-projection-change-create
                         :geometry-p t)))
 
-(with-eval-after-load 'evil-snipe
-  (dolist (mode '(chirp-view-mode chirp-compose-mode chirp-dm-conversation--mode
-                  chirp-dm-inbox--mode chirp-unsent-mode))
-    (let ((hook (intern (format "%s-hook" mode))))
-      (add-hook hook #'turn-off-evil-snipe-mode)
-      (add-hook hook #'turn-off-evil-snipe-override-mode))))
+
 
 (provide 'chirp-core)
 

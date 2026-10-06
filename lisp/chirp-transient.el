@@ -52,6 +52,20 @@
     ("+" "Follow" chirp-follow-user-at-point)
     ("-" "Unfollow" chirp-unfollow-user-at-point)]])
 
+;;;###autoload(autoload 'chirp-transient-compose "chirp-transient" nil t)
+(transient-define-prefix chirp-transient-compose ()
+  "Edit the live public draft without publishing it."
+  [["Draft"
+    ("n" "Add post" chirp-compose-add-post)
+    ("p" "Remove post" chirp-compose-remove-post)
+    ("r" "Reply audience" chirp-compose-set-reply-audience)]
+   ["Attachments"
+    ("a" "Choose" chirp-compose-attach)
+    ("f" "File" chirp-compose-attach-file)
+    ("v" "Clipboard" chirp-compose-attach-clipboard)
+    ("d" "Detach" chirp-compose-remove-image)
+    ("e" "Alt text" chirp-compose-describe-image)]])
+
 (provide 'chirp-transient)
 
 ;;; chirp-transient.el ends here

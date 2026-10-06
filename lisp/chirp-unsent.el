@@ -15,6 +15,7 @@
 (require 'subr-x)
 (require 'tabulated-list)
 (require 'appkit-evil)
+(require 'appkit-bindings)
 (require 'chirp-core)
 (require 'chirp-backend)
 (require 'chirp-actions)
@@ -84,15 +85,21 @@ Either `draft' or `scheduled'.")
 (defvar-keymap chirp-unsent-mode-map
   :doc "Keymap for `chirp-unsent-mode'."
   :parent tabulated-list-mode-map
-  "RET" #'chirp-unsent-open
-  "g" #'chirp-unsent-refresh
-  "m" #'chirp-unsent-mark
-  "u" #'chirp-unsent-unmark
-  "U" #'chirp-unsent-unmark-all
   "d" #'chirp-unsent-flag-delete
   "x" #'chirp-unsent-execute
-  "TAB" #'chirp-unsent-toggle-kind
-  "q" #'chirp-quit-current-buffer)
+  "TAB" #'chirp-unsent-toggle-kind)
+
+(appkit-bindings-define 'chirp-unsent-mode-map 'read-only
+  'activate #'chirp-unsent-open
+  'app-menu #'chirp-dispatch
+  'navigation #'chirp-dispatch
+  'refresh #'chirp-unsent-refresh
+  'help #'describe-mode
+  'quit #'chirp-quit-current-buffer
+  'quit-cancel #'evil-quit
+  'mark #'chirp-unsent-mark
+  'unmark #'chirp-unsent-unmark
+  'clear-marks #'chirp-unsent-unmark-all)
 
 ;;; Rows
 
@@ -152,15 +159,10 @@ Either `draft' or `scheduled'.")
   "Install optional Evil bindings for unsent draft lists."
   (when appkit-evil-enable-integration
     (appkit-evil-set-initial-states '(chirp-unsent-mode) 'normal)
-    (appkit-evil-define-readonly-keys 'chirp-unsent-mode-map)
+    (appkit-bindings-enable-evil 'chirp-unsent-mode-map)
     (appkit-evil-map
       :map chirp-unsent-mode-map
       :nm
-      "RET" #'chirp-unsent-open
-      "g r" #'chirp-unsent-refresh
-      "M" #'chirp-unsent-mark
-      "U" #'chirp-unsent-unmark
-      "g U" #'chirp-unsent-unmark-all
       "D" #'chirp-unsent-flag-delete
       "X" #'chirp-unsent-execute
       "TAB" #'chirp-unsent-toggle-kind)

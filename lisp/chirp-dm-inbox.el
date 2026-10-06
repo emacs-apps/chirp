@@ -15,6 +15,7 @@
 (require 'appkit-core)
 (require 'appkit-chat-avatar)
 (require 'appkit-directory)
+(require 'appkit-bindings)
 (require 'appkit-name-color)
 (require 'appkit-surface)
 
@@ -542,9 +543,20 @@
 (defvar-keymap chirp-dm-inbox--mode-map
   :doc "Keymap for `chirp-dm-inbox--mode'."
   :parent appkit-directory-mode-map
-  "g" #'chirp-dm-refresh-inbox
-  "N" #'chirp-dm-load-more-inbox
-  "q" #'chirp-quit-current-buffer)
+  "N" #'chirp-dm-load-more-inbox)
+
+(appkit-bindings-define 'chirp-dm-inbox--mode-map 'read-only
+  'activate #'appkit-directory-activate
+  'app-menu #'chirp-dispatch
+  'navigation #'chirp-dispatch
+  'refresh #'chirp-dm-refresh-inbox
+  'next-item #'appkit-directory-next-item
+  'previous-item #'appkit-directory-previous-item
+  'next-button #'appkit-directory-tab-dwim
+  'previous-button #'appkit-directory-previous-item
+  'help #'describe-mode
+  'quit #'chirp-quit-current-buffer
+  'quit-cancel #'evil-quit)
 
 (define-derived-mode chirp-dm-inbox--mode appkit-directory-mode "Chirp-DMs"
   "Major mode for Chirp's Appkit-owned XChat inbox."

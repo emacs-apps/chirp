@@ -23,6 +23,7 @@
 (require 'appkit-chat-timeline)
 (require 'appkit-scroll)
 (require 'appkit-evil)
+(require 'appkit-bindings)
 (require 'appkit-surface)
 
 (require 'appkit-markup-codec)
@@ -1446,17 +1447,28 @@ An active send capture retains its files through failure or acknowledgment."
         request)
     (user-error "Current view is not a direct-message conversation")))
 
+(defun chirp-dm-conversation--input-return ()
+  "Send the current draft, or insert a newline with a prefix."
+  (interactive)
+  (if current-prefix-arg
+      (newline)
+    (chirp-dm-submit)))
+
+(defun chirp-dm-conversation--timeline-return ()
+  "Open an embedded post at point, or focus the composer."
+  (interactive)
+  (if (get-text-property (point) 'chirp-subentry-item)
+      (chirp-open-at-point)
+    (appkit-chatbuf-focus-input)))
+
 (defun chirp-dm-return-dwim (arg)
-  "Open an embedded post, move to the composer, or send its text.
+  "Activate a local action or embedded post, focus input, or send the draft.
 With ARG in the composer, insert a newline instead."
   (interactive "P")
-  (if (not (appkit-chatbuf-point-in-input-p))
-      (if (get-text-property (point) 'chirp-subentry-item)
-          (chirp-open-at-point)
-        (goto-char (or (appkit-chatbuf-input-logical-end-position) (point-max))))
-    (if arg
-        (insert "\n")
-      (chirp-dm-submit))))
+  (let ((current-prefix-arg arg))
+    (appkit-chatbuf-dispatch-return
+     #'chirp-dm-conversation--input-return
+     #'chirp-dm-conversation--timeline-return)))
 
 (defun chirp-dm-conversation--event-at-point (state)
   "Return canonical message event at point in conversation STATE."
@@ -1676,14 +1688,21 @@ With ARG in the composer, insert a newline instead."
 ;;; Conversation Modes
 
 (defvar-keymap chirp-dm-conversation--timeline-mode-map
-  :doc "Timeline-only keymap active outside the XChat composer."
-  "!" #'chirp-dm-toggle-reaction
-  "g" #'chirp-dm-refresh-conversation
-  "N" #'chirp-dm-load-older-messages
-  "n" #'chirp-dm-next-message
-  "p" #'chirp-dm-previous-message
-  "r" #'chirp-dm-reply-to-message
-  "q" #'chirp-quit-current-buffer)
+  :doc "Timeline-only keymap active outside the XChat composer.")
+
+(appkit-bindings-define 'chirp-dm-conversation--timeline-mode-map 'read-only
+  'app-menu #'chirp-dispatch
+  'navigation #'chirp-dispatch
+  'help #'describe-mode
+  'return #'chirp-dm-return-dwim
+  'refresh #'chirp-dm-refresh-conversation
+  'history-older #'chirp-dm-load-older-messages
+  'next-item #'chirp-dm-next-message
+  'previous-item #'chirp-dm-previous-message
+  'reply #'chirp-dm-reply-to-message
+  'react #'chirp-dm-toggle-reaction
+  'quit #'chirp-quit-current-buffer
+  'quit-cancel #'evil-quit)
 
 (define-minor-mode chirp-dm-conversation--timeline-mode
   "Enable direct-message navigation keys outside the XChat composer."
@@ -1692,40 +1711,28 @@ With ARG in the composer, insert a newline instead."
   :keymap chirp-dm-conversation--timeline-mode-map)
 
 (defvar-keymap chirp-dm-conversation--mode-map
-  :doc "Keymap for `chirp-dm-conversation--mode'."
-  "RET" #'chirp-dm-return-dwim
-  "C-c C-a" #'chirp-dm-attach
-  "C-c C-f" #'chirp-dm-attach-file
-  "C-c C-v" #'chirp-dm-attach-clipboard
-  "C-c C-c" #'chirp-dm-submit
-  "C-c C-k" #'chirp-dm-cancel-reply
-  "C-c C-r" #'chirp-dm-refresh-conversation
-  "C-c C-n" #'chirp-dm-load-older-messages)
+  :doc "Keymap for `chirp-dm-conversation--mode'.")
+
+(appkit-bindings-define 'chirp-dm-conversation--mode-map 'input
+  'app-menu #'chirp-dispatch
+  'navigation #'chirp-dispatch
+  'help #'describe-mode
+  'return #'chirp-dm-return-dwim
+  'newline #'newline
+  'submit #'chirp-dm-submit
+  'cancel #'chirp-dm-cancel-reply
+  'refresh #'chirp-dm-refresh-conversation
+  'attach #'chirp-dm-attach
+  'attach-file #'chirp-dm-attach-file
+  'attach-clipboard #'chirp-dm-attach-clipboard)
 
 (defun chirp-dm-conversation--setup-evil ()
   "Install optional Evil bindings for XChat conversation views."
   (when appkit-evil-enable-integration
     (appkit-evil-set-initial-states
      '(chirp-dm-conversation--mode) 'normal)
-    (appkit-evil-map
-      :map chirp-dm-conversation--mode-map
-      :nm
-      "g r" #'chirp-dm-refresh-conversation
-      "RET" #'chirp-dm-return-dwim
-      "Z a" #'chirp-dm-attach
-      "Z f" #'chirp-dm-attach-file
-      "Z v" #'chirp-dm-attach-clipboard
-      :i
-      "RET" #'newline
-      "<return>" #'newline
-      :map chirp-dm-conversation--timeline-mode-map
-      :nm
-      "!" #'chirp-dm-toggle-reaction
-      "q" #'chirp-quit-current-buffer
-      "r" #'chirp-dm-reply-to-message
-      "g j" #'chirp-dm-next-message
-      "g k" #'chirp-dm-previous-message
-      "g n" #'chirp-dm-load-older-messages)
+    (appkit-bindings-enable-evil 'chirp-dm-conversation--mode-map)
+    (appkit-bindings-enable-evil 'chirp-dm-conversation--timeline-mode-map)
     (appkit-evil-normalize-buffers '(chirp-dm-conversation--mode))))
 
 (with-eval-after-load 'evil
