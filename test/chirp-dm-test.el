@@ -630,6 +630,44 @@
       (dolist (buffer buffers)
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+(ert-deftest chirp-dm-plain-message-return-preserves-point-draft-and-state ()
+  "Native and modal Return leave ordinary messages and their drafts alone."
+  (dolist (state (append '(nil)
+                        (when (require 'evil nil t) '(normal motion insert))))
+    (dolist (event '("RET" "<return>"))
+      (let ((chirp--app nil) buffer)
+        (unwind-protect
+            (save-window-excursion
+              (setq buffer
+                    (chirp-dm-conversation-open
+                     (chirp-dm-test--normalized-conversation
+                      (chirp-dm-test--normalized-event "20" "20" "plain message"))))
+              (switch-to-buffer buffer)
+              (goto-char (point-max))
+              (insert "unsent draft")
+              (when state
+                (let ((appkit-evil-enable-integration t))
+                  (chirp-dm-conversation--setup-evil))
+                (evil-local-mode 1)
+                (evil-change-state state))
+              (goto-char (point-min))
+              (search-forward "plain message")
+              (goto-char (match-beginning 0))
+              (appkit-chatbuf-update-context-mode)
+              (let ((position (point))
+                    (draft (appkit-chatbuf-input-string)))
+                (should-not (appkit-chatbuf-point-in-input-p))
+                (execute-kbd-macro (kbd event))
+                (should (eq (current-buffer) buffer))
+                (should (= (point) position))
+                (should-not (appkit-chatbuf-point-in-input-p))
+                (should (equal (appkit-chatbuf-input-string) draft))
+                (should-not (appkit-compose-operation-active-p))
+                (when state
+                  (should (eq evil-state state)))))
+          (chirp-stop)
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
 (ert-deftest chirp-dm-semantic-return-captures-newlines-and-preserves-failed-send ()
   "Native and modal Return share prefix policy and real send ownership."
   (dolist (state (append '(nil)
@@ -653,9 +691,7 @@
                       (chirp-dm-conversation--setup-evil))
                     (evil-local-mode 1)
                     (evil-change-state state))
-                  (goto-char (point-min))
-                  (appkit-chatbuf-update-context-mode)
-                  (call-interactively (key-binding (kbd event)))
+                  (appkit-chatbuf-focus-input)
                   (should (appkit-chatbuf-point-in-input-p))
                   (should (= sends 0))
                   (insert "first")

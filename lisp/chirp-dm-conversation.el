@@ -1455,14 +1455,13 @@ An active send capture retains its files through failure or acknowledgment."
     (chirp-dm-submit)))
 
 (defun chirp-dm-conversation--timeline-return ()
-  "Open an embedded post at point, or focus the composer."
+  "Open an embedded post at point, leaving ordinary messages unchanged."
   (interactive)
-  (if (get-text-property (point) 'chirp-subentry-item)
-      (chirp-open-at-point)
-    (appkit-chatbuf-focus-input)))
+  (when (get-text-property (point) 'chirp-subentry-item)
+    (chirp-open-at-point)))
 
 (defun chirp-dm-return-dwim (arg)
-  "Activate a local action or embedded post, focus input, or send the draft.
+  "Activate a local action or embedded post, or send the draft from input.
 With ARG in the composer, insert a newline instead."
   (interactive "P")
   (let ((current-prefix-arg arg))
