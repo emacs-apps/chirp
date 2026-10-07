@@ -486,6 +486,7 @@
     (appkit-ui-apply-line-prefix header-start (point)
                                  (appkit-ui-make-prefix-state
                                   header-prefix body-rest-prefix))
+    (appkit-ui-append-face header-start (point) 'appkit-chat-heading)
     (setq body-start (point))
     (when (chirp-dm-render--insert-message-content event context)
       (insert "\n")
