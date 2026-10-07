@@ -14,6 +14,12 @@ through Emacs's ~url.el~.  Plz/curl is limited to the public,
 credential-free query-ID registry.  ~browser-session~ is used only
 for explicit browser login capture.
 
+Direct-message buffers keep conversation identity in their buffer title rather
+than repeating it above the messages.  Verified sender/content presentation
+and load/send errors remain unchanged.  Encrypted mark-read/mark-unread events
+currently expose no authoritative account read boundary to the UI, so they do
+not create an inferred unread divider.
+
 * Data representation
 
 Decoded JSON uses symbol-key alists and list arrays.  Normalizers bind

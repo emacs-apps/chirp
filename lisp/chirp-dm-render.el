@@ -496,16 +496,6 @@
     (chirp-dm-render--insert-reactions context body-prefix)
     (insert "\n")))
 
-(defun chirp-dm-render-header (state)
-  "Return generated header text for conversation STATE."
-  (let ((title (chirp-dm-render--one-line (plist-get state :title))))
-    (concat
-     (propertize
-      (format "Direct message: %s\n"
-              (if (string-empty-p title) "Conversation" title))
-      'face 'bold)
-     "\n")))
-
 (defun chirp-dm-render-footer (state)
   "Return generated footer text for conversation STATE."
   (pcase-let* (((map :phase :message) (chirp-dm-render--status state))
