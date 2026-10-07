@@ -33,23 +33,10 @@ features remain usable when it is absent.
 
 * Entry points
 
-| Command | Opens |
-|---------+-------|
-| ~M-x chirp-login~ | capture or refresh the X web session |
-| ~M-x chirp-forget-browser-session~ | delete the imported auth file |
-| ~M-x chirp-home~ | For You timeline |
-| ~M-x chirp-following~ | Following timeline |
-| ~M-x chirp-direct-messages~ | XChat inbox after one unlock |
-| ~M-x chirp-bookmarks~ | bookmarks |
-| ~M-x chirp-likes~ | the account's Likes |
-| ~M-x chirp-me~ | the authenticated profile |
-| ~M-x chirp-list~ | one of your lists, or a list by ID |
-| ~M-x chirp-search~ | search |
-| ~M-x chirp-thread~ | a thread by post ID |
-| ~M-x chirp-profile~ | a user profile |
-| ~M-x chirp-profile-followers~ | followers |
-| ~M-x chirp-profile-following-users~ | following |
-| ~M-x chirp-open-url~ | a supported ~x.com~ or ~twitter.com~ URL |
+Start with ~M-x chirp-home~ or ~M-x chirp-following~ for the primary timelines,
+or ~M-x chirp-direct-messages~ for the XChat inbox.  The
+[[file:../lisp/chirp-transient.el::(transient-define-prefix chirp-dispatch][application menu]] also opens bookmarks, likes, profiles, lists, search,
+saved drafts and scheduled posts.
 
 Commands that accept a post or list ID intentionally do not parse URLs. Use ~M-x chirp-open-url~ for a supported X or Twitter URL.
 
@@ -70,32 +57,19 @@ While the Chirp application remains active, one Appkit-owned XChat websocket rec
 
 ** Message interactions
 
-Conversations decode signature-verified plain text through Appkit's semantic markup codec, and the composer encodes the same plain codec before native encryption.  Verified reactions appear as compact chips beneath their exact target message instead of becoming separate rows; the current account's reactions use a distinct blue chosen style.  Replies keep a view-local Appkit context card above the composer.
+Conversations decode signature-verified plain text through Appkit's semantic
+markup codec, and the composer encodes the same plain codec before native
+encryption.  Verified reactions appear beneath their target message, not as
+separate rows; the account's own reactions have a distinct chosen style.
+Replies keep a view-local context card above the composer.
 
-| Key | Action |
-|-----+--------|
-| ~RET~ / ~<return>~ | activate an attachment or embedded post; otherwise stay at the message |
-| mouse-1 | activate a local link or attachment |
-| ~r~ | reply to the message at point |
-| ~!~ | add or remove a prompted reaction |
-| ~<~ | fetch older message history.  Evil: ~g +~ |
-| ~C-c C-a~ | choose a photo, GIF, video, audio, document, or clipboard staging action |
-| ~C-c C-f~ | stage a local file with native byte inference; ~C-u~ forces a document |
-| ~C-c C-v~ | stage clipboard local files or image bytes; ~C-u~ forces a document |
-| ~C-c C-k~ | cancel the current reply context |
-| ~RET~ in composer | send the captured draft |
-| ~C-u RET~ | insert a composer newline |
-| ~S-RET~ / ~S-<return>~ | insert a composer newline without sending |
-| ~C-c C-c~ | send the captured draft |
-| ~M-p~ / ~M-n~ | previous or next sent input |
-
-Native and Evil use the same Return policy, including Evil insert state;
-~RET~ and the hardware Return event both send only from the composer.
-On ordinary timeline text without an action, Return preserves point, draft
-and Evil state instead of entering the composer.  Reply and composer entry
-remain explicit commands.
-Application menus use ~C-c t~ (Evil ~g a~); ~M-g~ (Evil ~g A~) opens destinations.
-Attachment staging also uses Evil ~Z a~ / ~Z f~ / ~Z v~; it never sends.
+The [[file:../lisp/chirp-dm-conversation.el::(appkit-bindings-define 'chirp-dm-conversation--timeline-mode-map][message actions]] and
+[[file:../lisp/chirp-dm-conversation.el::(appkit-bindings-define 'chirp-dm-conversation--mode-map][composer actions]] use [[file:../../appkit.el/appkit-bindings.el::(defconst appkit-binding-defaults][Appkit's native/Evil bindings]].
+On the timeline, Return activates local content, such as an attachment or
+embedded post; ordinary text keeps point, draft and modal state unchanged.
+In input, Return sends the captured draft.  Newline, reply, reaction and
+attachment staging remain separate actions.  Native and Evil states share
+these semantics.
 
 ** Attachments
 
@@ -107,13 +81,15 @@ Decrypted files use ~chirp-cache-directory~, like other Chirp media.  Protect or
 
 *** Outgoing attachments
 
-~C-c C-a~ chooses a typed attachment action; ~C-c C-f~ infers photo, GIF, video,
-audio, or document from native upload byte detection, not the filename.
-~C-c C-v~ stages clipboard local files or PNG/JPEG/BMP bytes.  A universal prefix
-forces a document; the chooser also has an explicit file action.  These commands
-do not send.  Photos and GIFs keep inline previews; other kinds use typed cards.
+The attachment chooser offers typed staging actions.  File attachment infers
+photo, GIF, video, audio or document from native byte detection, not the
+filename; clipboard attachment accepts local files or PNG/JPEG/BMP bytes.
+A universal prefix forces a document, and the chooser also has an explicit
+file action.  Staging does not send.  Photos and GIFs keep inline previews;
+other kinds use typed cards.
+
 Private clipboard sources survive captured sends and failure, and are removed
-after acknowledgment, draft removal, or buffer shutdown.  Ordinary user files
+after acknowledgment, draft removal or buffer shutdown.  Ordinary user files
 are never deleted.  Rebuild the native module when updating this interface.
 
 On send, the native module validates and encrypts each file under the conversation's latest verified key.  Chirp then initializes the upload, sends bounded encrypted parts to TON, finalizes it, and encrypts the message envelope under the same key version.  Uploads use the browser session already captured by ~chirp-login~; no separate media credential is required.  Temporary ciphertext is removed after success, failure, or cancellation.
@@ -122,34 +98,34 @@ On send, the native module validates and encrypts each file under the conversati
 
 Direct-message reads never send read acknowledgments.  Text, replies, reactions, and attachments are never retried or inserted optimistically.  Reply context and every composer object remain until X returns a validated acknowledgement.
 
-* Keys
+* Browsing and composing
 
-~chirp-home~ and ~chirp-following~ share one primary timeline buffer and retain independent posts, pagination, pending new posts, and positions.  Reopening either subview or switching with ~TAB~ restores canonical state without fetching again.  While the primary buffer is visible, Chirp checks the active feed every ~chirp-timeline-poll-interval~ seconds (30 by default); set the option to nil to disable automatic checks.  Fresh posts remain behind a centered, clickable ~Show N posts~ header-line button, which stays visible while the timeline scrolls and never moves the current row.  Scrolling within ~chirp-timeline-auto-load-threshold~ characters of the visible bottom quietly loads the next older page and preserves the current row; the default is 2000, and nil disables only automatic pagination.
+The [[file:../lisp/chirp-core.el::(defvar-keymap chirp-view-mode-map][view keymap]] contains Chirp-specific controls; its
+[[file:../lisp/chirp-core.el::(appkit-bindings-define 'chirp-view-mode-map][semantic actions]] share the Appkit theme.  The
+[[file:../lisp/chirp-core.el::(defun chirp--setup-evil][Evil adapter]] adds modal browsing controls without replacing native
+search or visual motions.  Customize shared keys through
+[[file:../../appkit.el/appkit-bindings.el::(defcustom appkit-binding-overrides][appkit-binding-overrides]] and inspect the effective binding with ~C-h k~
+at the relevant buffer position and state.
 
-| Key | Action |
-|-----+--------|
-| ~g~ | check immediately for new Home or Following posts without moving the current row; also available through ~M-x chirp-refresh~ |
-| ~.~ | show pending new Home or Following posts and move to the newest entry |
-| ~TAB~ | Home/Following, or profile subviews |
-| ~n~ / ~p~ | next or previous entry.  Evil: ~g j~ / ~g k~ |
-| ~N~ | older posts or conversations.  Evil: ~g n~; DM message history uses ~<~ / ~g +~ |
-| ~q~ | close the window; Home and Following keep the buffer |
-| ~RET~ | Appkit action at point, or open the tweet or profile |
-| mouse-1 | activate a local link or control |
-| ~m~ | first media item.  Evil: ~g m~ |
-| ~D~ | download current media.  Evil: ~g d~ |
-| ~A~ | author profile.  Evil: ~g u~ |
-| ~S~ | add a spam phrase; ~C-u S~ starts from the display name.  Evil: ~g S~ |
-| ~?~ | application menu (~chirp-dispatch~).  Evil: ~g a~; ~M-g~ / ~g A~ opens destinations |
-| ~o~ | tweet operations (~chirp-transient-tweet-operate~).  Evil: ~o~ |
-| ~r~ / ~o r~ | reply, or refuse when X limits replies |
-| ~o t~ | translate the tweet |
-| ~o o~ | open in a browser.  Evil: also ~g x~ |
+** Timelines
 
-Common read-only actions also include ~c~ compose, ~s~ search (Evil ~g s~),
-~!~ like, ~l~ copy the post link (Evil ~Z l~), and ~d~ delete
-(Evil ~D~ / ~d d~).  Help uses ~C-c C-h~ / Evil ~g ?~; Evil's bare ~?~
-continues to search, and visual ~o~ retains its normal editing meaning.
+~chirp-home~ and ~chirp-following~ share one primary buffer but retain
+independent posts, pagination, pending new posts and positions.  Switching
+subviews restores that state without fetching again; closing the window
+does not discard it.
+
+While visible, the active feed checks for new posts according to
+~chirp-timeline-poll-interval~.  Refreshing checks immediately without moving
+the current row.  Fresh posts wait behind the clickable ~Show N posts~
+header-line button until explicitly revealed.
+
+Approaching the visible bottom loads the next older page without moving the
+current row.  ~chirp-timeline-auto-load-threshold~ sets the character distance;
+nil disables automatic pagination, not explicit loading.
+
+The [[file:../lisp/chirp-transient.el::(transient-define-prefix chirp-transient-tweet-operate][post menu]] operates on the current tweet or quote.  Local links and media
+have their own actions; reply and other writes remain subject to X's
+permissions.
 
 ~Follow~ / ~Following~ updates only the matching profile summary or user-list
 row after X confirms the action.  Loaded posts, pagination, and the reading
@@ -157,40 +133,29 @@ position stay intact; failed requests leave the displayed relationship unchanged
 
 ** Compose
 
-| Key | Action |
-|-----+--------|
-| ~C-c C-a~ | choose a media or clipboard staging action |
-| ~C-c C-f~ | stage supported images (up to 4) or one MP4 |
-| ~C-c C-v~ | stage clipboard local files or supported image bytes |
-| ~C-c C-d~ | remove an attachment |
-| ~C-c C-e~ | edit alt text |
-| ~C-c C-n~ | commit the current part and start the next |
-| ~C-c C-p~ | drop the current extra part |
-| ~RET~ / ~e~ / Evil ~i~ on a draft row | edit that exact committed part; never publish |
-| ~RET~ / ~S-RET~ / ~S-<return>~ in input | insert a newline; never publish |
-| ~C-c C-o~ | edit live draft options and attachments without publishing |
-| ~C-c t~ / ~M-g~ | application menu / destinations (Evil ~g a~ / ~g A~) |
-| ~M-TAB~ | complete a handle after ~@~ |
-| ~C-c C-s~ | save as an unsent X draft |
-| ~C-c C-t~ | schedule for a local time |
-| ~C-c C-c~ | send and keep the draft until X acknowledges |
-| ~C-c C-k~ | cancel an in-flight submit, or close when idle |
+The [[file:../lisp/chirp-actions.el::(defvar-keymap chirp-compose-mode-map][compose keymap]] defines draft-specific controls, while
+[[file:../lisp/chirp-actions.el::(appkit-bindings-define 'chirp-compose-mode-map][shared compose actions]] provide attachment staging, submission and
+cancellation.  The [[file:../lisp/chirp-transient.el::(transient-define-prefix chirp-transient-compose][draft-options menu]] edits live content without publishing.
+
+A public draft may contain several committed parts and one editable input.
+Return on a committed row loads that exact part for editing; Return in input
+inserts a newline.  Neither publishes.  Explicit submission retains the draft
+until X acknowledges it; cancellation stops an in-flight submit or closes an
+idle composer.  Saving an unsent X draft and scheduling publication are
+separate commands.
 
 Click ~Audience~ on a post or quote, or use draft options, to choose who
-can reply.  Video uploads show ~Uploading video n/N~ in the status strip.
-~? d~ opens X drafts and ~? t~ opens scheduled posts from read-only views.
-Evil attachment controls are ~Z a~ / ~Z f~ / ~Z v~ / ~Z d~ for chooser,
-file, clipboard, and detach.  Shared native/modal bindings come from semantic
-roles and can be customized with ~appkit-binding-overrides~.
+can reply.  Attachments support up to four images or one MP4, with alt text
+edited before publication.  Video uploads show progress in the status strip.
 
 JPEG, PNG, and WebP attachments may be at most 5 MiB; GIFs 15 MiB;
 MP4 videos 512 MiB, uploaded in 1 MiB chunks.  Premium accounts can
 exceed the standard 280 weighted-character limit.
 
-These commands only stage drafts.  Public posts have no generic-document kind:
-document-forcing prefixes and unsupported BMP images are rejected without
-changing the draft.  Clipboard URI files remain user-owned; private pixel
-sources live until removal, cancellation, or confirmed publication.
+Attachment commands only stage drafts.  Public posts have no generic-document
+kind: document-forcing prefixes and unsupported BMP images are rejected
+without changing the draft.  Clipboard URI files remain user-owned; private
+pixel sources live until removal, cancellation or confirmed publication.
 
 * Notifications and translation
 
@@ -205,10 +170,10 @@ The first check establishes a baseline.  Later checks run every five
 minutes by default.  Linux uses freedesktop notifications; macOS uses
 AppleScript.
 
-~o t~ translates the selected tweet or quote below its unchanged original.
-Chirp uses X's translation endpoint with a 120-second deadline.  HTML entities
-such as ~&amp;~ are decoded once, after all response chunks have been joined.
-To use the optional, separately authenticated Respond backend instead:
+The post menu translates the selected tweet or quote below its unchanged
+original.  Chirp uses X's translation endpoint with a 120-second deadline.
+HTML entities such as ~&amp;~ are decoded once, after all response chunks have
+been joined.  To use the optional, separately authenticated Respond backend:
 
 #+begin_src emacs-lisp
 (setq chirp-translation-backend-function #'appkit-translate-respond-backend)
@@ -220,10 +185,10 @@ there is no automatic backend fallback.
 * Thread reply filtering
 
 Chirp hides likely spam replies with a conservative default list.
-Matching ignores case and never filters the focus tweet or its
-ancestor chain.  Press ~S~ on a reply to save a literal phrase.
-~M-x chirp-thread-edit-spam-rules~ edits the file under
-~user-emacs-directory~.
+Matching ignores case and never filters the focus tweet or its ancestor chain.
+The view's spam-rule action saves a literal phrase from the current reply;
+a universal prefix starts from its display name.
+~M-x chirp-thread-edit-spam-rules~ edits the file under ~user-emacs-directory~.
 
 #+begin_src emacs-lisp
 (setq chirp-spam-rules nil) ; disable filtering
@@ -261,27 +226,17 @@ the same geometry and keeping ~window-hscroll~ at zero.
 
 ** Actions
 
-| Input             | Action                                                        |
-|-------------------+---------------------------------------------------------------|
-| ~RIGHT~ / ~LEFT~  | Select the next or previous carousel item                     |
-| ~RET~             | Toggle inline video; open a still image in the media reader   |
-| ~p~ (Evil)        | Toggle the selected inline video in normal or motion state    |
-| mouse hotspot     | Activate the clicked carousel item without moving point       |
-| ~m~               | Toggle the inline video's desired mute state                  |
-| ~L~               | Toggle looping for the initialized selected inline video     |
-| ~F~               | Open or focus an additional frame for the selected video     |
-| ~C-RET~           | Present the selected item in the dedicated reader             |
-| ~S-RET~           | Send the selected video to the configured external player     |
-| ~M-RET~           | Bypass local actions and open the containing entry            |
+The [[file:../lisp/chirp-render.el::(defun chirp-render--media-track-hotspot-map][carousel action map]] extends [[file:../../video.el/video-inline.el::(defvar-keymap video-inline-map][video.el's inline transport map]].
+Selecting another item retargets those local actions; they never control the
+previous inline occurrence.  Activation toggles inline video or opens a still
+image in the reader.  Clicking a hotspot selects that item without moving
+the text cursor.
 
-~SPC~ is not a media action and remains available to the user's global key
-configuration.
-
-The transport keys are local to the media track at point.  Selecting another
-carousel item retargets the commands; they never control the previous inline
-occurrence.  ~F~ leaves the host view visible and does not start paused media.
-Closing its frame changes no other window.  ~L~ does not initialize playback,
-and enabling a loop requires a seekable source.
+Dedicated viewing and external playback are explicit alternatives to inline
+activation.  Opening an additional presentation frame leaves the host view
+visible and does not start paused media; closing it changes no other window.
+Looping applies only to an initialized, seekable source and does not start
+playback.  Space remains available to the user's global key configuration.
 
 ** Dedicated viewer
 
@@ -301,11 +256,11 @@ be much larger than the window, while its Canvas and native raster stay exactly
 viewport-sized.  Fit commands calculate a scale once, so later window resizing
 does not resize the media.
 
-Images and videos support zoom, unrestricted pan, fit, mouse-wheel input, and
+Images and videos support zoom, unrestricted pan, fit, mouse-wheel input and
 middle-button dragging.  Videos additionally expose playback transport.
-Vanilla ~n~/~p~ and Evil ~gj~/~gk~ move through the source carousel; Evil ~p~
-toggles playback.  In an ordinary reader ~q~ returns to the saved Chirp view;
-inside an independent presentation frame it closes only that frame.
+Source navigation moves through the carousel.  Quitting an ordinary reader
+returns to the saved Chirp view; quitting an independent presentation frame
+closes only that frame.
 
 Returning to the same window with unchanged layout leaves the inline media
 track intact: playback continues, or remains paused, with its mute state
