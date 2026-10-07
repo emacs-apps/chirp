@@ -74,7 +74,7 @@ Conversations decode signature-verified plain text through Appkit's semantic mar
 
 | Key | Action |
 |-----+--------|
-| ~RET~ | activate an attachment or embedded post; otherwise move to the composer |
+| ~RET~ / ~<return>~ | activate an attachment or embedded post; otherwise stay at the message |
 | mouse-1 | activate a local link or attachment |
 | ~r~ | reply to the message at point |
 | ~!~ | add or remove a prompted reaction |
@@ -91,6 +91,9 @@ Conversations decode signature-verified plain text through Appkit's semantic mar
 
 Native and Evil use the same Return policy, including Evil insert state;
 ~RET~ and the hardware Return event both send only from the composer.
+On ordinary timeline text without an action, Return preserves point, draft
+and Evil state instead of entering the composer.  Reply and composer entry
+remain explicit commands.
 Application menus use ~C-c t~ (Evil ~g a~); ~M-g~ (Evil ~g A~) opens destinations.
 Attachment staging also uses Evil ~Z a~ / ~Z f~ / ~Z v~; it never sends.
 
