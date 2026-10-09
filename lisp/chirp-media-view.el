@@ -74,18 +74,15 @@
 
 (defun chirp-media-view--selection-at-point ()
   "Return the media selection at point or for its containing entry."
-  (let (media-list index)
-    (if (setq media-list (chirp-media-list-at-point))
-        (setq index (or (chirp-media-index-at-point) 0))
+  (or (chirp-media-selection-at-point)
       (pcase-let* ((entry (chirp-entry-at-point))
-                   ((map :media :kind) entry))
-        (setq media-list
-              (or media
-                  (and (eq kind 'tweet) (chirp-tweet-article-images entry)))
-              index 0)))
-    (when media-list
-      (or (chirp-media-video-selection media-list index)
-          (chirp-media-selection-create media-list index)))))
+                   ((map :media :kind) entry)
+                   (media-list
+                    (or media
+                        (and (eq kind 'tweet)
+                             (chirp-tweet-article-images entry)))))
+        (when media-list
+          (chirp-media-selection-create media-list 0)))))
 
 (defun chirp-media-open-dedicated (selection &optional title buffer external-fallback)
   "Send SELECTION to its exact source Surface for managed presentation."
@@ -138,12 +135,16 @@
 (defun chirp-media-open (media-list index &optional title buffer)
   "Open MEDIA-LIST at INDEX using TITLE in dedicated media BUFFER.
 
-Reuse the current Chirp buffer's registered inline presentation when the same
-rendered media list and item are already active."
-  (chirp-media-open-dedicated
-   (or (chirp-media-video-selection media-list index)
+Reuse only the exact mounted occurrence at point, never another occurrence
+of an equal or shared media list."
+  (let ((selection (chirp-media-selection-at-point)))
+    (chirp-media-open-dedicated
+     (if (and selection
+              (eq media-list (chirp-media-selection-media-list selection))
+              (= index (chirp-media-selection-index selection)))
+         selection
        (chirp-media-selection-create media-list index))
-   title buffer))
+     title buffer)))
 
 (defun chirp-media-open-at-point ()
   "Open the media item at point."

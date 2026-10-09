@@ -1507,7 +1507,7 @@
 
 (ert-deftest chirp-render-keeps-url-entity-aligned-around-ampersand ()
   "Re-cleaning emitted tweet text must not shift entity offsets past `&'."
-  (let* ((text "Scala & Java see example.com/path")
+  (let* ((text "Scala & Java\n𠮷 see example.com/path")
          (start (string-match "example\\.com/path" text))
          (end (+ start (length "example.com/path")))
          (tweet
@@ -1531,7 +1531,11 @@
                  (lambda (url &rest _args)
                    (setq opened url))))
         (let ((inhibit-read-only t))
-          (chirp-render-insert-tweet tweet))
+          (chirp-render-insert-discussion-entry
+           (chirp-test--discussion-row tweet nil '(tweet "parent") 2 'tree)))
+        (goto-char (point-min))
+        (should (search-forward text nil t))
+        (should (stringp (get-text-property (match-beginning 0) 'line-prefix)))
         (goto-char (point-min))
         (search-forward "example.com/path")
         (goto-char (match-beginning 0))
@@ -1862,33 +1866,6 @@
                                      (line-end-position) 'line-height)
                                     t)))))))))
 
-(ert-deftest chirp-render-media-cell-uses-appkit-slice-rows ()
-  "Tweet media cells should use Appkit slice rows for current-line geometry."
-  (let ((source '(image :type png :file "/tmp/fake.png"
-                  :height (3 . ch)
-                  :appkit-media-nslices 3))
-        (media '(:type "photo" :url "https://example.com/a.jpg")))
-    (cl-letf (((symbol-function 'image-size)
-               (lambda (&rest _args) '(8 . 3)))
-              ((symbol-function 'appkit-media--char-pixel-height)
-               (lambda () 10)))
-      (let* ((cell (chirp-render--media-cell media 0 source))
-             (rows (plist-get cell :rows)))
-        (should (= (length rows) 3))
-        (should (equal (get-text-property 0 'display
-                                          (plist-get cell :padding))
-                       '(space :width 8)))
-        (cl-loop for row in rows
-                 for index from 0
-                 for display = (get-text-property 0 'display row)
-                 do (should (equal (car display)
-                                   (list 'slice 0 (* index 10) 1.0 10)))
-                 do (should (= (plist-get (cdr (cadr display)) :height) 30)))
-        (should (equal source
-                       '(image :type png :file "/tmp/fake.png"
-                         :height (3 . ch)
-                         :appkit-media-nslices 3)))))))
-
 (ert-deftest chirp-render-two-media-grid-uses-official-landscape-group ()
   "Two large media cells should fill equal halves of one 16:9 group."
   (let ((image '(image :type png :appkit-media-nslices 16))
@@ -1924,329 +1901,56 @@
          '((:type "photo" :url "https://example.com/a.jpg"))))
       (should (equal crop-specs '(nil))))))
 
-(ert-deftest chirp-render-media-track-does-not-disable-body-wrapping ()
-  "Media track handling should leave normal Chirp visual wrapping intact."
-  (with-temp-buffer
-    (chirp-view-mode)
-    (should visual-line-mode)
-    (should word-wrap)
-    (should-not truncate-lines)))
-
-(ert-deftest chirp-render-discussion-focus-shares-unbreakable-carousel ()
-  "Focused posts should share the non-condensed SVG carousel."
-  (let* ((tweet
-          '(:kind tweet
-            :id "focus"
-            :text "Focused post"
-            :author-name "Alice"
-            :author-handle "alice"
-            :retweeted-by "bob"
-            :media
-            ((:type "photo" :url "media-0" :width 430 :height 600)
-             (:type "photo" :url "media-1" :width 600 :height 375)
-             (:type "photo" :url "media-2" :width 458 :height 600))))
-         (expected-plan
-          (chirp-media-layout-carousel-plan
-           (list (/ 430.0 600) (/ 600.0 375) (/ 458.0 600))
-           512))
-         track-media
-         track-height
-         track-gap
-         track-offsets
-         track-widths
-         track-fit)
+(ert-deftest chirp-render-discussion-media-selection-belongs-to-occurrence ()
+  "Copied focus rows open their own selected media without rewriting source."
+  (let* ((media '((:type "photo" :url "media-0" :width 430 :height 600)
+                  (:type "photo" :url "media-1" :width 600 :height 375)
+                  (:type "photo" :url "media-2" :width 458 :height 600)))
+         (tweet `(:kind tweet :id "focus" :text "Focused post"
+                  :author-name "Alice" :author-handle "alice" :media ,media))
+         (chirp-show-avatars nil)
+         opened)
     (with-temp-buffer
       (chirp-view-mode)
-      (cl-letf (((symbol-function 'chirp-media-avatar-image)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'chirp-media-carousel-image)
-                 (lambda (media-list height gap
-                                     &optional offset widths fit)
-                   (setq track-media media-list
-                         track-height height
-                         track-gap gap
-                         track-widths widths
-                         track-fit fit)
-                   (push offset track-offsets)
-                   '(image
-                     :type svg
-                     :data "strip"
-                     :appkit-media-nslices 6
-                     :appkit-media-strip-widths (10 10 10)
-                     :map
-                     (((rect . ((0 . 0) . (10 . 10)))
-                       chirp-media-0 nil)
-                      ((rect . ((10 . 0) . (20 . 10)))
-                       chirp-media-1 nil)
-                      ((rect . ((20 . 0) . (30 . 10)))
-                       chirp-media-2 nil)))))
-                ((symbol-function 'chirp-media-thumbnail-image)
-                 (lambda (&rest _args)
-                   (ert-fail "non-condensed media used a cover grid")))
-                ((symbol-function 'image-size)
-                 (lambda (&rest _args) '(30 . 6)))
+      (cl-letf (((symbol-function 'chirp-media--preview-file)
+                 (lambda (_) "/preview.png"))
+                ((symbol-function 'image-type-available-p) (lambda (_) t))
+                ((symbol-function 'file-readable-p) (lambda (_) t))
+                ((symbol-function 'appkit-media-image-mime-type) (lambda (_) "image/png"))
+                ((symbol-function 'svg-embed) #'ignore)
+                ((symbol-function 'svg-image)
+                 (lambda (_svg &rest properties)
+                   (cons 'image (append '(:type svg :data "<svg/>") properties))))
+                ((symbol-function 'image-size) (lambda (&rest _) '(30 . 6)))
+                ((symbol-function 'appkit-media--base-char-pixel-height)
+                 (lambda () 18))
                 ((symbol-function 'appkit-media--char-pixel-height)
-                 (lambda () 18)))
-        (let ((inhibit-read-only t))
-          (chirp-render-insert-discussion-entry
-           (chirp-test--discussion-row tweet t)))
-        (let ((track-positions
-               (cl-loop for position from (point-min) below (point-max)
-                        when (get-text-property position 'chirp-media-track)
-                        collect position)))
-          (should (= (length track-positions) 6))
-          (dolist (position track-positions)
-            (should
-             (eq (car-safe
-                  (car-safe (get-text-property position 'display)))
-                 'slice))
-            (save-excursion
-              (goto-char position)
-              (should (= position (line-beginning-position)))
-              (should (= (1+ position) (line-end-position)))))
-          (let ((map (get-text-property (car track-positions) 'keymap))
-                opened-index)
-            (goto-char (car track-positions))
-            (should
-             (commandp (lookup-key map [chirp-media-2 mouse-1])))
-            (cl-letf (((symbol-function 'chirp-media-open)
-                       (lambda (_media-list index _title)
-                         (setq opened-index index))))
-              (call-interactively (lookup-key map [right]))
-              (call-interactively (lookup-key map (kbd "RET")))
-              (should (= opened-index 1))
-              (call-interactively (lookup-key map [right]))
-              (call-interactively (lookup-key map (kbd "RET")))
-              (should (= opened-index 2))
-              (call-interactively (lookup-key map [left]))
-              (call-interactively (lookup-key map (kbd "RET")))
-              (should (= opened-index 1))
-              (cl-letf (((symbol-function 'this-command-keys-vector)
-                         (lambda () [chirp-media-2 mouse-1])))
-                (chirp-render-media-track-open-hotspot
-                 (list 'mouse-1
-                       (list (selected-window) (point) '(0 . 0) 0))))
-              (should (= opened-index 2))))
-          (should (equal (nreverse track-offsets)
-                         '(nil 14 28 14)))
-          (should-not auto-hscroll-mode)
-          (should
-           (memq #'chirp-render--media-track-reset-hscroll
-                 post-command-hook))))
-      (should (eq track-media (plist-get tweet :media)))
-      (should (= track-height (plist-get expected-plan :height)))
-      (should (= track-gap 4))
-      (should (equal track-widths
-                     (plist-get expected-plan :widths)))
-      (should (eq track-fit 'cover)))))
-
-(ert-deftest chirp-render-timeline-multi-media-uses-current-carousel ()
-  "Top-level timeline posts should use the current X Web carousel."
-  (let* ((media
-          '((:type "photo" :url "a" :width 340 :height 680)
-            (:type "photo" :url "b" :width 340 :height 680)
-            (:type "photo" :url "c" :width 340 :height 680)))
-         (tweet
-          `(:kind tweet :id "timeline" :text "Carousel"
-            :author-name "Alice" :author-handle "alice"
-            :media ,media))
-         (plan
-          (chirp-media-layout-carousel-plan '(0.5 0.5 0.5) 512))
-         captured)
-    (with-temp-buffer
-      (chirp-view-mode)
-      (cl-letf (((symbol-function 'chirp-media-avatar-image)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'chirp-render--insert-media-track)
-                 (lambda (items _prefix _prefix-face
-                                height gap widths fit)
-                   (setq captured
-                         (list items height gap widths fit))))
-                ((symbol-function 'chirp-render--insert-media-grid)
-                 (lambda (&rest _args)
-                   (ert-fail "timeline media used a compact cover grid"))))
-        (let ((inhibit-read-only t))
-          (chirp-render-insert-tweet tweet))))
-    (should
-     (equal captured
-            (list media
-                  (plist-get plan :height)
-                  4
-                  (plist-get plan :widths)
-                  'cover)))))
-
-(ert-deftest chirp-render-timeline-single-media-uses-large-shared-renderer ()
-  "Top-level single media should use the large non-condensed SVG renderer."
-  (let* ((media
-          '((:type "photo" :url "a" :width 600 :height 375)))
-         (tweet
-          `(:kind tweet :id "timeline-single" :text "One image"
-            :author-name "Alice" :author-handle "alice"
-            :media ,media))
-         (plan
-          (chirp-media-layout-carousel-plan '(1.6) 512))
-         captured)
-    (with-temp-buffer
-      (chirp-view-mode)
-      (cl-letf (((symbol-function 'chirp-media-avatar-image)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'chirp-render--insert-media-track)
-                 (lambda (items _prefix _prefix-face
-                                height gap widths fit)
-                   (setq captured
-                         (list items height gap widths fit))))
-                ((symbol-function 'chirp-render--insert-media-grid)
-                 (lambda (&rest _args)
-                   (ert-fail "single timeline media used a compact grid"))))
-        (let ((inhibit-read-only t))
-          (chirp-render-insert-tweet tweet))))
-    (should
-     (equal captured
-            (list media
-                  (plist-get plan :height)
-                  4
-                  (plist-get plan :widths)
-                  nil)))))
-
-(ert-deftest chirp-render-hotspot-touch-scrolls-without-opening-media ()
-  "Dragging either image-map item must produce a host scroll, not a click."
-  (let ((function-key-map (copy-keymap function-key-map)))
-    (with-temp-buffer
-      (insert "Media track\n")
-      (let* ((image '(image :type svg :appkit-media-strip-widths (100 120)))
-             (map (car (chirp-render--media-track-hotspot-map
-                        1 '((:type "photo") (:type "video"))
-                        image 80 4 '(100 120) 'cover))))
-        (put-text-property 1 (point-max) 'keymap map)
-        (save-window-excursion
-          (switch-to-buffer (current-buffer))
-          (goto-char 1)
-          (dolist (id '(chirp-media-0 chirp-media-1))
-            (dolist (dy '(-40 40))
-              (let* ((touch-screen-current-tool nil)
-                     (touch-screen-aux-tool nil)
-                     (touch-screen-current-timer nil)
-                     (touch-screen-simple-mouse-conversion nil)
-                     (touch-screen-extend-selection nil)
-                     (start (cons 1 (list (selected-window) 1 '(20 . 100) 0)))
-                     (end (cons 1 (list (selected-window) 1
-                                        (cons 20 (+ 100 dy)) 0)))
-                     (unread-command-events
-                      (list id (list 'touchscreen-begin start)
-                            (list 'touchscreen-update (list end))
-                            (list 'touchscreen-end end nil) 0)))
-                (unwind-protect
-                    (progn
-                      (should (equal (read-key-sequence-vector nil)
-                                     (vector (list 'touchscreen-scroll
-                                                   (selected-window) 0 (- dy)))))
-                      (should (equal (read-key-sequence-vector nil) [0])))
-                  (when touch-screen-current-timer
-                    (cancel-timer touch-screen-current-timer)))))))))))
-
-(ert-deftest chirp-render-hotspot-video-plays-in-displayed-region ()
-  "Clicking a video should preserve the viewport and replace its own box."
-  (let* ((media
-          '((:type "photo" :file "/tmp/a.jpg")
-            (:type "video" :file "/tmp/b.jpg"
-             :variants ((:url "https://example.com/video.mp4")))))
-         (poster
-          '(image :type svg :data "<svg/>"
-            :appkit-media-nslices 2
-            :appkit-media-strip-widths (100 120)
-            :appkit-media-strip-offset 0))
-         captured
-         registered)
-    (with-temp-buffer
-      (insert "a\nb")
-      (pcase-let* ((`(,map . ,state)
-                    (chirp-render--media-track-hotspot-map
-                     1 media poster 80 4 '(100 120) 'cover)))
-        (aset state 4 (list (copy-marker 1) (copy-marker 3)))
-        (chirp-render--media-track-prepare-video-host state)
-        (put-text-property 1 2 'chirp-media-track-state state)
-        (goto-char 1)
-        (cl-letf (((symbol-function 'chirp-media--preview-file)
-                   (lambda (item) (plist-get item :file)))
-                  ((symbol-function 'chirp-render--media-track-scene-canvas)
-                   (lambda (&rest _arguments) 'scene-canvas))
-                  ((symbol-function 'chirp-media-video-session-create)
-                   (lambda (&rest _) 'video-session))
-                  ((symbol-function 'appkit-media-video-inline-create)
-                   (lambda (&rest arguments)
-                     (setq captured arguments)
-                     'inline-surface))
-                  ((symbol-function 'chirp-media-register-video-inline)
-                   (lambda (items index inline)
-                     (setq registered (list items index inline))))
-                  ((symbol-function 'appkit-media-video-inline-bind-controls)
-                   #'ignore)
-                  ((symbol-function 'appkit-media-video-inline-play)
-                   #'ignore))
-          (cl-letf (((symbol-function 'this-command-keys-vector)
-                     (lambda () [chirp-media-1 mouse-1])))
-            (chirp-render-media-track-open-hotspot
-             (list 'mouse-1
-                   (list (selected-window) (point) '(0 . 0) 0))))
-          (should (= (aref state 0) 1))
-          (should (equal registered (list media 1 'inline-surface)))
-          (should (= (plist-get (nthcdr 3 captured) :destination-x)
-                     104))
-          (should (= (plist-get (nthcdr 3 captured) :canvas-width)
-                     224)))))))
-
-(ert-deftest chirp-render-video-activation-uses-host-buffer-line-height ()
-  "Canvas slices should use the media buffer's window metrics."
-  (let* ((host (generate-new-buffer " *chirp-video-host*"))
-         (poster '(image :type svg :appkit-media-nslices 2))
-         (canvas '(image :type canvas :data-width 100 :data-height 40))
-         markers)
-    (unwind-protect
-        (progn
-          (with-current-buffer host
-            (insert "a\nb")
-            (setq markers (list (copy-marker 1) (copy-marker 3))))
-          (cl-letf (((symbol-function 'appkit-media--char-pixel-height)
-                     (lambda ()
-                       (if (eq (current-buffer) host) 20 1))))
-            (with-temp-buffer
-              (chirp-render--media-track-activate-video
-               host markers poster canvas)))
-          (should (= (plist-get (cdr canvas) :height) 40))
-          (with-current-buffer host
-            (dolist (marker markers)
-              (should
-               (= (nth 4 (car (get-text-property marker 'display)))
-                  20)))))
-      (kill-buffer host))))
-
-(ert-deftest chirp-render-quoted-multi-media-keeps-condensed-grid ()
-  "Quoted cards should remain condensed while their parent uses carousel."
-  (let* ((quoted-media
-          '((:type "photo" :url "a" :width 340 :height 680)
-            (:type "photo" :url "b" :width 340 :height 680)))
-         (quoted
-          `(:kind tweet :id "quoted" :text "Quoted"
-            :author-name "Bob" :author-handle "bob"
-            :media ,quoted-media))
-         (tweet
-          `(:kind tweet :id "outer" :text "Outer"
-            :author-name "Alice" :author-handle "alice"
-            :quoted-tweet ,quoted))
-         captured-grid)
-    (with-temp-buffer
-      (chirp-view-mode)
-      (cl-letf (((symbol-function 'chirp-media-avatar-image)
-                 (lambda (&rest _args) nil))
-                ((symbol-function 'chirp-render--insert-media-grid)
-                 (lambda (items _prefix _prefix-face)
-                   (setq captured-grid items)))
-                ((symbol-function 'chirp-render--insert-media-carousel)
-                 (lambda (&rest _args)
-                   (ert-fail "quoted media used a non-condensed carousel"))))
-        (let ((inhibit-read-only t))
-          (chirp-render-insert-tweet tweet))))
-    (should (eq captured-grid quoted-media))))
+                 (lambda () 18))
+                ((symbol-function 'chirp-media-open-dedicated)
+                 (lambda (selection &rest _) (setq opened selection))))
+        (let* ((inhibit-read-only t)
+               (_ (chirp-render-insert-discussion-entry
+                   (chirp-test--discussion-row tweet t)))
+               (position (caar (chirp-test--slice-displays)))
+               (original (buffer-substring (point-min) (point-max)))
+               (second-start (point-max))
+               (track (appkit-media-track-at-point position)))
+          (insert original)
+          (appkit-media-inline-mount second-start (point-max))
+          (goto-char position)
+          (appkit-media-track-select track 1)
+          (should (eq (chirp-media-at-point) (nth 1 media)))
+          (appkit-media-track-activate track 'dedicated)
+          (should (eq (chirp-media-selection-media-list opened) media))
+          (should (= (chirp-media-selection-index opened) 1))
+          (should (equal-including-properties
+                   original (buffer-substring (point-min) second-start)))
+          (goto-char (+ second-start (1- position)))
+          (should (= (appkit-media-track-index (appkit-media-track-at-point)) 0))
+          (should (eq (chirp-media-at-point) (car media)))
+          (should visual-line-mode)
+          (should word-wrap)
+          (should-not truncate-lines))))))
 
 (ert-deftest chirp-render-media-grid-places-three-through-six-items ()
   "Every TweetPhotos topology should place expected items on each band."

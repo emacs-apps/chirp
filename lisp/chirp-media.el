@@ -25,6 +25,7 @@
 (require 'appkit-surface)
 (require 'appkit-projection)
 (require 'appkit-media-image)
+(require 'appkit-media-track)
 (require 'appkit-media-video)
 (require 'appkit-media-resource)
 (require 'appkit-media-effect)
@@ -197,9 +198,6 @@ When nil, Chirp falls back to a text placeholder for video-like media."
 (defvar chirp--media-index 0
   "Selected media index owned by `chirp-media-view'.")
 
-(defvar-local chirp-media--video-selections nil
-  "Live inline video selections owned by the current Chirp buffer.")
-
 (defun chirp-media-selection-live-video-inline (selection)
   "Return SELECTION's live Appkit inline video surface, or nil."
   (when-let* (((chirp-media-selection-p selection))
@@ -209,49 +207,6 @@ When nil, Chirp falls back to a text placeholder for video-like media."
               ((appkit-media-video-session-live-p
                 (appkit-media-video-inline-session inline))))
     inline))
-
-(defun chirp-media--prune-video-selections ()
-  "Remove closed inline video selections from the current Chirp buffer."
-  (setq chirp-media--video-selections
-        (cl-delete-if-not
-         #'chirp-media-selection-live-video-inline
-         chirp-media--video-selections)))
-
-(defun chirp-media-register-video-inline (media-list index inline)
-  "Register INLINE as MEDIA-LIST item INDEX's presentation in this buffer."
-  (unless (and (appkit-media-video-inline-p inline)
-               (not (appkit-media-video-inline-closed-p inline)))
-    (error "Cannot register a closed Appkit inline video surface"))
-  (chirp-media--prune-video-selections)
-  (setq chirp-media--video-selections
-        (cl-delete-if
-         (lambda (selection)
-           (and (eq (chirp-media-selection-media-list selection) media-list)
-                (equal (chirp-media-selection-index selection) index)))
-         chirp-media--video-selections))
-  (let ((selection
-         (chirp-media-selection-create media-list index inline)))
-    (push selection chirp-media--video-selections)
-    selection))
-
-(defun chirp-media-unregister-video-inline (inline)
-  "Forget every current buffer video selection presented by INLINE."
-  (setq chirp-media--video-selections
-        (cl-delete inline chirp-media--video-selections
-                   :key #'chirp-media-selection-video-inline))
-  nil)
-
-(defun chirp-media-video-selection (media-list index)
-  "Return MEDIA-LIST item INDEX's live inline video selection, or nil.
-
-MEDIA-LIST identity distinguishes separate rendered entries, even when their
-media values happen to be equal."
-  (chirp-media--prune-video-selections)
-  (cl-find-if
-   (lambda (selection)
-     (and (eq (chirp-media-selection-media-list selection) media-list)
-          (equal (chirp-media-selection-index selection) index)))
-   chirp-media--video-selections))
 
 ;;; Runtime
 
@@ -347,23 +302,34 @@ media values happen to be equal."
   "Return non-nil when MEDIA is video-like."
   (member (plist-get media :type) '("video" "animated_gif")))
 
+(defun chirp-media-selection-at-point ()
+  "Return the exact rendered media selection at point, including its inline.
+
+Runtime selection belongs to the AppKit occurrence, not the prepared source
+text.  Separate insertions of the same media list never share track state."
+  (let* ((position
+          (cond
+           ((get-text-property (point) 'chirp-media-list) (point))
+           ((and (> (point) (point-min))
+                 (get-text-property (1- (point)) 'chirp-media-list))
+            (1- (point)))))
+         (media-list (and position
+                          (get-text-property position 'chirp-media-list)))
+         (track (and position (appkit-media-track-at-point position))))
+    (when media-list
+      (chirp-media-selection-create
+       media-list
+       (if track
+           (appkit-media-track-index track)
+         (or (get-text-property position 'chirp-media-index) 0))
+       (and track (appkit-media-track-inline track))))))
+
 (defun chirp-media-at-point ()
-  "Return the media item stored at point, or nil."
-  (or (get-text-property (point) 'chirp-media-item)
-      (and (> (point) (point-min))
-           (get-text-property (1- (point)) 'chirp-media-item))))
-
-(defun chirp-media-index-at-point ()
-  "Return the media index stored at point, or nil."
-  (or (get-text-property (point) 'chirp-media-index)
-      (and (> (point) (point-min))
-           (get-text-property (1- (point)) 'chirp-media-index))))
-
-(defun chirp-media-list-at-point ()
-  "Return the media list stored at point, or nil."
-  (or (get-text-property (point) 'chirp-media-list)
-      (and (> (point) (point-min))
-           (get-text-property (1- (point)) 'chirp-media-list))))
+  "Return the selected media item at point, or nil."
+  (if-let* ((selection (chirp-media-selection-at-point)))
+      (nth (chirp-media-selection-index selection)
+           (chirp-media-selection-media-list selection))
+    (chirp--text-property-at-point 'chirp-media-item)))
 
 (defun chirp-media--cache-subdir (kind)
   "Return the cache subdirectory for KIND."
@@ -1415,10 +1381,11 @@ distorting the source aspect ratio."
    media crop-spec
    chirp-media-thumbnail-size chirp-media-thumbnail-size))
 
-(defun chirp-media-carousel-items (media-list &optional widths fit)
-  "Return Appkit scene items for MEDIA-LIST.
+(defun chirp-media-track-items (media-list &optional widths fit)
+  "Prepare protocol-neutral AppKit track items for MEDIA-LIST.
 
-WIDTHS overrides item widths.  FIT may be `cover' to crop into those boxes."
+WIDTHS and FIT come from Chirp's X layout policy.  Playback resources remain
+lazy; only existing preview files are consulted here."
   (cl-loop for media in media-list
            for index from 0
            collect
@@ -1426,30 +1393,9 @@ WIDTHS overrides item widths.  FIT may be `cover' to crop into those boxes."
              (append
               (list :file (chirp-media--preview-file media)
                     :width width :height height
-                    :id (intern (format "chirp-media-%d" index)))
+                    :playable-p (and (chirp-media-video-like-p media) t))
               (and widths (list :display-width (nth index widths)))
               (and fit (list :fit fit))))))
-
-(defun chirp-media-carousel-plan
-    (media-list height gap &optional offset widths fit)
-  "Return backend-neutral carousel geometry for MEDIA-LIST.
-
-HEIGHT, GAP, OFFSET, WIDTHS, and FIT have the same meaning as in
-`chirp-media-carousel-image'."
-  (appkit-media-horizontal-strip-plan
-   (chirp-media-carousel-items media-list widths fit)
-   height gap offset))
-
-(defun chirp-media-carousel-image
-    (media-list height gap &optional offset widths fit)
-  "Return MEDIA-LIST as one horizontal image of HEIGHT separated by GAP.
-
-Optional OFFSET moves that SVG x coordinate to the image's left edge.  WIDTHS
-overrides item widths; FIT may be `cover' to crop into those boxes."
-  (let ((items (chirp-media-carousel-items media-list widths fit)))
-    (when (cl-some (lambda (item) (plist-get item :file)) items)
-      (appkit-media-horizontal-strip-image
-       items height gap offset))))
 
 (defun chirp-media-view-image (media)
   "Return a large image descriptor for MEDIA."
@@ -1520,14 +1466,7 @@ overrides item widths; FIT may be `cover' to crop into those boxes."
 
 (defun chirp-media--select-download-media ()
   "Return the currently selected media item for downloading."
-  (or (when-let* ((state
-                  (or (get-char-property (point) 'chirp-media-track-state)
-                      (and (> (point) (point-min))
-                           (not (get-text-property (point) 'chirp-media-item))
-                           (get-char-property
-                            (1- (point)) 'chirp-media-track-state)))))
-        (nth (aref state 0) (aref state 2)))
-      (chirp-media-at-point)
+  (or (chirp-media-at-point)
       (and chirp--media-list
            (nth chirp--media-index chirp--media-list))
       (let* ((entry (chirp-entry-at-point))

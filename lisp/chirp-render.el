@@ -9,9 +9,6 @@
 
 ;;; Code:
 
-(declare-function appkit-media-video-inline-muted-p
-                  "appkit-media-resource" (surface))
-
 (declare-function nerd-icons-faicon "nerd-icons" (icon-name &rest args))
 (declare-function nerd-icons-mdicon "nerd-icons" (icon-name &rest args))
 (declare-function chirp-profile-open "chirp-profile" (handle &optional mode))
@@ -39,7 +36,8 @@
 (require 'appkit-projection)
 (require 'appkit-discussion)
 (require 'appkit-media-image)
-(require 'video)
+(require 'appkit-media-track)
+(require 'appkit-media-grid)
 (require 'appkit-ui)
 (require 'chirp-core)
 (require 'chirp-time)
@@ -261,36 +259,6 @@ When ACTIVE is non-nil, prefer the action-specific face for LABEL."
      (when-let* ((handle (plist-get entry :handle)))
        (list 'user handle)))))
 
-(cl-defun chirp-render--add-action (start end action &key help-echo properties face)
-  "Make START..END an Appkit action that calls ACTION.
-
-HELP-ECHO describes that action.  PROPERTIES are extra text properties
-stored on the same span.  FACE is appended when non-nil."
-  (when (and (functionp action)
-             (< start end))
-    (when properties
-      (add-text-properties start end properties))
-    (appkit-ui-add-action start end action
-                          :help-echo help-echo
-                          :face face)))
-
-(cl-defun chirp-render--add-fallback-action (start end action &key help-echo)
-  "Add ACTION on START..END only where no Appkit action exists yet.
-
-Nested author, entity, media, and metric spans keep the actions they
-already installed."
-  (when (and (functionp action)
-             (< start end))
-    (let ((pos start))
-      (while (< pos end)
-        (let ((next (or (next-single-property-change
-                         pos appkit-ui-action-property nil end)
-                        end)))
-          (unless (get-text-property pos appkit-ui-action-property)
-            (chirp-render--add-action pos next action
-                                      :help-echo help-echo))
-          (setq pos next))))))
-
 (defun chirp-render--mark-entry (start end entry)
   "Mark the region from START to END as ENTRY."
   (when (< start end)
@@ -310,12 +278,11 @@ already installed."
   "Mark the region from START to END as opening URL in a browser."
   (when (and (stringp url)
              (not (string-empty-p url)))
-    (chirp-render--add-action
-     start end
-     (lambda ()
-       (browse-url url))
-     :help-echo (format "Open %s" url)
-     :properties `(chirp-subentry-url ,url))))
+    (appkit-ui-add-action start end
+                          (lambda ()
+                            (browse-url url))
+                          :help-echo (format "Open %s" url)
+                          :properties `(chirp-subentry-url ,url))))
 
 (defun chirp-render--add-profile-action (start end handle &optional help-echo)
   "Make START..END open HANDLE's profile.
@@ -323,56 +290,52 @@ already installed."
 HELP-ECHO defaults to a short Open-profile description."
   (when handle
     (let ((clean (string-remove-prefix "@" handle)))
-      (chirp-render--add-action
-       start end
-       (lambda ()
-         (chirp-open-profile-handle clean))
-       :help-echo (or help-echo (format "Open @%s" clean))
-       :properties
-       `(chirp-author-handle ,clean
-         chirp-author-profile-url
-         ,(format "https://x.com/%s" clean))))))
+      (appkit-ui-add-action start end
+                            (lambda ()
+                              (chirp-open-profile-handle clean))
+                            :help-echo (or help-echo (format "Open @%s" clean))
+                            :properties
+                            `(chirp-author-handle ,clean
+                                                  chirp-author-profile-url
+                                                  ,(format "https://x.com/%s" clean))))))
 
 (defun chirp-render--mark-profile-list-region (start end kind handle)
   "Mark the region from START to END as profile list KIND for HANDLE."
   (when handle
-    (chirp-render--add-action
-     start end
-     (lambda ()
-       (pcase kind
-         ('followers (chirp-profile-open-followers handle))
-         ('following (chirp-profile-open-following-users handle))
-         (_ (user-error "Unknown profile list at point"))))
-     :help-echo (pcase kind
-                  ('followers "Open followers")
-                  ('following "Open following")
-                  (_ "Open profile list"))
-     :properties `(chirp-profile-list-kind ,kind
-                   chirp-profile-list-handle ,handle))))
+    (appkit-ui-add-action start end
+                          (lambda ()
+                            (pcase kind
+                              ('followers (chirp-profile-open-followers handle))
+                              ('following (chirp-profile-open-following-users handle))
+                              (_ (user-error "Unknown profile list at point"))))
+                          :help-echo (pcase kind
+                                       ('followers "Open followers")
+                                       ('following "Open following")
+                                       (_ "Open profile list"))
+                          :properties `(chirp-profile-list-kind ,kind
+                                                                chirp-profile-list-handle ,handle))))
 
 (defun chirp-render--mark-profile-view-region (start end mode)
   "Mark the region from START to END as profile subview MODE."
-  (chirp-render--add-action
-   start end
-   (lambda ()
-     (unless (functionp chirp--profile-switch-mode-function)
-       (user-error "This Chirp view cannot switch profile views"))
-     (funcall chirp--profile-switch-mode-function mode))
-   :help-echo "Switch profile view"
-   :properties `(chirp-profile-view-mode ,mode)))
+  (appkit-ui-add-action start end
+                        (lambda ()
+                          (unless (functionp chirp--profile-switch-mode-function)
+                            (user-error "This Chirp view cannot switch profile views"))
+                          (funcall chirp--profile-switch-mode-function mode))
+                        :help-echo "Switch profile view"
+                        :properties `(chirp-profile-view-mode ,mode)))
 
 (defun chirp-render--mark-profile-action-region (start end action handle)
   "Mark the region from START to END as profile ACTION for HANDLE."
   (when handle
-    (chirp-render--add-action
-     start end
-     (lambda ()
-       (pcase action
-         ('toggle-follow (chirp-toggle-follow-user-at-point))
-         (_ (user-error "Unknown profile action at point"))))
-     :help-echo "Toggle follow"
-     :properties `(chirp-profile-action ,action
-                   chirp-profile-action-handle ,handle))))
+    (appkit-ui-add-action start end
+                          (lambda ()
+                            (pcase action
+                              ('toggle-follow (chirp-toggle-follow-user-at-point))
+                              (_ (user-error "Unknown profile action at point"))))
+                          :help-echo "Toggle follow"
+                          :properties `(chirp-profile-action ,action
+                                                             chirp-profile-action-handle ,handle))))
 
 (defun chirp-render--profile-follow-action-label (user)
   "Return the primary follow button label for USER, or nil."
@@ -413,36 +376,6 @@ CURRENT-MODE marks the active entry."
   (insert "\n"))
 
 ;;; Text
-
-(defun chirp-render--insert-prefix (prefix &optional face)
-  "Insert PREFIX using FACE.
-
-PREFIX may be an Appkit mutable prefix state; its first prefix is consumed."
-  (when-let* ((text (if (appkit-ui-prefix-state-p prefix)
-                        (appkit-ui-prefix-string prefix t)
-                      prefix)))
-    (insert (if face
-                (propertize text 'face face)
-              text))))
-
-(defun chirp-render--prefix-string (prefix face)
-  "Return PREFIX propertized with FACE, or nil.
-
-An Appkit prefix state is read without consuming its current prefix."
-  (when-let* ((text (if (appkit-ui-prefix-state-p prefix)
-                        (appkit-ui-prefix-string prefix)
-                      prefix)))
-    (if face
-        (propertize text 'face face)
-      text)))
-
-(defun chirp-render--apply-wrap-prefix (start end prefix face)
-  "Apply PREFIX as the visual wrap prefix on text between START and END."
-  (when (and prefix
-             (< start end))
-    (put-text-property start end
-                       'wrap-prefix
-                       (chirp-render--prefix-string prefix face))))
 
 (defun chirp-render--metric-string (label value &optional active)
   "Return a metric string for LABEL and VALUE.
@@ -490,9 +423,8 @@ make the metric an Appkit action."
   (let ((start (point)))
     (insert (chirp-render--metric-string label value active))
     (when action
-      (chirp-render--add-action
-       start (point) action
-       :help-echo help-echo))))
+      (appkit-ui-add-action start (point) action
+                            :help-echo help-echo))))
 
 (defun chirp-render--reply-control-key (mode)
   "Return a comparison key for X reply-control MODE."
@@ -523,23 +455,20 @@ make the metric an Appkit action."
 
 PREFIX and PREFIX-FACE control indentation."
   (when-let* ((label (chirp-render--reply-control-label tweet)))
-    (insert (or (chirp-render--prefix-string prefix prefix-face) ""))
-    (insert (propertize label 'face 'chirp-social-context-face))
-    (insert "\n")))
+    (appkit-ui-insert-prefixed-lines
+     prefix label :face 'chirp-social-context-face :prefix-face prefix-face)))
 
-(defun chirp-render--apply-text-entity (line-start text-offset line-len entity)
-  "Apply one text ENTITY onto the inserted line at LINE-START.
+(defun chirp-render--apply-text-entity (start text-length entity)
+  "Apply X text ENTITY within TEXT-LENGTH characters inserted at START.
 
-TEXT-OFFSET is the character offset of this line in the original text.
-LINE-LEN is the unpropertized line length.  ENTITY uses the character
-offsets produced by `chirp--emit-visible-text'."
+ENTITY uses character offsets produced by `chirp--emit-visible-text'."
   (pcase-let (((map (:start beg) :end :kind :handle :tag :url) entity))
     (when (and (integerp beg)
                (integerp end)
-               (< beg (+ text-offset line-len))
-               (> end text-offset))
-      (let ((from (+ line-start (max 0 (- beg text-offset))))
-            (to (+ line-start (min line-len (- end text-offset)))))
+               (< beg text-length)
+               (> end 0))
+      (let ((from (+ start (max 0 beg)))
+            (to (+ start (min text-length end))))
         (when (< from to)
           (pcase kind
             ('mention
@@ -547,19 +476,17 @@ offsets produced by `chirp--emit-visible-text'."
              (chirp-render--add-profile-action
               from to handle))
             ('hashtag
-             (chirp-render--add-action
-              from to
-              (lambda ()
-                (chirp-timeline-open-search (concat "#" tag)))
-              :help-echo (format "Search #%s" tag)
-              :face 'chirp-hashtag-face))
+             (appkit-ui-add-action from to
+                                   (lambda ()
+                                     (chirp-timeline-open-search (concat "#" tag)))
+                                   :help-echo (format "Search #%s" tag)
+                                   :face 'chirp-hashtag-face))
             ('cashtag
-             (chirp-render--add-action
-              from to
-              (lambda ()
-                (chirp-timeline-open-search (concat "$" tag)))
-              :help-echo (format "Search $%s" tag)
-              :face 'chirp-hashtag-face))
+             (appkit-ui-add-action from to
+                                   (lambda ()
+                                     (chirp-timeline-open-search (concat "$" tag)))
+                                   :help-echo (format "Search $%s" tag)
+                                   :face 'chirp-hashtag-face))
             ((or 'url 'timestamp)
              (when url
                (add-face-text-property from to 'chirp-link-face 'append)
@@ -568,33 +495,14 @@ offsets produced by `chirp--emit-visible-text'."
 (defun chirp-render--insert-filled-text (text &optional prefix prefix-face entities)
   "Insert TEXT and let Emacs wrap it visually in the current window.
 
-Precede each line with PREFIX using PREFIX-FACE when provided.  ENTITIES
-are the pre-parsed tweet-text spans from X, already mapped onto TEXT."
-  (let* ((cleaned (chirp-clean-text text))
-         (offset 0))
-    (dolist (line (split-string cleaned "\n" nil))
-      (chirp-render--insert-prefix prefix prefix-face)
-      (let ((start (point))
-            (line-len (length line)))
-        (insert line)
-        (dolist (entity entities)
-          (chirp-render--apply-text-entity start offset line-len entity))
-        (insert "\n")
-        (chirp-render--apply-wrap-prefix start (point) prefix prefix-face)
-        (setq offset (+ offset line-len 1))))))
-
-(defun chirp-render--insert-face-text (text face &optional prefix prefix-face)
-  "Insert TEXT using FACE, optionally preceded by PREFIX.
-
-Apply PREFIX-FACE to that prefix when provided."
-  (dolist (line (split-string (chirp-clean-text text) "\n" nil))
-    (chirp-render--insert-prefix prefix prefix-face)
-    (let ((start (point)))
-      (if (string-empty-p line)
-          (insert "")
-        (insert (propertize line 'face face)))
-      (insert "\n")
-      (chirp-render--apply-wrap-prefix start (point) prefix prefix-face))))
+Display PREFIX on each line using PREFIX-FACE.  ENTITIES are pre-parsed X
+spans mapped onto TEXT; display-only indentation never shifts their offsets."
+  (let ((cleaned (chirp-clean-text text))
+        (start (point)))
+    (insert cleaned "\n")
+    (dolist (entity entities)
+      (chirp-render--apply-text-entity start (length cleaned) entity))
+    (appkit-ui-apply-line-prefix start (point) prefix prefix-face)))
 
 (defun chirp-render--trailing-urls (tweet)
   "Return TWEET URLs that were not already inlined as text entities."
@@ -614,12 +522,11 @@ Apply PREFIX-FACE to that prefix when provided."
 Precede each line with PREFIX using PREFIX-FACE when provided."
   (when urls
     (dolist (url urls)
-      (chirp-render--insert-prefix prefix prefix-face)
       (let ((start (point)))
         (insert (propertize url 'face 'chirp-link-face))
         (let ((end (point)))
           (insert "\n")
-          (chirp-render--apply-wrap-prefix start (point) prefix prefix-face)
+          (appkit-ui-apply-line-prefix start (point) prefix prefix-face)
           (chirp-render--mark-url-region start end url))))))
 
 ;;; Articles and Link Cards
@@ -635,12 +542,12 @@ using PREFIX-FACE when provided."
     (when (and title
                (not (string-empty-p title))
                (not (string= title text)))
-      (chirp-render--insert-face-text title 'chirp-article-title-face prefix prefix-face))
+      (appkit-ui-insert-prefixed-lines prefix (chirp-clean-text title) :face 'chirp-article-title-face :prefix-face prefix-face))
     (when (and preview
                (not (string-empty-p preview))
                (not (string= preview text))
                (not (string= preview title)))
-      (chirp-render--insert-face-text preview 'chirp-article-summary-face prefix prefix-face))))
+      (appkit-ui-insert-prefixed-lines prefix (chirp-clean-text preview) :face 'chirp-article-summary-face :prefix-face prefix-face))))
 
 (defun chirp-render--insert-article-body (tweet &optional prefix prefix-face)
   "Insert the full article content for TWEET.
@@ -651,7 +558,7 @@ Precede each line with PREFIX using PREFIX-FACE when provided."
     (when (and title
                (not (string-empty-p title))
                (not (string= title text)))
-      (chirp-render--insert-face-text title 'chirp-article-title-face prefix prefix-face))
+      (appkit-ui-insert-prefixed-lines prefix (chirp-clean-text title) :face 'chirp-article-title-face :prefix-face prefix-face))
     (dolist (segment (chirp-article-segments article-text))
       (pcase-let (((map :type :text :media) segment))
         (pcase type
@@ -699,17 +606,15 @@ DETAILP selects the same preview length used by the article renderer."
 
 Precede the action with PREFIX using PREFIX-FACE when provided."
   (when-let* ((tweet-id (plist-get tweet :id)))
-    (chirp-render--insert-prefix prefix prefix-face)
     (let ((start (point)))
       (insert (propertize "Show more" 'face 'link))
-      (chirp-render--add-action
-       start (point)
-       (lambda ()
-         (chirp--expand-tweet tweet-id))
-       :help-echo "Show full content"
-       :properties `(chirp-expand-tweet-id ,tweet-id))
+      (appkit-ui-add-action start (point)
+                            (lambda ()
+                              (chirp--expand-tweet tweet-id))
+                            :help-echo "Show full content"
+                            :properties `(chirp-expand-tweet-id ,tweet-id))
       (insert "\n")
-      (chirp-render--apply-wrap-prefix start (point) prefix prefix-face))))
+      (appkit-ui-apply-line-prefix start (point) prefix prefix-face))))
 
 (defun chirp-render--truncate-link-card-text (text max-length)
   "Return TEXT truncated to MAX-LENGTH characters when needed."
@@ -718,35 +623,6 @@ Precede the action with PREFIX using PREFIX-FACE when provided."
         cleaned
       (concat (string-trim-right (substring cleaned 0 (max 0 (- max-length 3))))
               "..."))))
-
-(defun chirp-render--card-parent-prefix (prefix)
-  "Return PREFIX as an Appkit card indent state, or nil."
-  (cond
-   ((appkit-ui-prefix-state-p prefix) prefix)
-   ((and (stringp prefix) (not (string-empty-p prefix)))
-    (appkit-ui-make-prefix-state prefix prefix))))
-
-(cl-defun chirp-render--with-card (prefix inserter &key action help-echo properties)
-  "Insert INSERTER's rows as one Appkit card nested below PREFIX.
-
-INSERTER receives the card prefix state and should apply it to each
-row, the same way disco and emacs-qq insert cards.  ACTION, HELP-ECHO,
-and PROPERTIES apply to the finished card."
-  (let* ((appkit-ui-card-indent-prefix-state
-          (chirp-render--card-parent-prefix prefix))
-         (card-prefix
-          (appkit-ui-card-prefix-state
-           :face 'chirp-quoted-tweet-border-face))
-         (start (point)))
-    (funcall inserter card-prefix)
-    (when (< start (point))
-      (when properties
-        (add-text-properties start (point) properties))
-      (when action
-        (chirp-render--add-fallback-action
-         start (max start (1- (point))) action
-         :help-echo help-echo))
-      (cons start (point)))))
 
 (defun chirp-render--insert-link-card-image (url card-prefix)
   "Insert a sliced preview for cached card image URL using CARD-PREFIX."
@@ -771,30 +647,27 @@ PREFIX supplies the card's outer nesting indentation."
                (domain (chirp-first-nonblank raw-domain)))
     (when (and description (equal description title))
       (setq description nil))
-    (when (chirp-render--with-card
-           prefix
-           (lambda (card-prefix)
-             (when domain
-               (appkit-ui-insert-prefixed-lines
-                card-prefix domain
-                :face 'chirp-meta-face))
-             (when title
-               (appkit-ui-insert-prefixed-lines
-                card-prefix
-                (chirp-render--truncate-link-card-text title 180)
-                :face 'chirp-link-card-title-face))
-             (when description
-               (appkit-ui-insert-prefixed-lines
-                card-prefix
-                (chirp-render--truncate-link-card-text description 220)
-                :face 'chirp-link-card-description-face))
-             (chirp-render--insert-link-card-image image-url card-prefix))
-           :action (and (stringp url)
-                        (not (string-empty-p url))
-                        (lambda ()
-                          (browse-url url)))
-           :help-echo (and url (format "Open %s" url))
-           :properties `(chirp-subentry-url ,url))
+    (when (appkit-ui-insert-card (lambda (card-prefix)
+                                   (when domain
+                                     (appkit-ui-insert-prefixed-lines
+                                      card-prefix domain
+                                      :face 'chirp-meta-face))
+                                   (when title
+                                     (appkit-ui-insert-prefixed-lines
+                                      card-prefix
+                                      (chirp-render--truncate-link-card-text title 180)
+                                      :face 'chirp-link-card-title-face))
+                                   (when description
+                                     (appkit-ui-insert-prefixed-lines
+                                      card-prefix
+                                      (chirp-render--truncate-link-card-text description 220)
+                                      :face 'chirp-link-card-description-face))
+                                   (chirp-render--insert-link-card-image image-url card-prefix)) :prefix prefix :border-face 'chirp-quoted-tweet-border-face :action (and (stringp url)
+                                   (not (string-empty-p url))
+                                   (lambda ()
+                                     (browse-url url)))
+                                   :help-echo (and url (format "Open %s" url))
+                                   :properties `(chirp-subentry-url ,url))
       (insert "\n"))))
 
 (defun chirp-render--insert-link-cards (tweet &optional prefix prefix-face)
@@ -842,57 +715,55 @@ remain hidden until the viewer has voted or voting has closed."
                            (chirp-poll-votable-p poll)))
            (total (plist-get poll :total-votes))
            (maximum (apply #'max (mapcar (lambda (option)
-                                          (plist-get option :count))
-                                        options))))
-      (chirp-render--with-card
-       prefix
-       (lambda (card-prefix)
-         (let ((bar-width
-                (max 4 (min 20 (- (chirp--view-width)
-                                  (string-width
-                                   (appkit-ui-prefix-string card-prefix))
-                                  12)))))
-           (dolist (option options)
-             (let* ((id (plist-get option :id))
-                    (count (plist-get option :count))
-                    (selected-p (equal selected id))
-                    (winner-p (and results-p (> maximum 0)
-                                   (= count maximum)))
-                    (faces (append
-                            (when selected-p '(chirp-poll-selected-face))
-                            (when winner-p '(chirp-poll-winner-face))))
-                    (label (concat (if selected-p "[x] " "[ ] ")
-                                   (chirp-clean-text
-                                    (plist-get option :label))))
-                    (start (point)))
-               (if votable-p
-                   (appkit-ui-insert-action-button
-                    label
-                    (lambda ()
-                      ;; A previous click may still be awaiting a redraw.
-                      (when (and (not (chirp-poll-pending-p
-                                       (plist-get tweet :id)))
-                                 (chirp-poll-votable-p poll))
-                        (chirp-poll-vote tweet id)))
-                    :face 'chirp-poll-option-face
-                    :help-echo "Vote for this choice (votes cannot be changed)")
-                 (insert (if faces (propertize label 'face faces) label)))
-               (when results-p
-                 (let ((ratio (if (> total 0) (/ (float count) total) 0.0)))
-                   (insert
-                    (propertize
-                     (format "  %.1f%%  [%s]"
-                             (* 100 ratio)
-                             (appkit-ui-progress-bar ratio bar-width ?= ?.))
-                     'face (or faces 'chirp-meta-face)))))
-               (insert "\n")
-               (appkit-ui-apply-line-prefix start (point) card-prefix)))
-           (appkit-ui-insert-prefixed-lines
-            card-prefix
-            (format "%d %s · %s"
-                    total (if (= total 1) "vote" "votes")
-                    (chirp-render--poll-status poll state))
-            :face 'chirp-meta-face))))
+                                           (plist-get option :count))
+                                         options))))
+      (appkit-ui-insert-card (lambda (card-prefix)
+                               (let ((bar-width
+                                      (max 4 (min 20 (- (chirp--view-width)
+                                                        (string-width
+                                                         (appkit-ui-prefix-string card-prefix))
+                                                        12)))))
+                                 (dolist (option options)
+                                   (let* ((id (plist-get option :id))
+                                          (count (plist-get option :count))
+                                          (selected-p (equal selected id))
+                                          (winner-p (and results-p (> maximum 0)
+                                                         (= count maximum)))
+                                          (faces (append
+                                                  (when selected-p '(chirp-poll-selected-face))
+                                                  (when winner-p '(chirp-poll-winner-face))))
+                                          (label (concat (if selected-p "[x] " "[ ] ")
+                                                         (chirp-clean-text
+                                                          (plist-get option :label))))
+                                          (start (point)))
+                                     (if votable-p
+                                         (appkit-ui-insert-action-button
+                                          label
+                                          (lambda ()
+                                            ;; A previous click may still be awaiting a redraw.
+                                            (when (and (not (chirp-poll-pending-p
+                                                             (plist-get tweet :id)))
+                                                       (chirp-poll-votable-p poll))
+                                              (chirp-poll-vote tweet id)))
+                                          :face 'chirp-poll-option-face
+                                          :help-echo "Vote for this choice (votes cannot be changed)")
+                                       (insert (if faces (propertize label 'face faces) label)))
+                                     (when results-p
+                                       (let ((ratio (if (> total 0) (/ (float count) total) 0.0)))
+                                         (insert
+                                          (propertize
+                                           (format "  %.1f%%  [%s]"
+                                                   (* 100 ratio)
+                                                   (appkit-ui-progress-bar ratio bar-width ?= ?.))
+                                           'face (or faces 'chirp-meta-face)))))
+                                     (insert "\n")
+                                     (appkit-ui-apply-line-prefix start (point) card-prefix)))
+                                 (appkit-ui-insert-prefixed-lines
+                                  card-prefix
+                                  (format "%d %s · %s"
+                                          total (if (= total 1) "vote" "votes")
+                                          (chirp-render--poll-status poll state))
+                                  :face 'chirp-meta-face))) :prefix prefix :border-face 'chirp-quoted-tweet-border-face )
       (insert "\n"))))
 
 ;;; Quoted Tweets and Replies
@@ -906,18 +777,15 @@ remain hidden until the viewer has voted or voting has closed."
 
 PREFIX supplies outer indentation.  WRITE-ACTIONS-P controls mutation actions.
 Only local links and controls are mouse actions; the body remains scrollable."
-  (chirp-render--with-card
-   prefix
-   (lambda (card-prefix)
-     (let ((body-start (point)))
-       (chirp-render--insert-tweet
-        tweet
-        :show-reply-context t
-        :write-actions-p write-actions-p)
-       (appkit-ui-apply-line-prefix body-start (point) card-prefix)))
-   :properties
-   `(chirp-subentry-item ,tweet
-     chirp-subentry-url ,(plist-get tweet :url))))
+  (appkit-ui-insert-card (lambda (card-prefix)
+                           (let ((body-start (point)))
+                             (chirp-render--insert-tweet
+                              tweet
+                              :show-reply-context t
+                              :write-actions-p write-actions-p)
+                             (appkit-ui-apply-line-prefix body-start (point) card-prefix))) :prefix prefix :border-face 'chirp-quoted-tweet-border-face :properties
+                             `(chirp-subentry-item ,tweet
+                                                   chirp-subentry-url ,(plist-get tweet :url))))
 
 (defun chirp-render--insert-quoted-tweet
     (tweet &optional prefix prefix-face write-actions-p)
@@ -948,7 +816,6 @@ Precede the line with PREFIX using PREFIX-FACE when provided."
         (handle (or (plist-get tweet :reply-to-handle)
                     (plist-get reply-parent :author-handle))))
     (when parent-id
-      (chirp-render--insert-prefix prefix prefix-face)
       (let ((start (point))
             handle-start handle-end)
         (if handle
@@ -964,12 +831,11 @@ Precede the line with PREFIX using PREFIX-FACE when provided."
           (insert (propertize "↳ reply to above"
                               'face 'chirp-thread-reply-context-face)))
         (insert "\n")
-        (chirp-render--apply-wrap-prefix start (point) prefix prefix-face)
-        (chirp-render--add-action
-         start (max start (1- (point)))
-         #'chirp-open-reply-parent-at-point
-         :help-echo "Open parent tweet"
-         :properties `(chirp-reply-parent-id ,parent-id))
+        (appkit-ui-apply-line-prefix start (point) prefix prefix-face)
+        (appkit-ui-add-action start (max start (1- (point)))
+                              #'chirp-open-reply-parent-at-point
+                              :help-echo "Open parent tweet"
+                              :properties `(chirp-reply-parent-id ,parent-id))
         (when handle-start
           (chirp-render--add-profile-action handle-start handle-end handle))))))
 
@@ -1002,15 +868,6 @@ Associate the avatar with HANDLE when provided."
                (chirp-media-avatar-image url) "  "))
       (chirp-render--add-profile-action start (point) handle))))
 
-(defun chirp-render--thumbnail-width (rows)
-  "Return the reserved column width in characters for slice ROWS."
-  (let* ((display (and rows (get-text-property 0 'display (car rows))))
-         (image (and (eq (car-safe (car-safe display)) 'slice)
-                     (cadr display))))
-    (max 1 (ceiling
-            (or (car (ignore-errors (image-size image)))
-                1)))))
-
 (defun chirp-render--media-placeholder-text (media &optional compactp)
   "Return a text placeholder for MEDIA.
 
@@ -1034,513 +891,55 @@ When COMPACTP is non-nil, omit alt text and make a missing video actionable."
 
 (defun chirp-render--mark-media-region (start end media media-list index)
   "Mark START..END as MEDIA at INDEX in MEDIA-LIST."
-  (chirp-render--add-action
-   start end
-   (lambda ()
-     (chirp-media-open media-list index
-                       (or chirp--view-title "Chirp Media")))
-   :help-echo "Open media"
+  (appkit-ui-add-action start end
+                        (lambda ()
+                          (chirp-media-open media-list index
+                                            (or chirp--view-title "Chirp Media")))
+                        :help-echo "Open media"
+                        :properties `(chirp-media-item ,media
+                                                       chirp-media-index ,index
+                                                       chirp-media-list ,media-list)))
+
+(defun chirp-render--media-cell (media media-list index image)
+  "Prepare an AppKit grid cell for MEDIA at INDEX in MEDIA-LIST."
+  (appkit-media-grid-cell-create
+   :image (or image (chirp-media-thumbnail-placeholder-image media))
+   :fallback (propertize (chirp-render--media-placeholder-text media t)
+                         'face 'chirp-media-placeholder-face)
+   :action (lambda ()
+             (chirp-media-open media-list index
+                               (or chirp--view-title "Chirp Media")))
    :properties `(chirp-media-item ,media
                  chirp-media-index ,index
-                 chirp-media-list ,media-list)))
-
-(defun chirp-render--media-cell (media index image)
-  "Return sliced cell data for MEDIA at INDEX using IMAGE."
-  (if-let* ((display-image
-             (or image
-                 (chirp-media-thumbnail-placeholder-image media)))
-            (rows (appkit-media-image-slice-rows display-image)))
-      (list :media media
-            :index index
-            :rows rows
-            :padding (propertize
-                      " " 'display
-                      `(space :width ,(chirp-render--thumbnail-width rows))))
-    (let ((placeholder (chirp-render--media-placeholder-text media t)))
-      (list :media media
-            :index index
-            :rows (list (propertize placeholder
-                                    'face 'chirp-media-placeholder-face))
-            :padding (make-string (max 1 (string-width placeholder)) ?\s)))))
-
-(defun chirp-render--insert-media-cell-slice
-    (cell row media-list)
-  "Insert ROW of CELL and associate it with MEDIA-LIST."
-  (let ((start (point)))
-    (pcase-let (((map :rows :padding :media :index) cell))
-      (insert (or (nth row rows) padding))
-      (chirp-render--mark-media-region
-       start (point) media media-list index))))
-
-(defun chirp-render--insert-media-row
-    (cells media-list gap prefix prefix-face)
-  "Insert CELLS as one sliced row associated with MEDIA-LIST.
-
-GAP is the pixel gutter.  PREFIX and PREFIX-FACE control indentation."
-  (let ((row-count
-         (apply #'max
-                (mapcar (lambda (cell)
-                          (length (plist-get cell :rows)))
-                        cells))))
-    (dotimes (row row-count)
-      (chirp-render--insert-prefix prefix prefix-face)
-      (cl-loop for cell in cells
-               for column from 0
-               do (when (> column 0)
-                    (insert
-                     (propertize " " 'display
-                                 `(space :width (,gap)))))
-               do (chirp-render--insert-media-cell-slice
-                   cell row media-list))
-      (when (< (1+ row) row-count)
-        (insert (propertize "\n" 'line-height t))))))
-
-(defun chirp-render--media-track-offsets (image gap)
-  "Return IMAGE item offsets in SVG pixels, separated by GAP."
-  (let ((offset 0))
-    (mapcar
-     (lambda (width)
-       (prog1 offset
-         (setq offset (+ offset width gap))))
-     (plist-get (cdr image) :appkit-media-strip-widths))))
-
-(defun chirp-render--media-track-reset-hscroll ()
-  "Reset horizontal scrolling after point leaves a focused media track."
-  (unless (get-text-property (point) 'chirp-media-track)
-    (set-window-hscroll (selected-window) 0)))
-
-(defun chirp-render--media-track-select (state delta)
-  "Move media track STATE by DELTA items and reveal the selected item."
-  (when-let* ((inline (aref state 9)))
-    (appkit-media-video-inline-close inline)
-    (aset state 9 nil)
-    (aset state 12 nil))
-  (let* ((media-list (aref state 2))
-         (count (length media-list))
-         (index (mod (+ (aref state 0) delta) count))
-         (offset (nth index (aref state 1))))
-    (if-let* ((image
-               (chirp-media-carousel-image
-                media-list
-                (aref state 6)
-                (aref state 5)
-                offset
-                (aref state 7)
-                (aref state 8)))
-              (rows (appkit-media-image-slice-rows image))
-              (same-size (= (length rows) (length (aref state 4)))))
-        (progn
-          (let ((inhibit-read-only t))
-            (cl-mapc
-             (lambda (position row)
-               (put-text-property
-                position (1+ position) 'display
-                (get-text-property 0 'display row)))
-             (aref state 4) rows))
-          (aset state 0 index)
-          (aset state 10 image)
-          (when (eq (window-buffer (selected-window))
-                    (current-buffer))
-            (set-window-hscroll (selected-window) 0))
-          (message
-           "Media %d of %d; %s"
-           (1+ index) count
-           (if (chirp-media-video-like-p (nth index media-list))
-               "RET plays it; m toggles audio"
-             "RET opens it")))
-      (user-error "Unable to reveal media item %d" (1+ index)))))
-
-(defun chirp-render--media-track-open (state)
-  "Open or toggle the currently selected item in media track STATE."
-  (let ((media (nth (aref state 0) (aref state 2))))
-    (if (and chirp-video-use-internal-player
-             (chirp-media-video-like-p media))
-        (chirp-render--media-track-toggle-video state)
-      (when-let* ((inline (aref state 9)))
-        (appkit-media-video-inline-close inline)
-        (aset state 9 nil)
-        (aset state 12 nil))
-      (chirp-media-open
-       (aref state 2) (aref state 0) (aref state 3)))))
-
-(defun chirp-render--media-track-toggle-muted (state)
-  "Toggle canonical audio mute state for media track STATE."
-  (let* ((inline (chirp-render--media-track-inline state))
-         (muted
-          (if inline
-              (not (appkit-media-video-inline-muted-p inline))
-            (not (aref state 13)))))
-    (aset state 13 muted)
-    (when inline
-      (appkit-media-video-inline-set-muted inline muted))
-    (message "Video audio %s" (if muted "muted" "unmuted"))))
-
-(defun chirp-render--media-track-state (&optional event)
-  "Return the media track state at point or mouse EVENT."
-  (let* ((position (and event (posn-point (event-start event))))
-         (window (and event (posn-window (event-start event))))
-         (buffer (and (windowp window) (window-buffer window)))
-         (position
-          (and (integer-or-marker-p position)
-               (if (markerp position) (marker-position position) position))))
-    (or (and position
-             (buffer-live-p buffer)
-             (with-current-buffer buffer
-               (and (<= (point-min) position)
-                    (< position (point-max))
-                    (get-text-property position 'chirp-media-track-state))))
-        (get-char-property (point) 'chirp-media-track-state)
-        (user-error "No media track at point"))))
-
-(defun chirp-render--media-hotspot-index ()
-  "Return the media item index encoded in the current key sequence."
-  (or
-   (cl-loop for event across (this-command-keys-vector)
-            for name = (and (symbolp event) (symbol-name event))
-            when (and name
-                      (string-match
-                       "\\`chirp-media-\\([0-9]+\\)\\'" name))
-            return (string-to-number (match-string 1 name)))
-   (user-error "No media item in the current event")))
-
-(defun chirp-render-media-track-next ()
-  "Select the next item in the media track at point."
-  (interactive)
-  (chirp-render--media-track-select (chirp-render--media-track-state) 1))
-
-(defun chirp-render-media-track-previous ()
-  "Select the previous item in the media track at point."
-  (interactive)
-  (chirp-render--media-track-select (chirp-render--media-track-state) -1))
-
-(defun chirp-render-media-track-open ()
-  "Activate the selected item in the media track at point."
-  (interactive)
-  (chirp-render--media-track-open (chirp-render--media-track-state)))
-
-(defun chirp-render-media-track-open-dedicated ()
-  "Open the selected track item in the dedicated media viewer."
-  (interactive)
-  (let* ((state (chirp-render--media-track-state))
-         (inline
-           (and (equal (aref state 12) (aref state 0))
-                (aref state 9))))
-    (chirp-media-open-dedicated
-     (chirp-media-selection-create
-      (aref state 2) (aref state 0) inline)
-     (aref state 3))))
-
-(defun chirp-render-media-track-open-external ()
-  "Open the selected track video in the configured external player."
-  (interactive)
-  (let ((state (chirp-render--media-track-state)))
-    (chirp-media-play-video
-     (nth (aref state 0) (aref state 2)) t)))
-
-(defun chirp-render-media-track-toggle-muted ()
-  "Toggle audio for the media track at point."
-  (interactive)
-  (chirp-render--media-track-toggle-muted
-   (chirp-render--media-track-state)))
-
-(defun chirp-render-media-track-open-hotspot (event)
-  "Activate the media item identified by an `image-map' EVENT."
-  (interactive "e")
-  (let ((state (chirp-render--media-track-state event)))
-    (aset state 0 (chirp-render--media-hotspot-index))
-    (chirp-render--media-track-open state)))
-
-(defun chirp-render--media-track-hotspot-map
-    (position media-list image height gap widths fit)
-  "Return keyboard and image-map-style actions for a media track.
-
-POSITION supplies its existing keymap.  MEDIA-LIST and IMAGE identify the
-track; HEIGHT, GAP, WIDTHS, and FIT retain its presentation geometry."
-  (let* ((map
-          (copy-keymap
-           (or (get-text-property position 'keymap)
-               (make-sparse-keymap))))
-         (parent (keymap-parent map))
-         (state
-          (vector
-           0
-           (chirp-render--media-track-offsets image gap)
-           media-list
-           (or chirp--view-title "Chirp Media")
-           nil
-           gap
-           height
-           widths
-           fit
-           nil
-           image
-           nil
-           nil
-           nil
-           map)))
-    (set-keymap-parent
-     map (if parent
-             (make-composed-keymap (list video-inline-map parent))
-           video-inline-map))
-    (define-key map [remap video-inline-toggle]
-                #'chirp-render-media-track-toggle-video)
-    (define-key map [remap video-inline-loop]
-                #'chirp-render-media-track-loop)
-    (define-key map [remap video-inline-mute]
-                #'chirp-render-media-track-toggle-muted)
-    (define-key map [remap video-inline-frame]
-                #'chirp-render-media-track-frame)
-    (define-key map [remap video-inline-view]
-                #'chirp-render-media-track-open-dedicated)
-    (define-key map [right] #'chirp-render-media-track-next)
-    (define-key map [left] #'chirp-render-media-track-previous)
-    (define-key map (kbd "RET") #'chirp-render-media-track-open)
-    (define-key map (kbd "<return>") #'chirp-render-media-track-open)
-    (define-key map (kbd "S-RET")
-                #'chirp-render-media-track-open-external)
-    (define-key map (kbd "M-RET") #'chirp-open-entry-at-point)
-    (define-key map (kbd "m") #'chirp-render-media-track-toggle-muted)
-    (cl-loop for _media in media-list
-             for index from 0
-             for id = (intern (format "chirp-media-%d" index))
-             do
-             (define-key map (vector id 'down-mouse-1)
-                         #'appkit-ui-ignore-mouse)
-             ;; Strip the hotspot prefix from native scrolling gestures,
-             ;; while taps retain it for the exact media item.
-             (dolist (event '(touchscreen-begin touchscreen-update touchscreen-end))
-               (define-key function-key-map (vector id event)
-                           #'touch-screen-translate-touch))
-             (define-key map (vector id 'mouse-1)
-                         #'chirp-render-media-track-open-hotspot))
-    (cons map state)))
-
-(defun chirp-render--media-track-markers-visible-p (buffer markers)
-  "Return non-nil when one of MARKERS is visible in BUFFER."
-  (and (buffer-live-p buffer)
-       (cl-some
-        (lambda (window)
-          (cl-some
-           (lambda (marker)
-             (and (marker-position marker)
-                  (pos-visible-in-window-p marker window t)))
-           markers))
-        (get-buffer-window-list buffer nil t))))
-
-(defun chirp-render--media-track-activate-video
-    (buffer markers poster canvas)
-  "Replace POSTER rows at MARKERS in BUFFER with video CANVAS slices."
-  (when-let* ((slice-count
-               (plist-get (cdr poster) :appkit-media-nslices)))
-    (plist-put (cdr canvas) :appkit-media-nslices slice-count))
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (let ((rows (appkit-media-image-slice-rows canvas)))
-        (unless (= (length rows) (length markers))
-          (error "Video Canvas changed media track slice geometry"))
-        (let ((inhibit-read-only t))
-          (cl-mapc
-           (lambda (marker row)
-             (when (and (marker-position marker)
-                        (eq (marker-buffer marker) buffer))
-               (put-text-property
-                marker (1+ marker) 'display
-                (get-text-property 0 'display row))))
-           markers rows))))))
-
-(defun chirp-render--media-track-prepare-video-host (state)
-  "Attach backend-neutral dynamic scene state to media track STATE."
-  (when (cl-some #'chirp-media-video-like-p (aref state 2))
-    (let ((token (list 'chirp-inline-video)))
-      (dolist (marker (aref state 4))
-        (put-text-property marker (1+ marker)
-                           'chirp-video-inline-token token))
-      (aset state 11 token)))
-  state)
-
-(defun chirp-render--media-track-scene-plan (state)
-  "Return scene geometry for STATE's currently displayed viewport."
-  (chirp-media-carousel-plan
-   (aref state 2)
-   (aref state 6)
-   (aref state 5)
-   (or (plist-get (cdr (aref state 10))
-                  :appkit-media-strip-offset)
-       0)
-   (aref state 7)
-   (aref state 8)))
-
-(defun chirp-render--media-track-scene-width (state)
-  "Return the complete media scene width for STATE."
-  (plist-get (chirp-render--media-track-scene-plan state) :width))
-
-(defun chirp-render--media-track-scene-canvas (state &optional plan)
-  "Build a static Canvas scene for media track STATE using optional PLAN."
-  (setq plan (or plan (chirp-render--media-track-scene-plan state)))
-  (pcase-let* (((map :width :height :offset :items) plan)
-               (poster (aref state 10))
-               (background (video-background-color nil (car (aref state 4))))
-               (canvas (video-canvas-create width height background)))
-    (dolist (cell items)
-      (pcase-let* (((map :item :x (:width cell-width)) cell)
-                   ((map :file :fit) item))
-        (when file
-          (video-canvas-draw-source
-           canvas width height file (- x offset) 0 cell-width height
-           :fit (or fit 'contain) :background background))))
-    (dolist (property '(:appkit-media-nslices :map
-                        :appkit-media-strip-widths
-                        :appkit-media-strip-offset))
-      (when-let* ((value (plist-get (cdr poster) property)))
-        (plist-put (cdr canvas) property value)))
-    (canvas-refresh canvas)
-    canvas))
-
-(defun chirp-render--media-track-inline (state)
-  "Return STATE's live inline for its selected video item, if any."
-  (let ((inline (aref state 9)))
-    (and (chirp-media-video-like-p (nth (aref state 0) (aref state 2)))
-         (equal (aref state 12) (aref state 0))
-         (appkit-media-video-inline-p inline)
-         (not (appkit-media-video-inline-closed-p inline))
-         inline)))
-
-(defun chirp-render--media-track-ensure-video (state)
-  "Return or create STATE's selected live inline without starting playback."
-  (let* ((index (aref state 0))
-         (media (nth index (aref state 2))))
-    (unless (chirp-media-video-like-p media)
-      (user-error "Current media is not a video"))
-    (or (chirp-render--media-track-inline state)
-        (progn
-          (when-let* ((inline (aref state 9)))
-            (appkit-media-video-inline-close inline))
-          (pcase-let* ((buffer (current-buffer))
-                       (markers (aref state 4))
-                       (token (aref state 11))
-                       (poster (aref state 10))
-                       (plan (chirp-render--media-track-scene-plan state))
-                       ((map :items (:width scene-width) :offset) plan)
-                       (selected-cell (nth index items))
-                       ((map :x (:width target-width)) selected-cell)
-                       (scene (chirp-render--media-track-scene-canvas state plan))
-                       (target-x (- x offset))
-                 (session
-                  (or (chirp-media-video-session-create
-                       media (aref state 13))
-                      (user-error "Current media has no playable URL")))
-                 (inline
-                   (appkit-media-video-inline-create
-                    session target-width (aref state 6)
-                    :poster poster
-                    :fit (or (aref state 8) 'contain)
-                    :canvas scene
-                    :canvas-width scene-width
-                    :canvas-height (aref state 6)
-                    :destination-x target-x
-                    :destination-y 0
-                    :anchor (car markers)
-                    :visible-function
-                    (lambda (_inline)
-                      (chirp-render--media-track-markers-visible-p buffer markers))
-                    :alive-function
-                    (lambda (_inline)
-                      (and (buffer-live-p buffer)
-                           (marker-position (car markers))
-                           (eq (get-text-property
-                                (car markers) 'chirp-video-inline-token)
-                               token)))
-                    :activate-function
-                    (lambda (_inline canvas)
-                      (chirp-render--media-track-activate-video
-                       buffer markers poster canvas))
-                    :close-function
-                    (lambda (closed-inline)
-                      (when (buffer-live-p buffer)
-                        (with-current-buffer buffer
-                          (chirp-media-unregister-video-inline closed-inline)
-                          (when (eq (aref state 9) closed-inline)
-                            (aset state 9 nil)
-                            (aset state 12 nil))))))))
-            (aset state 9 inline)
-            (aset state 12 index)
-            (chirp-media-register-video-inline (aref state 2) index inline)
-            (appkit-media-video-inline-bind-controls inline (aref state 14))
-            inline)))))
-
-(defun chirp-render-media-track-toggle-video ()
-  "Toggle inline playback for the selected video in the track at point."
-  (interactive)
-  (chirp-render--media-track-toggle-video (chirp-render--media-track-state)))
-
-(defun chirp-render-media-track-loop ()
-  "Toggle looping for the selected initialized video in the track at point."
-  (interactive)
-  (let* ((state (chirp-render--media-track-state))
-         (inline (chirp-render--media-track-inline state)))
-    (unless inline
-      (user-error "Current media has no initialized inline video"))
-    (appkit-media-video-inline-toggle-loop inline)))
-
-(defun chirp-render-media-track-frame ()
-  "Present the selected video in another frame without changing playback."
-  (interactive)
-  (let* ((state (chirp-render--media-track-state))
-         (inline (chirp-render--media-track-ensure-video state)))
-    (appkit-media-present-video-inline
-     inline (aref state 3)
-     :display-function #'video-display-buffer-other-frame)))
-
-(defun chirp-render--media-track-toggle-video (state)
-  "Toggle inline playback for STATE's selected video item."
-  (if-let* ((inline (chirp-render--media-track-inline state)))
-      (appkit-media-video-inline-toggle inline)
-    (appkit-media-video-inline-play
-     (chirp-render--media-track-ensure-video state))))
+                 chirp-media-list ,media-list)
+   :help-echo "Open media"))
 
 (defun chirp-render--insert-media-track
     (media-list prefix prefix-face height gap widths fit)
-  "Insert MEDIA-LIST as one unbreakable horizontal track.
-
-PREFIX and PREFIX-FACE control indentation.  HEIGHT, GAP, WIDTHS, and FIT
-describe the shared carousel geometry."
-  (if-let* ((image
-             (chirp-media-carousel-image
-              media-list height gap nil widths fit))
-            (rows (appkit-media-image-slice-rows image)))
-      (let (hotspot-map track-state track-positions)
-        (setq-local auto-hscroll-mode nil)
-        (add-hook 'post-command-hook
-                  #'chirp-render--media-track-reset-hscroll nil t)
-        (cl-loop for row in rows
-                 for row-index from 0
-                 do
-                 (unless (zerop row-index)
-                   (insert (propertize "\n" 'line-height t)))
-                 (chirp-render--insert-prefix prefix prefix-face)
-                 (let ((start (point)))
-                   (insert row)
-                   (push start track-positions)
-                   (chirp-render--mark-media-region
-                    start (point) (car media-list) media-list 0)
-                   (unless hotspot-map
-                     (pcase-let
-                         ((`(,map . ,state)
-                           (chirp-render--media-track-hotspot-map
-                            start media-list image
-                            height gap widths fit)))
-                       (setq hotspot-map map
-                             track-state state)))
-                   (put-text-property start (point) 'keymap hotspot-map)
-                   (put-text-property start (point)
-                                      'chirp-media-track t)))
-        (aset track-state 4
-              (mapcar #'copy-marker (nreverse track-positions)))
-        (dolist (marker (aref track-state 4))
-          (put-text-property marker (1+ marker)
-                             'chirp-media-track-state track-state))
-        (chirp-render--media-track-prepare-video-host track-state))
-    (chirp-render--insert-media-grid media-list prefix prefix-face)))
+  "Insert MEDIA-LIST as a prepared AppKit track using X's geometry."
+  (let* ((title (or chirp--view-title "Chirp Media"))
+         (image
+          (appkit-media-track-image
+           (chirp-media-track-items media-list widths fit) height gap
+           :label title
+           :session-function
+           (lambda (index muted)
+             (when chirp-video-use-internal-player
+               (chirp-media-video-session-create (nth index media-list) muted)))
+           :open-function
+           (lambda (index inline presentation)
+             (if (eq presentation 'external)
+                 (chirp-media-play-video (nth index media-list) t)
+               (chirp-media-open-dedicated
+                (chirp-media-selection-create media-list index inline)
+                title))))))
+    (if image
+        (let ((start (point)))
+          (appkit-media-insert-image-slices image nil nil " ")
+          (chirp-render--mark-media-region
+           start (point) (car media-list) media-list 0)
+          (appkit-ui-apply-line-prefix start (point) prefix prefix-face))
+      (chirp-render--insert-media-grid media-list prefix prefix-face))))
 
 (defun chirp-render--media-aspect-ratio (media)
   "Return MEDIA's positive natural aspect ratio, or nil."
@@ -1565,78 +964,37 @@ describe the shared carousel geometry."
       (chirp-render--insert-media-grid
        media-list prefix prefix-face))))
 
-(defun chirp-render--insert-media-grid
-    (media-list prefix prefix-face)
-  "Insert MEDIA-LIST using X Web's compact cover grid.
-
-PREFIX and PREFIX-FACE control indentation."
-  (let ((count (min (length media-list) 6)))
-    (if (= count 1)
-        (chirp-render--insert-media-row
-         (list
-          (chirp-render--media-cell
-           (car media-list) 0
-           (chirp-media-thumbnail-image (car media-list))))
-         media-list 0 prefix prefix-face)
-      (pcase-let* ((plan
-                    (chirp-media-layout-cover-plan
-                     count chirp-media-thumbnail-size (frame-char-height)))
-                   ((map :bands :band-slices :crop-specs) plan)
-                   (cells (make-vector count nil))
-                   (offsets (make-hash-table :test #'eql))
-                   (prepared-bands nil))
-        (cl-loop for media in media-list
-                 for index below count
-                 do (aset
-                     cells index
-                     (chirp-render--media-cell
-                      media index
-                      (chirp-media-thumbnail-image
-                       media (aref crop-specs index)))))
-        (setq prepared-bands
-              (mapcar
-               (lambda (band)
-                 (prog1
-                     (mapcar
-                      (lambda (index)
-                        (cons index (gethash index offsets 0)))
-                      band)
-                   (dolist (index band)
-                     (puthash index
-                              (+ (gethash index offsets 0) band-slices)
-                              offsets))))
-               bands))
-        (cl-loop for band in prepared-bands
-                 for band-index from 0
-                 do
-                 (dotimes (row band-slices)
-                   (chirp-render--insert-prefix prefix prefix-face)
-                   (cl-loop for (index . offset) in band
-                            for column from 0
-                            do (when (> column 0)
-                                 (insert
-                                  (propertize
-                                   " " 'display
-                                   `(space :width
-                                     (,chirp-media-layout-cover-gap)))))
-                            do (chirp-render--insert-media-cell-slice
-                                (aref cells index)
-                                (+ offset row)
-                                media-list))
-                   (unless (and (= band-index (1- (length prepared-bands)))
-                                (= row (1- band-slices)))
-                     (insert (propertize "\n" 'line-height t)))))))))
+(defun chirp-render--insert-media-grid (media-list prefix prefix-face)
+  "Prepare MEDIA-LIST using X's cover policy and insert an AppKit grid."
+  (let* ((count (min (length media-list) 6))
+         (plan (when (> count 1)
+                 (chirp-media-layout-cover-plan
+                  count chirp-media-thumbnail-size (frame-char-height))))
+         (crop-specs (plist-get plan :crop-specs))
+         (cells
+          (cl-loop for media in media-list
+                   for index below count
+                   collect
+                   (chirp-render--media-cell
+                    media media-list index
+                    (chirp-media-thumbnail-image
+                     media (and crop-specs (aref crop-specs index)))))))
+    (appkit-media-insert-grid
+     cells :bands (plist-get plan :bands)
+     :band-slices (plist-get plan :band-slices)
+     :gap (if plan chirp-media-layout-cover-gap 0)
+     :prefix prefix :prefix-face prefix-face)))
 
 (defun chirp-render--insert-media-text-cell (media media-list index &optional prefix prefix-face)
   "Insert one compact text entry for hidden MEDIA.
 
 Associate it with INDEX in MEDIA-LIST.  Precede it with PREFIX using
 PREFIX-FACE when provided."
-  (chirp-render--insert-prefix prefix prefix-face)
   (let ((start (point)))
     (insert (propertize (chirp-render--media-placeholder-text media)
                         'face 'chirp-media-placeholder-face))
-    (chirp-render--mark-media-region start (point) media media-list index)))
+    (chirp-render--mark-media-region start (point) media media-list index)
+    (appkit-ui-apply-line-prefix start (point) prefix prefix-face)))
 
 (defun chirp-render-insert-media-strip
     (media-list &optional prefix prefix-face presentation)
@@ -1669,8 +1027,8 @@ TIME-P controls the timestamp, and TIME-FORMAT is `compact' or `full'.
 NEWLINE-P controls the trailing newline."
   (pcase-let* (((map :author-name (:author-handle handle) :created-at
                      :author-avatar-url) tweet)
-               (author (or author-name "Unknown")))
-    (chirp-render--insert-prefix prefix prefix-face)
+               (author (or author-name "Unknown"))
+               (start (point)))
     (when avatar-p
       (chirp-render--insert-avatar
        author-avatar-url handle))
@@ -1693,7 +1051,8 @@ NEWLINE-P controls the trailing newline."
          :face 'chirp-meta-face
          :right-edge-margin 0)))
     (when newline-p
-      (insert "\n"))))
+      (insert "\n"))
+    (appkit-ui-apply-line-prefix start (point) prefix prefix-face)))
 
 (defun chirp-render--insert-edit-history-context
     (tweet &optional prefix prefix-face)
@@ -1704,16 +1063,15 @@ PREFIX and PREFIX-FACE control indentation."
     (when edited-p
       (let ((count (length edit-history-ids))
             (start (point)))
-        (chirp-render--insert-prefix prefix prefix-face)
         (insert (format "Edited · %d version%s"
                         count
                         (if (= count 1) "" "s")))
-        (chirp-render--add-action
-         start (point)
-         (lambda () (chirp-edit-history-open-tweet tweet))
-         :help-echo "Open edit history"
-         :face 'chirp-social-context-face)
-        (insert "\n")))))
+        (appkit-ui-add-action start (point)
+                              (lambda () (chirp-edit-history-open-tweet tweet))
+                              :help-echo "Open edit history"
+                              :face 'chirp-social-context-face)
+        (insert "\n")
+        (appkit-ui-apply-line-prefix start (point) prefix prefix-face)))))
 
 (cl-defun chirp-render--insert-tweet-context
     (tweet &key prefix prefix-face reply-parent (trailing-newline-p t))
@@ -1729,25 +1087,24 @@ block ends in a newline."
     (chirp-render--insert-edit-history-context tweet prefix prefix-face)
     (pcase (plist-get tweet :timeline-context)
       ('related
-       (chirp-render--insert-prefix prefix prefix-face)
-       (insert (propertize "Related tweet"
-                           'face 'chirp-thread-related-context))
-       (insert "\n"))
+       (appkit-ui-insert-prefixed-lines
+        prefix "Related tweet" :face 'chirp-thread-related-context
+        :prefix-face prefix-face))
       ('pinned
-       (chirp-render--insert-prefix prefix prefix-face)
-       (insert (propertize "Pinned" 'face 'chirp-social-context-face))
-       (insert "\n")))
+       (appkit-ui-insert-prefixed-lines
+        prefix "Pinned" :face 'chirp-social-context-face
+        :prefix-face prefix-face)))
     (pcase-let (((map :retweeted-by :retweeted-by-name) tweet))
       (when retweeted-by
-        (chirp-render--insert-prefix prefix prefix-face)
         (let ((action-start (point))
               (name (or retweeted-by-name retweeted-by)))
           (insert (propertize (format "retweeted by %s" name)
                               'face 'chirp-social-context-face))
           (chirp-render--add-profile-action
            action-start (point) retweeted-by
-           (format "Open @%s" retweeted-by)))
-        (insert "\n")))
+           (format "Open @%s" retweeted-by))
+          (insert "\n")
+          (appkit-ui-apply-line-prefix action-start (point) prefix prefix-face))))
     (unless trailing-newline-p
       (when (and (< start (point))
                  (eq (char-before) ?\n))
@@ -1772,16 +1129,17 @@ newlines after the metrics row."
             article-mode))
          (meta-start nil))
     (when-let* ((handle (and show-reply-context
-                            (map-elt tweet :reply-to-handle))))
-      (chirp-render--insert-prefix
-       (or reply-context-prefix prefix) prefix-face)
+                            (map-elt tweet :reply-to-handle)))
+                (start (point)))
       (insert (propertize "replying to "
                           'face 'chirp-thread-reply-context-face))
       (let ((handle-start (point)))
         (insert (propertize (format "@%s" handle)
                             'face 'chirp-link-face))
         (chirp-render--add-profile-action handle-start (point) handle))
-      (insert "\n"))
+      (insert "\n")
+      (appkit-ui-apply-line-prefix
+       start (point) (or reply-context-prefix prefix) prefix-face))
     (pcase-let (((map :text :text-entities) tweet))
       (when (and text (not (string-empty-p text)))
         (chirp-render--insert-filled-text
