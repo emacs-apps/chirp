@@ -387,37 +387,6 @@ rerender and creates a CPU loop."
                        :preview-url "https://example.com/preview.jpg"))
                     'preview-image))))))
 
-(ert-deftest chirp-media-cropped-preview-retains-original-without-bypassing-insets ()
-  "Plain SVG posters retain their source, but inset composites stay static."
-  (skip-unless (and (display-images-p) (image-type-available-p 'svg)))
-  (let ((file (make-temp-file "chirp-crop-" nil ".svg")))
-    (unwind-protect
-        (progn
-          (with-temp-file file
-            (insert "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"64\" height=\"32\"><rect width=\"64\" height=\"32\" fill=\"red\"/></svg>"))
-          (let* ((image (chirp-media--preview-image-from-file
-                         file '(127 . 144) 256 256))
-                 (rows (appkit-media-image-slice-rows image))
-                 (occurrence (get-text-property
-                              0 'appkit-media-occurrence (car rows)))
-                 (playback (cdr occurrence)))
-            (should (eq (plist-get (cdr image) :type) 'svg))
-            (should occurrence)
-            (should (equal (alist-get 'file (plist-get playback :resource)) file))
-            (should (eq (plist-get playback :fit) 'cover))
-            (should-not (plist-get playback :interaction))
-            (dolist (row rows)
-              (should (eq (get-text-property 0 'appkit-media-occurrence row)
-                          occurrence))))
-          (let ((image (chirp-media--preview-image-from-file
-                        file '(:width 127 :height 72 :insets (0 0 2 0))
-                        256 256)))
-            (should (eq (plist-get (cdr image) :type) 'svg))
-            (should-not (plist-get (cdr image) :appkit-media-playback))
-            (dolist (row (appkit-media-image-slice-rows image))
-              (should-not (get-text-property 0 'appkit-media-occurrence row)))))
-      (delete-file file))))
-
 (ert-deftest chirp-media-thumbnail-placeholder-image-exists-for-video-like-media ()
   "Video-like media should reserve thumbnail space before the real preview arrives."
   (cl-letf (((symbol-function 'display-images-p)
@@ -569,35 +538,6 @@ rerender and creates a CPU loop."
       (dolist (buffer (list source viewer))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
-(ert-deftest chirp-media-open-video-reuses-inline-appkit-session ()
-  "Committed dedicated presentation preserves the exact inline player state."
-  (let* ((chirp--app nil) (source (chirp-media-test--source))
-         (buffer (appkit-surface-buffer source))
-         (viewer (generate-new-buffer " *chirp-inline-handoff*"))
-         (media-list '((:type "video" :url "https://example.com/video.mp4")))
-         (session (list :player (make-symbol "player") :position 23.5 :paused t))
-         (inline (appkit-media--video-inline-create :session session :inline 'inline))
-         presented)
-    (unwind-protect
-        (cl-letf (((symbol-function 'appkit-media-video-inline-closed-p) (lambda (actual) (not (eq actual inline))))
-                  ((symbol-function 'appkit-media-video-session-live-p) (lambda (actual) (eq actual session)))
-                  ((symbol-function 'chirp-media-video-session-create)
-                   (lambda (&rest _) (ert-fail "Inline handoff must not create a fresh session")))
-                  ((symbol-function 'appkit-media-present-video-inline)
-                   (lambda (actual _label &rest keys)
-                     (setq presented (appkit-media-video-inline-session actual))
-                     (plist-get keys :buffer))))
-          (with-current-buffer buffer
-            (chirp-media-register-video-inline media-list 0 inline)
-            (chirp-media-open media-list 0 "Media" viewer))
-          (should-not presented)
-          (appkit-loop-run-pass (appkit-surface-loop source))
-          (should (eq presented session))
-          (should (= (plist-get presented :position) 23.5))
-          (should (plist-get presented :paused)))
-      (chirp-stop)
-      (dolist (target (list buffer viewer)) (when (buffer-live-p target) (kill-buffer target))))))
-
 (ert-deftest chirp-media-play-launches-configured-player ()
   "Media viewer playback should launch the configured external player on demand."
   (let ((chirp-video-player-command "/usr/bin/mpv")
@@ -707,11 +647,19 @@ rerender and creates a CPU loop."
                (insert content)))
            urls contents)
           (with-temp-buffer
-            (cl-letf (((symbol-function 'chirp-media-carousel-image)
-                       (lambda (&rest _args)
-                         '(image :type svg :data "<svg/>"
-                           :appkit-media-nslices 2
-                           :appkit-media-strip-widths (40 40 40 40))))
+            (cl-letf (((symbol-function 'chirp-media--preview-file)
+                       (lambda (_) "/preview.png"))
+                      ((symbol-function 'image-type-available-p) (lambda (_) t))
+                      ((symbol-function 'file-readable-p) (lambda (_) t))
+                      ((symbol-function 'appkit-media-image-mime-type) (lambda (_) "image/png"))
+                      ((symbol-function 'svg-embed) #'ignore)
+                      ((symbol-function 'svg-image)
+                       (lambda (_svg &rest properties)
+                         (cons 'image (append '(:type svg :data "<svg/>") properties))))
+                      ((symbol-function 'appkit-media--base-char-pixel-height)
+                       (lambda () 20))
+                      ((symbol-function 'appkit-media--char-pixel-height)
+                       (lambda () 20))
                       ((symbol-function 'image-size)
                        (lambda (&rest _args) '(160 . 40)))
                       ((symbol-function 'read-file-name)
@@ -725,23 +673,16 @@ rerender and creates a CPU loop."
               (chirp-render--insert-media-track media nil nil 40 4
                                                 '(40 40 40 40) 'cover)
               (goto-char (point-min))
-              (let ((state (chirp-render--media-track-state)))
+              (let ((track (appkit-media-track-at-point)))
                 (cl-loop
-                 for (command index) in
-                 '((nil 0)
-                   (chirp-render-media-track-next 1)
-                   (chirp-render-media-track-next 2)
-                   (chirp-render-media-track-next 3)
-                   (chirp-render-media-track-next 0)
-                   (chirp-render-media-track-previous 3)
-                   (chirp-render-media-track-previous 2)
-                   (chirp-render-media-track-previous 1))
+                 for (delta index) in
+                 '((nil 0) (1 1) (1 2) (1 3) (1 0) (-1 3) (-1 2) (-1 1))
                  for step from 0
                  do
-                 (when command (call-interactively command))
-                 (goto-char (if (= step 7)
-                                (point-max)
-                              (nth (mod step 2) (aref state 4))))
+                 (when delta (appkit-media-track-select track delta))
+                 (goto-char (point-min))
+                 (forward-line (mod step 2))
+                 (when (= step 7) (goto-char (point-max)))
                  (setq target (expand-file-name (format "saved-%d" step)
                                                 chirp-cache-directory))
                  (call-interactively #'chirp-media-download-at-point)

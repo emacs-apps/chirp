@@ -218,6 +218,11 @@ timelines, reposts, thread focuses, and thread replies—share one large carouse
 display.  Quoted posts and other condensed cards retain X Web's center-cropped
 ~TweetPhotos~ grid.
 
+Chirp owns X's aspect-ratio and crop policy, media resource resolution, and
+post/profile actions.  Appkit owns the sliced grid executor, mounted track
+selection, image hotspots, composite Canvas and playback lifetime.  Cached
+rendered content is immutable; inserting it twice creates independent tracks.
+
 Source aspect ratios determine the common carousel height.  Each item occupies
 at most 80 percent of the reference width, 4-pixel gutters separate items, and
 constrained boxes use center cover.  Static carousels use SVG.  Inline video
@@ -226,7 +231,7 @@ the same geometry and keeping ~window-hscroll~ at zero.
 
 ** Actions
 
-The [[file:../lisp/chirp-render.el::(defun chirp-render--media-track-hotspot-map][carousel action map]] extends [[file:../../video.el/video-inline.el::(defvar-keymap video-inline-map][video.el's inline transport map]].
+The [[file:../../appkit.el/appkit-media-track.el::(defvar appkit-media-track-map][Appkit track action map]] owns carousel navigation and inline controls.
 Selecting another item retargets those local actions; they never control the
 previous inline occurrence.  Activation toggles inline video or opens a still
 image in the reader.  Clicking a hotspot selects that item without moving
@@ -237,6 +242,11 @@ activation.  Opening an additional presentation frame leaves the host view
 visible and does not start paused media; closing it changes no other window.
 Looping applies only to an initialized, seekable source and does not start
 playback.  Space remains available to the user's global key configuration.
+
+Touch drags on headings, cards, image hotspots and inline transport controls
+scroll the host buffer; only completed taps activate them.  Card borders and
+indentation are display-only, so copied text keeps neither and text entity
+offsets remain aligned.
 
 ** Dedicated viewer
 
