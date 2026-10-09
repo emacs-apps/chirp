@@ -1304,7 +1304,13 @@ track; HEIGHT, GAP, WIDTHS, and FIT retain its presentation geometry."
              for index from 0
              for id = (intern (format "chirp-media-%d" index))
              do
-             (define-key map (vector id 'down-mouse-1) #'ignore)
+             (define-key map (vector id 'down-mouse-1)
+                         #'appkit-ui-ignore-mouse)
+             ;; Strip the hotspot prefix from native scrolling gestures,
+             ;; while taps retain it for the exact media item.
+             (dolist (event '(touchscreen-begin touchscreen-update touchscreen-end))
+               (define-key function-key-map (vector id event)
+                           #'touch-screen-translate-touch))
              (define-key map (vector id 'mouse-1)
                          #'chirp-render-media-track-open-hotspot))
     (cons map state)))
