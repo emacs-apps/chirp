@@ -13,6 +13,7 @@
 (require 'chirp-actions)
 (require 'chirp-thread)
 (require 'chirp-timeline)
+(require 'touch-screen)
 
 (defun chirp-test--face-member-p (face value)
   "Return non-nil when FACE appears in text property VALUE."
@@ -2106,6 +2107,42 @@
                   4
                   (plist-get plan :widths)
                   nil)))))
+
+(ert-deftest chirp-render-hotspot-touch-scrolls-without-opening-media ()
+  "Dragging either image-map item must produce a host scroll, not a click."
+  (let ((function-key-map (copy-keymap function-key-map)))
+    (with-temp-buffer
+      (insert "Media track\n")
+      (let* ((image '(image :type svg :appkit-media-strip-widths (100 120)))
+             (map (car (chirp-render--media-track-hotspot-map
+                        1 '((:type "photo") (:type "video"))
+                        image 80 4 '(100 120) 'cover))))
+        (put-text-property 1 (point-max) 'keymap map)
+        (save-window-excursion
+          (switch-to-buffer (current-buffer))
+          (goto-char 1)
+          (dolist (id '(chirp-media-0 chirp-media-1))
+            (dolist (dy '(-40 40))
+              (let* ((touch-screen-current-tool nil)
+                     (touch-screen-aux-tool nil)
+                     (touch-screen-current-timer nil)
+                     (touch-screen-simple-mouse-conversion nil)
+                     (touch-screen-extend-selection nil)
+                     (start (cons 1 (list (selected-window) 1 '(20 . 100) 0)))
+                     (end (cons 1 (list (selected-window) 1
+                                        (cons 20 (+ 100 dy)) 0)))
+                     (unread-command-events
+                      (list id (list 'touchscreen-begin start)
+                            (list 'touchscreen-update (list end))
+                            (list 'touchscreen-end end nil) 0)))
+                (unwind-protect
+                    (progn
+                      (should (equal (read-key-sequence-vector nil)
+                                     (vector (list 'touchscreen-scroll
+                                                   (selected-window) 0 (- dy)))))
+                      (should (equal (read-key-sequence-vector nil) [0])))
+                  (when touch-screen-current-timer
+                    (cancel-timer touch-screen-current-timer)))))))))))
 
 (ert-deftest chirp-render-hotspot-video-plays-in-displayed-region ()
   "Clicking a video should preserve the viewport and replace its own box."
