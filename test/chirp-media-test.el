@@ -850,6 +850,62 @@ rerender and creates a CPU loop."
       (chirp-stop)
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
+(ert-deftest chirp-media-open-prefers-live-host-at-point ()
+  "Opening media at a live occurrence must keep its exact player."
+  (with-temp-buffer
+    (let* ((media-list '((:type "video" :url "https://example.com/v.mp4")))
+           (host 'live-host)
+           activated
+           opened)
+      (cl-letf (((symbol-function 'appkit-media-inline-host-at-point)
+                 (lambda (&optional _position) host))
+                ((symbol-function 'appkit-media-inline-host-activate)
+                 (lambda (actual presentation)
+                   (setq activated (list actual presentation))))
+                ((symbol-function 'chirp-media-open-dedicated)
+                 (lambda (&rest arguments)
+                   (setq opened arguments))))
+        (chirp-media-open media-list 3 "Title")
+        (should (eq (car activated) host))
+        (should (eq (cadr activated) 'dedicated))
+        (should-not opened))
+      (cl-letf (((symbol-function 'appkit-media-inline-host-at-point)
+                 (lambda (&optional _position) nil))
+                ((symbol-function 'chirp-media-selection-at-point)
+                 (lambda () nil))
+                ((symbol-function 'chirp-media-open-dedicated)
+                 (lambda (selection &rest arguments)
+                   (setq opened (cons selection arguments)))))
+        (chirp-media-open media-list 3 "Title")
+        (should (eq media-list
+                    (chirp-media-selection-media-list (car opened))))
+        (should (= 3 (chirp-media-selection-index (car opened))))))))
+
+(ert-deftest chirp-media-open-finds-host-across-media-block-lines ()
+  "A click on an inter-slice line must still reuse the media host."
+  (with-temp-buffer
+    (insert "x\ny")
+    (let* ((media-list '((:type "video" :url "https://example.com/v.mp4")))
+           (host 'live-host)
+           activated
+           opened)
+      (put-text-property 1 3 'chirp-media-list media-list)
+      (cl-letf (((symbol-function 'appkit-media-inline-host-at-point)
+                 (lambda (&optional position)
+                   (and (eql position 1) host)))
+                ((symbol-function 'appkit-media-inline-host-activate)
+                 (lambda (actual presentation)
+                   (setq activated (list actual presentation))))
+                ((symbol-function 'chirp-media-open-dedicated)
+                 (lambda (&rest arguments)
+                   (setq opened arguments))))
+        ;; Position 2 is the newline between two rendered image slices.
+        (goto-char 2)
+        (chirp-media-open media-list 0 "Title")
+        (should (eq (car activated) host))
+        (should (eq (cadr activated) 'dedicated))
+        (should-not opened)))))
+
 (provide 'chirp-media-test)
 
 ;;; chirp-media-test.el ends here

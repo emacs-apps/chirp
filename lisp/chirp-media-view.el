@@ -18,6 +18,7 @@
 (require 'chirp-core)
 (require 'map)
 (require 'chirp-media)
+(require 'appkit-media-inline)
 
 (defvar-local chirp--media-list nil
   "Media list displayed by the current Chirp media buffer.")
@@ -132,19 +133,44 @@
       (chirp-media-play-video media t)
     (user-error "No media at point")))
 
+(defun chirp-media--inline-host-in-occurrence ()
+  "Return the live Appkit host in the media occurrence containing point.
+
+The media action also covers the lines and padding between image slices,
+where no overlay exists; search the whole rendered occurrence instead."
+  (when-let* ((base (if (get-text-property (point) 'chirp-media-list)
+                        (point)
+                      (and (> (point) (point-min))
+                           (get-text-property (1- (point)) 'chirp-media-list)
+                           (1- (point)))))
+              (start (or (previous-single-property-change
+                          base 'chirp-media-list nil (point-min))
+                         (point-min)))
+              (end (or (next-single-property-change
+                        base 'chirp-media-list nil (point-max))
+                       (point-max))))
+    (cl-loop for position from start below end
+             for host = (appkit-media-inline-host-at-point position)
+             when host return host)))
+
 (defun chirp-media-open (media-list index &optional title buffer)
   "Open MEDIA-LIST at INDEX using TITLE in dedicated media BUFFER.
 
-Reuse only the exact mounted occurrence at point, never another occurrence
-of an equal or shared media list."
-  (let ((selection (chirp-media-selection-at-point)))
-    (chirp-media-open-dedicated
-     (if (and selection
-              (eq media-list (chirp-media-selection-media-list selection))
-              (= index (chirp-media-selection-index selection)))
-         selection
-       (chirp-media-selection-create media-list index))
-     title buffer)))
+Prefer the live Appkit occurrence at point, so an inline video keeps its exact
+session and selected carousel item.  Otherwise reuse only the exact mounted
+selection at point, never another occurrence of an equal or shared media
+list."
+  (if-let* ((host (or (appkit-media-inline-host-at-point)
+                      (chirp-media--inline-host-in-occurrence))))
+      (appkit-media-inline-host-activate host 'dedicated)
+    (let ((selection (chirp-media-selection-at-point)))
+      (chirp-media-open-dedicated
+       (if (and selection
+                (eq media-list (chirp-media-selection-media-list selection))
+                (= index (chirp-media-selection-index selection)))
+           selection
+         (chirp-media-selection-create media-list index))
+       title buffer))))
 
 (defun chirp-media-open-at-point ()
   "Open the media item at point."
