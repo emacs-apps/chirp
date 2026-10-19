@@ -243,7 +243,7 @@
          (preview (chirp-dm-inbox--one-line raw-preview)))
     (appkit-ui-one-line-preview-create
      :label label
-     :separator (and label ":")
+     :separator (and label appkit-ui-sender-text-delimiter)
      :label-face (and label (or (appkit-name-color-face sender-id) 'bold))
      :text preview)))
 

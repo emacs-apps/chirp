@@ -95,7 +95,7 @@
                (lambda (_view) "99")))
       (setq preview (chirp-dm-inbox--preview-model :view group)))
     (should (equal (appkit-ui-one-line-preview-label preview) "Alice"))
-    (should (equal (appkit-ui-one-line-preview-separator preview) ":"))
+    (should (equal (appkit-ui-one-line-preview-separator preview) ">"))
     (should (equal (appkit-ui-one-line-preview-text preview) "hello"))))
 
 (ert-deftest chirp-dm-inbox-projects-only-the-direct-peer-avatar ()
