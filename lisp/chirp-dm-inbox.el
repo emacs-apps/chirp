@@ -548,7 +548,6 @@
 (appkit-bindings-define 'chirp-dm-inbox--mode-map 'read-only
   'activate #'appkit-directory-activate
   'app-menu #'chirp-dispatch
-  'navigation #'chirp-dispatch
   'refresh #'chirp-dm-refresh-inbox
   'next-item #'appkit-directory-next-item
   'previous-item #'appkit-directory-previous-item

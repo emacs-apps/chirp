@@ -351,7 +351,6 @@ commands still work, and displays alt text when the backend provides it."
 (appkit-bindings-define 'chirp-view-mode-map 'read-only
   'activate #'chirp-open-at-point
   'app-menu #'chirp-dispatch
-  'navigation #'chirp-dispatch
   'refresh #'chirp-refresh
   'next-item #'chirp-next-entry
   'previous-item #'chirp-previous-entry
