@@ -92,7 +92,6 @@ Either `draft' or `scheduled'.")
 (appkit-bindings-define 'chirp-unsent-mode-map 'read-only
   'activate #'chirp-unsent-open
   'app-menu #'chirp-dispatch
-  'navigation #'chirp-dispatch
   'refresh #'chirp-unsent-refresh
   'help #'describe-mode
   'quit #'chirp-quit-current-buffer

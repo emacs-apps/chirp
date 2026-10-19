@@ -131,7 +131,6 @@ Only `unknown' persists because it changes whether repeating a write is safe.")
 
 (appkit-bindings-define 'chirp-compose-mode-map 'input
   'app-menu #'chirp-dispatch
-  'navigation #'chirp-dispatch
   'help #'describe-mode
   'return #'chirp-compose-return
   'newline #'newline

@@ -1691,7 +1691,6 @@ With ARG in the composer, insert a newline instead."
 
 (appkit-bindings-define 'chirp-dm-conversation--timeline-mode-map 'read-only
   'app-menu #'chirp-dispatch
-  'navigation #'chirp-dispatch
   'help #'describe-mode
   'return #'chirp-dm-return-dwim
   'refresh #'chirp-dm-refresh-conversation
@@ -1714,7 +1713,6 @@ With ARG in the composer, insert a newline instead."
 
 (appkit-bindings-define 'chirp-dm-conversation--mode-map 'input
   'app-menu #'chirp-dispatch
-  'navigation #'chirp-dispatch
   'help #'describe-mode
   'return #'chirp-dm-return-dwim
   'newline #'newline
