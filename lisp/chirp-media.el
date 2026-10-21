@@ -1620,13 +1620,15 @@ lazy; only existing preview files are consulted here."
 (defun chirp-media-video-session-create (media &optional muted)
   "Create an Appkit video session for MEDIA with initial MUTED state."
   (when-let* ((url (chirp-media-playback-url media)))
-    (appkit-media-video-session-create
-     (appkit-media-resource-create
-      :url url
-      :name (appkit-media-url-filename url))
-     "Chirp"
-     :cache-key (chirp-media--video-cache-key media)
-     :muted muted)))
+    (appkit-media-playback-session-create
+     (appkit-media-playback-create
+      :resource (appkit-media-resource-create
+                 :url url
+                 :name (appkit-media-url-filename url))
+      :kind 'video
+      :label "Chirp"
+      :cache-key (chirp-media--video-cache-key media)
+      :muted muted))))
 
 (defun chirp-media--play-external (media)
   "Open video-like MEDIA in the configured external player."

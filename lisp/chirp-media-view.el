@@ -345,9 +345,11 @@ list."
                (appkit-effect-create
                 :key 'chirp-media-present
                 :input (if (eq kind 'video)
-                           (appkit-media-video-presentation-create
-                            (appkit-media-resource-create :file file)
-                            :label "Chirp XChat"
+                           (appkit-media-playback-presentation-create
+                            (appkit-media-playback-create
+                             :resource (appkit-media-resource-create :file file)
+                             :kind 'video
+                             :label "Chirp XChat")
                             :start t)
                          file)
                 :start (if (eq kind 'video) #'appkit-media-video-presentation-start
