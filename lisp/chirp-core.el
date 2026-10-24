@@ -67,6 +67,9 @@
 (declare-function chirp-media-prefetch-tweet "chirp-media" (tweet buffer))
 (declare-function chirp-media-view--update "chirp-media-view"
                   (context model message))
+(declare-function chirp-dm-state-subscriptions "chirp-dm-state" (model))
+(declare-function appkit-chat-history-loading-set "appkit-chat-history" (kind))
+(defvar appkit-chat-history-effect-key)
 (declare-function chirp-dm-state--app-update "chirp-dm-state"
                   (context session message))
 (declare-function chirp-dm-inbox--update "chirp-dm-inbox"
@@ -214,17 +217,19 @@ commands still work, and displays alt text when the backend provides it."
 (defun chirp-app ()
   "Return the live canonical Chirp App."
   (unless (appkit-app-live-p chirp--app)
-    (setq chirp--app
-          (appkit-app-start
-           (appkit-app-type-create
-            :name 'chirp
-            :init (lambda (_context _input)
-                    (appkit-next
-                     :model (chirp--make-session)
-                     :render appkit-render-none))
-            :update #'chirp--app-update
-            :shutdown #'chirp--shutdown-app)
-           :identity 'chirp)))
+    (let (app)
+      (setq app
+            (appkit-app-start
+             (appkit-app-type-create
+              :name 'chirp
+              :init (lambda (_context _input)
+                      (appkit-next :model (chirp--make-session) :render appkit-render-none))
+              :update (lambda (context session message)
+                        (let ((chirp--app app))
+                          (chirp--app-update context session message)))
+              :shutdown #'chirp--shutdown-app)
+             :identity 'chirp)
+            chirp--app app)))
   chirp--app)
 
 (defun chirp--session ()
@@ -616,6 +621,9 @@ revisited later."
                                  :frame-p t
                                  :position (or (plist-get input :position) 'first))))
                :update #'chirp--surface-update
+               :subscriptions (lambda (model)
+                                (when (memq (plist-get model :type) '(dm-conversation dm-inbox))
+                                  (chirp-dm-state-subscriptions model)))
                :renderer-factory
                (lambda (_surface)
                  (appkit-generated-renderer-create
@@ -3117,6 +3125,13 @@ over the card's `t.co` permalink."
     (chirp-timeline--update context model message))
    ((eq (car-safe message) 'chirp-model)
     (let ((state (cadr message)))
+      (pcase (plist-get state :type)
+        ('dm-conversation
+         (appkit-chat-history-loading-set nil)
+         (setf (plist-get state :history-token) nil))
+        ('dm-inbox
+         (setf (plist-get state :loading-p) nil
+               (plist-get state :request-token) nil)))
       (dolist (pair '((:media-intent) (:media-phase . idle) (:media-error)))
         (unless (plist-member state (car pair))
           (nconc state (list (car pair) (cdr pair)))))
@@ -3125,8 +3140,13 @@ over the card's `t.co` permalink."
        :render (appkit-projection-change-create
                 :full-p t
                 :frame-p t)
-       :commands (list (appkit-command-cancel-effect 'chirp-media-acquire)
-                       (appkit-command-cancel-effect 'chirp-media-present)))))
+       :commands (append
+                  (when (eq (plist-get model :type) 'dm-conversation)
+                    (list (appkit-command-cancel-effect appkit-chat-history-effect-key)))
+                  (when (eq (plist-get model :type) 'dm-inbox)
+                    (list (appkit-command-cancel-effect 'chirp-dm-inbox)))
+                  (list (appkit-command-cancel-effect 'chirp-media-acquire)
+                        (appkit-command-cancel-effect 'chirp-media-present))))))
    ((eq (car-safe message) 'chirp-media)
     (chirp-media-view--update context model message))
    ((eq (car-safe message) 'chirp-follow-result)

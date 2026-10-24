@@ -15,9 +15,14 @@
 (require 'map)
 (require 'subr-x)
 (require 'appkit-core)
+(require 'appkit-topic)
 (require 'appkit-presentation)
 (require 'chirp-core)
 (require 'chirp-xchat)
+
+(declare-function chirp-dm-conversation--commit-history "chirp-dm-conversation" (context app request))
+(declare-function chirp-dm-inbox--commit "chirp-dm-inbox" (context app input result))
+(declare-function chirp-x-cancel-request "chirp-x" (request))
 
 (defun chirp-dm-state--event-id (event)
   "Return normalized EVENT's stable identity."
@@ -225,12 +230,17 @@ Return its canonical conversation, or nil if metadata has not been loaded."
      conversation (and first (chirp-dm-state--event-id first)) nil)
     conversation))
 
-(defun chirp-dm-state--app-update (_context session message)
+(defun chirp-dm-state--app-update (context session message)
   "Apply canonical DM MESSAGE to its original SESSION."
   (let* ((table (chirp--session-dm-conversations session))
          (arguments (nth 2 message))
-         (conversation (car arguments)))
+         (conversation (car arguments)) commands)
     (pcase (nth 1 message)
+      ('inbox-commit
+       (setq commands (chirp-dm-inbox--commit context chirp--app (car arguments) (cadr arguments))))
+      ('history-commit
+       (setq commands (chirp-dm-conversation--commit-history context chirp--app arguments)))
+      ('publish (setq commands (list (appkit-command-publish 'chirp-dm-state arguments))))
       ('set-events (apply #'chirp-dm-state--set-events arguments))
       ('merge-snapshot
        (chirp-dm-state--merge-snapshot
@@ -246,30 +256,44 @@ Return its canonical conversation, or nil if metadata has not been loaded."
             (chirp-dm-state-merge-events
              (plist-get canonical :events) (list event))))))
       (_ (error "Unsupported canonical DM operation: %S" message)))
-    (appkit-next :model session :render appkit-render-none)))
+    (appkit-next :model session :render appkit-render-none :commands commands)))
+
+(defun chirp-dm-state-request-cancellation (request)
+  "Adapt raw backend REQUEST to the owning Effect's cancellation."
+  (appkit-cancellation-create
+   :kind 'transport
+   :cancel (lambda ()
+             (cond ((appkit-handle-p request) (appkit-cancel-handle request))
+                   ((buffer-live-p request) (chirp-x-cancel-request request))))))
+
+(defun chirp-dm-state--publish-command
+    (conversation &optional seed-key decrypt-p promote-p)
+  "Return the topic command describing committed CONVERSATION."
+  (appkit-command-publish
+   'chirp-dm-state
+   (list :id (plist-get conversation :id) :seed seed-key
+         :decrypt decrypt-p :promote promote-p)))
+
+(defun chirp-dm-state-subscriptions (model)
+  "Return canonical DM topic subscriptions for MODEL."
+  (when (memq (plist-get model :type) '(dm-conversation dm-inbox))
+    (let ((kind (if (eq (plist-get model :type) 'dm-conversation)
+                    'chirp-dm-conversation 'chirp-dm-inbox)))
+      (list (appkit-subscription-create
+             :topic 'chirp-dm-state :delivery 'lossless :pending-limit 128
+             :notify (lambda (payload) (list kind 'canonical-changed payload))
+             :resync (lambda () (list kind 'canonical-resync)))))))
 
 (defun chirp-dm-state-publish
     (conversation &optional seed-key decrypt-p promote-p)
-  "Notify exact live Surfaces of committed CONVERSATION.
-SEED-KEY may seed an authoritative-empty window.  DECRYPT-P requests pending
-verification; PROMOTE-P moves live activity to the inbox's recent edge.
-Only Surface reducers change their own local state."
+  "Publish committed CONVERSATION through its App topic."
   (when (appkit-app-live-p chirp--app)
-    (dolist (view (appkit-app--surface-snapshot chirp--app))
-      (when (appkit-surface-live-p view)
-        (pcase-let* ((state (appkit-surface-model view))
-                     ((map :type (:conversation current) :items) state))
-          (pcase type
-            ('dm-conversation
-             (when (eq current conversation)
-               (appkit-surface-post
-                view (list 'chirp-dm-conversation 'canonical-changed
-                           view conversation seed-key decrypt-p))))
-            ('dm-inbox
-             (when (or promote-p (memq conversation items))
-               (appkit-surface-post
-                view (list 'chirp-dm-inbox 'canonical-changed
-                           state conversation promote-p))))))))))
+    (appkit-app-send
+     chirp--app
+     (list 'chirp-dm-state 'publish
+           (list :id (plist-get conversation :id) :seed seed-key
+                 :decrypt decrypt-p :promote promote-p)))))
+
 
 (provide 'chirp-dm-state)
 

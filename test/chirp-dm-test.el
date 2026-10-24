@@ -260,6 +260,7 @@
                        nil :reply-p nil :reply-text nil
                        :reply-attachment-count 0)))))
               (setq buffer (chirp-dm-conversation-open conversation))
+              (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
               (let*
                   ((view
                     (with-current-buffer buffer
@@ -444,6 +445,7 @@
                        (chirp-dm-test--normalized-conversation old
                                                                fresh)
                        nil)
+              (chirp-dm-test--drain first-view)
               (appkit-loop-run-pass (appkit-surface-loop first-view))
               (appkit-loop-run-pass (appkit-surface-loop second-view))
               (should
@@ -1238,6 +1240,7 @@
                              '((pagination (complete . t))
                                (encodedKeyEvents
                                 "recovery-key-event")))
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
                     (should
                      (equal
                       (mapcar (lambda (event) (plist-get event :id))
@@ -1298,6 +1301,7 @@
                                                              "older")
                             current)
                            '((pagination (complete . t))))
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
                   (appkit-loop-run-pass (appkit-surface-loop view))
                   (should (appkit-chat-history-older-loaded-p))
                   (should (= request-count 1)))))))
@@ -1343,6 +1347,7 @@
                              (list fresh) :has-more t :older-cursor
                              '(:sequence-id "30" :key-version "0"))
                        nil)
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
               (let*
                   ((view
                     (with-current-buffer buffer
@@ -1364,6 +1369,7 @@
                          '((pagination
                             (nextCursor :sequence-id "25"
                              :key-version "0"))))
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
                 (should
                  (equal bridge-cursors
                         '((:sequence-id "30" :key-version "0")
@@ -1376,6 +1382,7 @@
                 (funcall bridge-callback
                          (list oldest current intermediate)
                          '((pagination (complete . t))))
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
                 (should
                  (equal
                   (mapcar (lambda (event) (plist-get event :id))
@@ -1425,6 +1432,7 @@
               (funcall refresh-callback
                        (chirp-dm-test--normalized-conversation fresh)
                        nil)
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
               (funcall bridge-callback
                        (list
                         (chirp-dm-test--normalized-event "29" "29"
@@ -1432,6 +1440,7 @@
                        '((pagination
                           (nextCursor :sequence-id "25" :key-version
                            "0"))))
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
               (funcall bridge-callback
                        (list
                         (chirp-dm-test--normalized-event "28" "28"
@@ -1439,6 +1448,7 @@
                        '((pagination
                           (nextCursor :sequence-id "30" :key-version
                            "0"))))
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
               (let*
                   ((view
                     (with-current-buffer buffer
@@ -1518,6 +1528,7 @@
                         (chirp-dm-test--normalized-event "10" "10"
                                                          "stale"))
                        nil)
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
               (let
                   ((view
                     (with-current-buffer buffer
@@ -1538,6 +1549,7 @@
                                :has-more t :older-cursor
                                '(:sequence-id "20" :key-version "0"))
                          nil)
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
                 (should
                  (equal
                   (mapcar (lambda (event) (plist-get event :id))
@@ -1588,11 +1600,13 @@
                   (should (appkit-handle-alive-p refresh-handle))
                   (appkit-retire-handle refresh-handle)
                   (funcall refresh (chirp-dm-test--normalized-conversation fresh) nil)
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface)))
                   (should (appkit-handle-alive-p bridge-handle))
                   (should-not canceled)
                   (appkit-retire-handle bridge-handle)
                   (funcall bridge (list old fresh)
-                           '((pagination (complete . t)))))
+                           '((pagination (complete . t))))
+                  (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface))))
                 (chirp-dm-test--drain view)
                 (with-current-buffer buffer
                   (should-not (appkit-chat-history-loading-p))
@@ -1731,6 +1745,80 @@
       (dolist (buffer buffers)
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+(ert-deftest chirp-dm-history-queued-commit-checks-current-surface-token ()
+  "A queued App merge must be inert after its Surface starts a new page."
+  (let ((chirp--app nil) buffer callbacks)
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'chirp-backend-dm-conversation-data)
+                     (lambda (_id callback &rest _options) (push callback callbacks) 'request)))
+            (let* ((old (chirp-dm-test--normalized-event "20" "20" "old"))
+                   (fresh (chirp-dm-test--normalized-event "30" "30" "fresh")))
+              (setq buffer (chirp-dm-conversation-open (chirp-dm-test--normalized-conversation old)))
+              (let* ((view (with-current-buffer buffer (appkit-current-surface)))
+                     (state (appkit-surface-model view)))
+                (chirp-dm-test--drain view)
+                (chirp-dm-conversation--request view 'refresh)
+                (funcall (car callbacks) (chirp-dm-test--normalized-conversation old fresh) nil)
+                (appkit-loop-run-pass (appkit-surface-loop view))
+                (chirp-dm-conversation--request view 'refresh)
+                (chirp-dm-test--drain view)
+                (should (equal (mapcar (lambda (event) (plist-get event :id))
+                                      (chirp-dm-conversation--events state)) '("20")))
+                (with-current-buffer buffer (should (appkit-chat-history-loading-p)))
+                (kill-buffer buffer)
+                ;; A late resolver is fenced even after the view disappears.
+                (funcall (car callbacks) (chirp-dm-test--normalized-conversation old fresh) nil)
+                (appkit-loop-run-pass (appkit-app-loop chirp--app))
+                (should (equal (mapcar (lambda (event) (plist-get event :id))
+                                      (chirp-dm-conversation--events state)) '("20")))))))
+      (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest chirp-dm-history-queued-reply-cannot-clear-new-loading ()
+  "A committed old page reply cannot settle a newer request in the same view."
+  (let ((chirp--app nil) buffer callbacks)
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'chirp-backend-dm-conversation-data)
+                     (lambda (_id callback &rest _options) (push callback callbacks) 'request)))
+            (let* ((old (chirp-dm-test--normalized-event "20" "20" "old"))
+                   (fresh (chirp-dm-test--normalized-event "30" "30" "fresh")))
+              (setq buffer (chirp-dm-conversation-open (chirp-dm-test--normalized-conversation old)))
+              (let ((view (with-current-buffer buffer (appkit-current-surface))))
+                (chirp-dm-test--drain view)
+                (chirp-dm-conversation--request view 'refresh)
+                (funcall (car callbacks) (chirp-dm-test--normalized-conversation old fresh) nil)
+                (appkit-loop-run-pass (appkit-surface-loop view))
+                (appkit-surface-post view '(chirp-dm-conversation history-start refresh))
+                (appkit-loop-run-pass (appkit-app-loop chirp--app))
+                (chirp-dm-test--drain view)
+                (should (= (length callbacks) 2))
+                (with-current-buffer buffer (should (eq (appkit-chat-history-loading) 'refresh)))
+                (should (plist-get (appkit-surface-model view) :history-token))
+                (funcall (car callbacks) (chirp-dm-test--normalized-conversation old fresh) nil)
+                (chirp-dm-test--drain view)
+                (with-current-buffer buffer (should-not (appkit-chat-history-loading-p)))))))
+      (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest chirp-dm-topic-overflow-resyncs-inbox ()
+  "Losing bounded promotion notifications must refresh the authoritative inbox."
+  (let ((chirp--app nil) buffer (requests 0))
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'chirp-backend-dm-inbox)
+                     (lambda (callback &rest _options)
+                       (cl-incf requests) (funcall callback nil nil) nil)))
+            (setq buffer (chirp-dm-inbox-open))
+            (let ((view (with-current-buffer buffer (appkit-current-surface))))
+              (chirp-dm-test--drain view)
+              (dotimes (_ 129)
+                (chirp-dm-state-publish '(:id "conversation-1") nil nil t))
+              (chirp-dm-test--drain view)
+              (should (= requests 2))
+              (should-not (plist-get (appkit-surface-model view) :loading-p)))))
+      (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
 (provide 'chirp-dm-test)
 
 ;;; chirp-dm-test.el ends here
+

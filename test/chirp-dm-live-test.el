@@ -196,7 +196,8 @@
                 (lambda (callback &rest _options)
                   (funcall callback (list first second) nil)
                   'request)))
-            (setq buffer (chirp-dm-inbox-open)))
+            (setq buffer (chirp-dm-inbox-open))
+            (chirp-dm-test--drain (with-current-buffer buffer (appkit-current-surface))))
           (with-current-buffer buffer
             (let*
                 ((view (appkit-current-surface))
@@ -314,6 +315,7 @@
                        (list (chirp-dm-test--normalized-conversation
                               (chirp-dm-test--normalized-event "20" "20" "old")))
                        nil)
+              (chirp-dm-test--drain view)
               (chirp-dm-live--accept-event
                service (chirp-dm-test--normalized-event "31" "31" "owned live")))
             (chirp-dm-test--drain view)

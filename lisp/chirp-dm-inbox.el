@@ -131,7 +131,7 @@
         :items nil
         :page (list :next-cursor nil :exhausted-p nil)
         :status (list :phase 'initial :message nil)
-        :loading-p nil :request-token nil :request-handle nil))
+        :loading-p nil :request-token nil :request-address nil))
 
 ;;;; Projection
 
@@ -404,108 +404,117 @@
           (push item additions))))
     (append current (nreverse additions))))
 
-(defun chirp-dm-inbox--request-current-p (view state token)
-  "Return non-nil for the exact current inbox request TOKEN."
-  (and (appkit-surface-live-p view)
-       (eq state (appkit-surface-model view))
-       (eq token (plist-get state :request-token))))
 
-(defun chirp-dm-inbox--cancel-handle (handle)
-  "Cancel one superseded inbox transport HANDLE."
-  (cond
-   ((and (appkit-handle-p handle) (appkit-handle-alive-p handle))
-    (appkit-cancel-handle handle))
-   ((buffer-live-p handle) (chirp-x-cancel-request handle))))
+(defun chirp-dm-inbox--effect (view request)
+  "Describe REQUEST as one replaceable inbox Effect for VIEW."
+  (appkit-command-start-effect
+   (appkit-effect-create
+    :key 'chirp-dm-inbox
+    :input (list :app (appkit-surface-app view) :owner view :request request)
+    :start
+    (lambda (_context input _observe resolve reject)
+      (let ((chirp--app (plist-get input :app)))
+        (chirp-dm-state-request-cancellation
+         (chirp-backend-dm-inbox
+          (lambda (conversations envelope) (funcall resolve (list conversations envelope)))
+          :cursor (plist-get (plist-get input :request) :cursor)
+          :max-results chirp-dm-inbox-page-size
+          :errback reject :owner (plist-get input :owner)))))
+    :cancellation-requirement 'transport
+    :success (lambda (input value)
+               (list 'chirp-dm-inbox 'result (plist-get input :request) value nil))
+    :failure (lambda (input error)
+               (list 'chirp-dm-inbox 'result (plist-get input :request) nil error)))))
 
-(defun chirp-dm-inbox--update (_context model message)
-  "Accept inbox MESSAGE under its exact Surface-local MODEL."
-  (if (not (eq model (nth 2 message)))
-      (appkit-next-reject 'stale-inbox-state)
-    (let ((kind (nth 1 message))
-          (token (nth 3 message))
-          (status (chirp-dm-inbox--status model)))
-      (cond
-       ((eq kind 'canonical-changed)
-        (when (nth 4 message)
-          (setf (plist-get model :items)
-                (cons token (delq token
-                                  (copy-sequence (plist-get model :items))))))
-        (appkit-next
-         :model model :render (appkit-projection-change-create
-                               :full-p t :frame-p t :position 'preserve)))
-       ((eq kind 'start)
-        (setf (plist-get model :request-token) token
-              (plist-get model :request-handle) nil
-              (plist-get model :loading-p) t
-              (plist-get status :phase) (nth 4 message)
-              (plist-get status :message) nil)
-        (appkit-next
-         :model model :render (appkit-projection-change-create
-                               :full-p t :frame-p t :position 'preserve)))
-       ((not (eq token (plist-get model :request-token)))
-        (appkit-next-reject 'stale-inbox-request))
-       ((eq kind 'bind)
-        (setf (plist-get model :request-handle) (nth 4 message))
-        (appkit-next :model model :render appkit-render-none))
-       ((memq kind '(success error))
-        (if (eq kind 'success)
-            (let ((canonical (nth 5 message))
-                  (page (plist-get model :page))
-                  (cursor (nth 6 message)))
-              (setf (plist-get model :items)
-                    (if (eq (nth 4 message) 'older)
-                        (chirp-dm-inbox--append-unique
-                         (plist-get model :items) canonical
-                         (lambda (item) (plist-get item :id)))
-                      canonical)
-                    (plist-get page :next-cursor) cursor
-                    (plist-get page :exhausted-p) (not cursor)
-                    (plist-get status :phase) 'idle
-                    (plist-get status :message) nil))
-          (setf (plist-get status :phase) 'error
-                (plist-get status :message) (nth 4 message)))
-        (setf (plist-get model :loading-p) nil
-              (plist-get model :request-token) nil
-              (plist-get model :request-handle) nil)
-        (appkit-next
-         :model model :render (appkit-projection-change-create
-                               :full-p t :frame-p t :position 'preserve)))
-       (t (appkit-next-reject 'unknown-inbox-message))))))
+(defun chirp-dm-inbox--commit (context app input result)
+  "Commit INPUT's gated RESULT in APP and reply to the requesting Surface."
+  (let* ((view (appkit-app-surface app (plist-get input :identity)))
+         (state (and view (appkit-surface-model view)))
+         (source (appkit-transition-context-source-address context))
+         (table (chirp--session-dm-conversations (appkit-app-model app))))
+    (when (and (appkit-surface-live-p view)
+               (equal source (plist-get state :request-address))
+               (eq (plist-get input :token) (plist-get state :request-token)))
+      (let ((canonical (mapcar (lambda (snapshot)
+                                (chirp-dm-state--acquire-preview table snapshot))
+                              (car result))))
+        (cons
+         (appkit-command-post-message
+          :target source :delivery 'report
+          :message (list 'chirp-dm-inbox 'committed input
+                         (mapcar (lambda (item) (plist-get item :id)) canonical)
+                         (chirp-backend-envelope-next-cursor (cadr result))))
+         (mapcar (lambda (conversation)
+                   (chirp-dm-state--publish-command
+                    conversation (plist-get (car (plist-get conversation :events)) :id)))
+                 canonical))))))
+
+(defun chirp-dm-inbox--update (context model message)
+  "Accept inbox MESSAGE through the owning Surface's update."
+  (let* ((kind (nth 1 message))
+         (view (appkit-current-surface))
+         (status (chirp-dm-inbox--status model))
+         (table (chirp--session-dm-conversations
+                 (appkit-app-read-view-model
+                  (appkit-transition-context-app-read-view context))))
+         commands)
+    (pcase kind
+      ((or 'start 'canonical-resync)
+       (let* ((phase (if (eq kind 'start) (nth 2 message) 'refresh))
+              (token (make-symbol "chirp-inbox"))
+              (cursor (and (eq phase 'older)
+                           (plist-get (plist-get model :page) :next-cursor))))
+         (setf (plist-get model :request-token) token
+               (plist-get model :request-address) (appkit-transition-context-owner-address context)
+               (plist-get model :loading-p) t
+               (plist-get status :phase) phase (plist-get status :message) nil)
+         (setq commands
+               (list (chirp-dm-inbox--effect
+                      view (list :identity (appkit-surface-identity view)
+                                 :token token :phase phase :cursor cursor))))))
+      ('canonical-changed
+       (let* ((payload (nth 2 message))
+              (conversation (gethash (plist-get payload :id) table)))
+         (when (and conversation (plist-get payload :promote))
+           (setf (plist-get model :items)
+                 (cons conversation (delq conversation
+                                          (copy-sequence (plist-get model :items))))))))
+      ('result
+       (let ((input (nth 2 message)) (result (nth 3 message)) (error (nth 4 message)))
+         (when (eq (plist-get input :token) (plist-get model :request-token))
+           (if error
+               (setf (plist-get status :phase) 'error
+                     (plist-get status :message) error
+                     (plist-get model :loading-p) nil
+                     (plist-get model :request-token) nil)
+             (setq commands
+                   (list (appkit-command-post-message
+                          :target (appkit-transition-context-parent-address context)
+                          :message (list 'chirp-dm-state 'inbox-commit (list input result))
+                          :delivery 'report)))))))
+      ('committed
+       (let ((input (nth 2 message)))
+         (when (eq (plist-get input :token) (plist-get model :request-token))
+           (let ((canonical (delq nil (mapcar (lambda (id) (gethash id table)) (nth 3 message))))
+                 (page (plist-get model :page)) (cursor (nth 4 message)))
+             (setf (plist-get model :items)
+                   (if (eq (plist-get input :phase) 'older)
+                       (chirp-dm-inbox--append-unique
+                        (plist-get model :items) canonical (lambda (item) (plist-get item :id)))
+                     canonical)
+                   (plist-get page :next-cursor) cursor
+                   (plist-get page :exhausted-p) (not cursor)
+                   (plist-get status :phase) 'idle (plist-get status :message) nil
+                   (plist-get model :loading-p) nil (plist-get model :request-token) nil)))))
+      (_ (error "Unsupported inbox message: %S" message)))
+    (appkit-next :model model
+                 :render (appkit-projection-change-create
+                          :full-p t :frame-p t :position 'preserve)
+                 :commands commands)))
 
 (defun chirp-dm-inbox--request (view phase)
-  "Start inbox request PHASE with exact latest-request ownership in VIEW."
-  (pcase-let* ((state (chirp-dm-inbox--state view))
-               ((map (:request-handle previous) :page) state)
-               (app (appkit-surface-app view))
-               (token (list chirp-dm-inbox--request-key))
-               (cursor (and (eq phase 'older) (map-elt page :next-cursor))))
-    ;; Revoke the old token before cancellation can invoke its errback.
-    (appkit-surface-send view (list 'chirp-dm-inbox 'start state token phase))
-    (chirp-dm-inbox--cancel-handle previous)
-    (let* ((chirp--app app)
-           (handle
-            (chirp-backend-dm-inbox
-             (lambda (conversations envelope)
-               (when (chirp-dm-inbox--request-current-p view state token)
-                 (let* ((chirp--app app)
-                        (canonical
-                         (mapcar #'chirp-dm-state-acquire-preview conversations)))
-                   (appkit-surface-send
-                    view (list 'chirp-dm-inbox 'success state token phase
-                               canonical
-                               (chirp-backend-envelope-next-cursor envelope))))))
-             :cursor cursor :max-results chirp-dm-inbox-page-size
-             :errback
-             (lambda (text)
-               (when (chirp-dm-inbox--request-current-p view state token)
-                 (appkit-surface-send
-                  view (list 'chirp-dm-inbox 'error state token text))))
-             :owner view)))
-      (if (chirp-dm-inbox--request-current-p view state token)
-          (appkit-surface-send
-           view (list 'chirp-dm-inbox 'bind state token handle))
-        (chirp-dm-inbox--cancel-handle handle)))))
-
+  "Ask VIEW's update to replace its inbox Effect with PHASE."
+  (appkit-surface-send view (list 'chirp-dm-inbox 'start phase)))
 (defun chirp-dm-inbox-refresh-live-view (view)
   "Start a fallback live refresh for inbox VIEW when it is idle.\n\nReturn non-nil when the refresh was accepted."
   (when

@@ -278,13 +278,14 @@ The embedded SDK configuration remains serialized JSON with native field names."
                    :key-version "0"))))
 
 (defun chirp-dm-test--drain (surface)
-  "Commit queued Surface and Resource coordinator deliveries for SURFACE."
-  (let ((surface-loop (appkit-surface-loop surface))
-        (app-loop (appkit-app-loop (appkit-surface-app surface))))
-    (while (> (+ (appkit-loop-pending-count surface-loop)
-                 (appkit-loop-pending-count app-loop)) 0)
-      (appkit-loop-run-pass app-loop)
-      (appkit-loop-run-pass surface-loop))))
+  "Commit queued App, Surface, topic, and deferred decrypt deliveries."
+  (let* ((app (appkit-surface-app surface))
+         (loops (cons (appkit-app-loop app)
+                      (mapcar #'appkit-surface-loop (appkit-app--surface-snapshot app)))))
+    (sleep-for 0.01)
+    (while (cl-some (lambda (loop) (> (appkit-loop-pending-count loop) 0)) loops)
+      (mapc #'appkit-loop-run-pass loops)
+      (sleep-for 0.01))))
 
 (provide 'chirp-dm-test-helper)
 
