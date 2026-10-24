@@ -16,6 +16,14 @@
        '(("https://x.com/alice/status/123" (:kind tweet :id "123"))
          ("https://www.twitter.com/alice/status/123/history?s=20"
           (:kind edit-history :id "123"))
+         ("https://fixupx.com/alice/status/123" (:kind tweet :id "123"))
+         ("https://www.fixupx.com/i/status/123" (:kind tweet :id "123"))
+         ("https://fxtwitter.com/alice/status/123/video/1?s=20"
+          (:kind tweet :id "123"))
+         ("https://d.fxtwitter.com/alice/status/123" (:kind tweet :id "123"))
+         ("https://vxtwitter.com/alice" (:kind profile :handle "alice"))
+         ("https://twittpr.com/alice/status/123/history"
+          (:kind edit-history :id "123"))
          ("https://x.com/i/web/status/123" (:kind tweet :id "123"))
          ("https://x.com/i/status/123" (:kind tweet :id "123"))
          ("https://x.com/alice" (:kind profile :handle "alice"))
@@ -40,6 +48,8 @@
                  "https://user@x.com/alice/status/123"
                  "https://x.com:444/alice/status/123"
                  "https://mobile.twitter.com/alice/status/123"
+                 "http://fixupx.com/alice/status/123"
+                 "https://fixupx.com.evil.example/alice/status/123"
                  "https://x.com/search"
                  "https://x.com/notifications"
                  "not a url"))
@@ -56,7 +66,22 @@
                   '(:url "https://x.com/alice/status/123"))
                  "123"))
   (should-not (chirp-url-tweet-id
-               "https://example.com/alice/status/123")))
+               "https://example.com/alice/status/123"))
+  (should (equal (chirp-url-tweet-id
+                  "https://fixupx.com/alice/status/123")
+                 "123")))
+
+(ert-deftest chirp-url-browse-regexp-routes-trusted-hosts ()
+  "Browse routing should claim X links and their embed mirrors."
+  (dolist (url '("https://x.com/alice/status/123"
+                 "https://twitter.com/alice"
+                 "https://fixupx.com/alice/status/123"
+                 "https://fxtwitter.com/alice/status/123"))
+    (should (string-match-p chirp-url-browse-regexp url)))
+  (should-not (string-match-p chirp-url-browse-regexp
+                              "https://fixupx.com.evil.example/alice"))
+  (should-not (string-match-p chirp-url-browse-regexp
+                              "http://fixupx.com/alice")))
 
 (ert-deftest chirp-open-url-routes-each-target-through-public-command ()
   "The public URL command should dispatch every parsed destination."
@@ -95,6 +120,7 @@
                      "https://x.com/search?q=emacs"
                      "https://x.com/alice/status/123"
                      "https://x.com/alice/status/123/history"
+                     "https://fixupx.com/alice/status/123/photo/1"
                      "https://x.com/alice"
                      "https://x.com/alice/followers"
                      "https://x.com/alice/following"
@@ -104,7 +130,8 @@
     (should
      (equal (nreverse calls)
             '((home) (bookmarks) (direct-messages) (search "emacs")
-              (tweet "123") (edit-history "123") (profile "alice")
+              (tweet "123") (edit-history "123") (tweet "123")
+              (profile "alice")
               (followers "alice") (following-users "alice")
               (likes "alice") (list "456"))))))
 

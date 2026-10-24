@@ -5,7 +5,8 @@
 
 ;;; Commentary:
 
-;; Parse trusted X and legacy Twitter URLs into Chirp domain targets.
+;; Parse trusted X, legacy Twitter, and embed-mirror URLs into Chirp domain
+;; targets.
 
 ;;; Code:
 
@@ -16,7 +17,12 @@
 ;;; URL Grammar
 
 (defconst chirp-url--trusted-hosts
-  '("x.com" "www.x.com" "twitter.com" "www.twitter.com")
+  '("x.com" "www.x.com" "twitter.com" "www.twitter.com"
+    ;; Embed-fixing mirrors shared through chat apps.  They serve X's paths
+    ;; but Chirp itself only talks to X.
+    "fxtwitter.com" "www.fxtwitter.com" "d.fxtwitter.com"
+    "fixupx.com" "www.fixupx.com" "fixvx.com" "www.fixvx.com"
+    "vxtwitter.com" "www.vxtwitter.com" "twittpr.com" "www.twittpr.com")
   "HTTPS hosts accepted as X URL targets.")
 
 (defconst chirp-url-browse-regexp
@@ -69,7 +75,7 @@
   "Parse VALUE as a trusted X URL target, or return nil.
 
 The returned plist contains `:kind' and destination-specific identity.  Only
-HTTPS URLs on X or legacy Twitter hosts are accepted."
+HTTPS URLs on X, legacy Twitter, or an embed-mirror host are accepted."
   (when (stringp value)
     (condition-case nil
         (let* ((parsed (url-generic-parse-url (string-trim value)))
