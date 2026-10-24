@@ -256,7 +256,9 @@ Return its canonical conversation, or nil if metadata has not been loaded."
             (chirp-dm-state-merge-events
              (plist-get canonical :events) (list event))))))
       (_ (error "Unsupported canonical DM operation: %S" message)))
-    (appkit-next :model session :render appkit-render-none :commands commands)))
+    (if (and (eq (nth 1 message) 'history-commit) (null commands))
+        (appkit-next-reject 'missing-dm-conversation)
+      (appkit-next :model session :render appkit-render-none :commands commands))))
 
 (defun chirp-dm-state-request-cancellation (request)
   "Adapt raw backend REQUEST to the owning Effect's cancellation."

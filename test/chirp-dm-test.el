@@ -1794,7 +1794,8 @@
                 (chirp-dm-test--drain view)
                 (should (= (length callbacks) 2))
                 (with-current-buffer buffer (should (eq (appkit-chat-history-loading) 'refresh)))
-                (should (plist-get (appkit-surface-model view) :history-token))
+                (should (appkit-effect-runtime-request
+                         (appkit-surface-effect-runtime view) appkit-chat-history-effect-key))
                 (funcall (car callbacks) (chirp-dm-test--normalized-conversation old fresh) nil)
                 (chirp-dm-test--drain view)
                 (with-current-buffer buffer (should-not (appkit-chat-history-loading-p)))))))
@@ -1858,6 +1859,30 @@
               (kill-buffer buffer)
               (should (= canceled 1)))))
       (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
+(ert-deftest chirp-dm-history-rejected-commit-releases-request ()
+  "Losing the canonical conversation while a commit waits ends loading."
+  (let ((chirp--app nil) buffer callback)
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'chirp-backend-dm-conversation-data)
+                     (lambda (_id accept &rest _options) (setq callback accept) 'request)))
+            (let ((old (chirp-dm-test--normalized-event "20" "20" "old")))
+              (setq buffer (chirp-dm-conversation-open (chirp-dm-test--normalized-conversation old)))
+              (let ((view (with-current-buffer buffer (appkit-current-surface))))
+                (chirp-dm-test--drain view)
+                (chirp-dm-conversation--request view 'refresh)
+                (funcall callback (chirp-dm-test--normalized-conversation old) nil)
+                (appkit-loop-run-pass (appkit-surface-loop view))
+                (remhash (chirp-dm-conversation--id (appkit-surface-model view))
+                         (chirp--session-dm-conversations (appkit-app-model chirp--app)))
+                (chirp-dm-test--drain view)
+                (with-current-buffer buffer (should-not (appkit-chat-history-loading-p)))
+                (should-not (appkit-effect-runtime-request
+                             (appkit-surface-effect-runtime view) appkit-chat-history-effect-key))
+                (should (eq 'error (plist-get (chirp-dm-conversation--status
+                                              (appkit-surface-model view)) :phase)))))))
+      (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
 (provide 'chirp-dm-test)
 
 ;;; chirp-dm-test.el ends here

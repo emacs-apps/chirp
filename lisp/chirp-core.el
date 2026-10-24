@@ -3117,6 +3117,15 @@ over the card's `t.co` permalink."
 (defun chirp--surface-update (context model message)
   "Commit domain messages or projection work on the exact owning Surface."
   (cond
+   ((appkit-delivery-report-p message)
+    (pcase (appkit-delivery-report-correlation message)
+      ('chirp-dm-inbox
+       (chirp-dm-inbox--update
+        context model '(chirp-dm-inbox failed "Inbox request could not be committed")))
+      ((pred (lambda (key) (eq key appkit-chat-history-effect-key)))
+       (chirp-dm-conversation--update
+        context model '(chirp-dm-conversation history-failed "History request could not be committed")))
+      (_ (appkit-next :model model :render appkit-render-none))))
    ((appkit-projection-change-p message)
     (appkit-next
      :model model
@@ -3127,11 +3136,9 @@ over the card's `t.co` permalink."
     (let ((state (cadr message)))
       (pcase (plist-get state :type)
         ('dm-conversation
-         (appkit-chat-history-loading-set nil)
-         (setf (plist-get state :history-token) nil))
+         (appkit-chat-history-loading-set nil))
         ('dm-inbox
-         (setf (plist-get state :loading-p) nil
-               (plist-get state :request-token) nil)))
+         (setf (plist-get state :loading-p) nil)))
       (dolist (pair '((:media-intent) (:media-phase . idle) (:media-error)))
         (unless (plist-member state (car pair))
           (nconc state (list (car pair) (cdr pair)))))
