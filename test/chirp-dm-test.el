@@ -1818,6 +1818,46 @@
               (should-not (plist-get (appkit-surface-model view) :loading-p)))))
       (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
+
+(ert-deftest chirp-dm-render-recovery-preserves-running-history ()
+  "Rebuilding presentation must keep the current window and loading gate."
+  (let ((chirp--app nil) buffer request (canceled 0))
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'chirp-backend-dm-history)
+                     (lambda (_id _cursor _callback &rest options)
+                       (setq request
+                             (appkit-register-handle
+                              (plist-get options :owner) 'function 'history
+                              (lambda (_value) (cl-incf canceled)))))))
+            (setq buffer
+                  (chirp-dm-conversation-open
+                   (chirp-dm-test--normalized-conversation
+                    (chirp-dm-test--normalized-event "20" "20" "old")
+                    (chirp-dm-test--normalized-event "30" "30" "latest"))))
+            (let* ((view (with-current-buffer buffer (appkit-current-surface)))
+                   (renderer (appkit-surface-renderer view))
+                   (render (appkit-generated-renderer-render renderer)))
+              (chirp-dm-test--drain view)
+              (with-current-buffer buffer (appkit-chat-history-window-set "20" "20"))
+              (unwind-protect
+                  (progn
+                    (setf (appkit-generated-renderer-render renderer)
+                          (lambda (&rest _) (error "Recoverable render failure")))
+                    (chirp-dm-conversation--request view 'older)
+                    (should (appkit-handle-alive-p request))
+                    (should (= canceled 0))
+                    (should (eq (appkit-surface-status view) 'running))
+                    (with-current-buffer buffer
+                      (should (eq (appkit-chat-history-loading) 'older))
+                      (should (equal (appkit-chat-history-window-first-key) "20"))
+                      (should (equal (appkit-chat-history-window-last-key) "20"))
+                      (should (appkit-chat-timeline-node "20"))
+                      (should-not (appkit-chat-timeline-node "30"))))
+                (setf (appkit-generated-renderer-render renderer) render))
+              (kill-buffer buffer)
+              (should (= canceled 1)))))
+      (chirp-stop) (when (buffer-live-p buffer) (kill-buffer buffer)))))
 (provide 'chirp-dm-test)
 
 ;;; chirp-dm-test.el ends here

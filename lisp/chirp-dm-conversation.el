@@ -684,11 +684,11 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
    :footer ""))
 
 (defun chirp-dm-conversation--setup (view)
-  "Mount Appkit chat presentation for conversation VIEW."
+  "Build chat presentation for VIEW, preserving an existing history window."
   (let ((state (chirp-dm-conversation--state view)))
     (appkit-chatbuf-reset-state)
-    (appkit-chat-history-reset-state)
-    (chirp-dm-conversation--establish-window state)
+    (unless (appkit-chat-history-window-known-p)
+      (chirp-dm-conversation--establish-window state))
     (chirp-dm-conversation--ensure-timeline)))
 
 (defun chirp-dm-conversation--decrypt-wakeup
