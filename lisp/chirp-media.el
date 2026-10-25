@@ -1662,7 +1662,7 @@ lazy; only existing preview files are consulted here."
                    :noquery t))
             (set-process-query-on-exit-flag process nil)
             (message "Opening video with %s" program))
-        (browse-url url))
+        (appkit-url-open-external url))
     (user-error "Current media is not a video or GIF")))
 
 (defun chirp-media-play-video (media &optional external)

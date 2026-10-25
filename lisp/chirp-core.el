@@ -28,6 +28,7 @@
 (require 'let-alist)
 (require 'subr-x)
 (require 'browse-url)
+(require 'appkit-url)
 (require 'json)
 (require 'xml)
 (require 'warnings)
@@ -1054,7 +1055,7 @@ revisited later."
                   (plist-get entry :url)
                   (plist-get entry :profile-url))))
     (if url
-        (browse-url url)
+        (appkit-url-open-external url)
       (user-error "No URL available at point"))))
 
 ;;; Payload Normalization

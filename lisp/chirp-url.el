@@ -111,6 +111,14 @@ HTTPS URLs on X, legacy Twitter, or an embed-mirror host are accepted."
     (or (plist-get value :id)
         (chirp-url-tweet-id (plist-get value :url))))))
 
+(declare-function appkit-url-register "appkit-url" (name matcher handler))
+
+;;;###autoload
+(with-eval-after-load 'appkit-url
+  (autoload 'chirp-url-parse "chirp-url")
+  (autoload 'chirp-open-url "chirp" nil t)
+  (appkit-url-register 'chirp #'chirp-url-parse #'chirp-open-url))
+
 (provide 'chirp-url)
 
 ;;; chirp-url.el ends here

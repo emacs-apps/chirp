@@ -585,19 +585,18 @@ rerender and creates a CPU loop."
                    '("/usr/bin/mpv" "--geometry=1280x720" "https://example.com/video.mp4")))))
 
 (ert-deftest chirp-media-play-falls-back-to-browser-when-player-is-disabled ()
-  "When no external player is configured, Chirp should browse the media URL."
+  "With no player, explicitly use an external browser for the media URL."
   (let ((chirp-video-player-command nil)
         (chirp-video-use-internal-player nil)
-        browsed-url)
+        call)
     (with-temp-buffer
       (setq-local chirp--media-list '((:type "animated_gif"
                                        :url "https://example.com/anim.mp4")))
       (setq-local chirp--media-index 0)
-      (cl-letf (((symbol-function 'browse-url)
-                 (lambda (url &rest _args)
-                   (setq browsed-url url))))
+      (cl-letf (((symbol-function 'browse-url-with-browser-kind)
+                 (lambda (&rest args) (setq call args))))
         (chirp-media-play-video (car chirp--media-list) t)))
-    (should (equal browsed-url "https://example.com/anim.mp4"))))
+    (should (equal call '(external "https://example.com/anim.mp4" nil)))))
 
 (ert-deftest chirp-media-download-url-prefers-original-photo-and-highest-video-variant ()
   "Downloads should prefer original photos and the highest bitrate video URL."

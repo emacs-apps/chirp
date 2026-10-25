@@ -6,6 +6,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'appkit-url)
 (require 'chirp-url)
 (require 'chirp)
 
@@ -139,6 +140,44 @@
   "The public URL command should surface an unsupported X location."
   (should-error (chirp-open-url "https://x.com/notifications")
                 :type 'user-error))
+
+(ert-deftest chirp-url-handler-claims-only-supported-destinations ()
+  "Chirp's registered predicate leaves unknown X pages and other hosts alone."
+  (let ((appkit-url--handlers (list (assq 'chirp appkit-url--handlers)))
+        (appkit-url-mode nil)
+        (browse-url-handlers nil)
+        (browse-url-default-handlers nil))
+    (should (car appkit-url--handlers))
+    (appkit-url-mode 1)
+    (dolist (url '("https://x.com/alice/status/123"
+                   "https://twitter.com/alice"
+                   "https://fixupx.com/alice/status/123"
+                   "https://x.com/search?q=emacs"
+                   "https://x.com/home"))
+      (should (eq (browse-url-select-handler url 'internal) #'chirp-open-url))
+      (should-not (browse-url-select-handler url 'external)))
+    (dolist (url '("https://x.com/"
+                   "https://x.com/notifications"
+                   "https://x.com/search"
+                   "https://x.com.evil.example/alice/status/123"
+                   "https://example.org/"))
+      (should-not (browse-url-select-handler url)))
+    (appkit-url-mode -1)
+    (should-not (browse-url-select-handler "https://x.com/alice/status/123"))))
+
+(ert-deftest chirp-browse-at-point-uses-an-external-browser ()
+  "Opening the current entry in a browser cannot dispatch back into Chirp."
+  (let (call)
+    (cl-letf (((symbol-function 'chirp-media-at-point) (lambda () nil))
+              ((symbol-function 'chirp-entry-at-point) (lambda () nil))
+              ((symbol-function 'chirp--text-property-at-point)
+               (lambda (&rest _) nil))
+              ((symbol-function 'chirp-entry-url-at-point)
+               (lambda () "https://x.com/alice/status/123"))
+              ((symbol-function 'browse-url-with-browser-kind)
+               (lambda (&rest args) (setq call args))))
+      (chirp-browse-at-point))
+    (should (equal call '(external "https://x.com/alice/status/123" nil)))))
 
 (provide 'chirp-url-test)
 
