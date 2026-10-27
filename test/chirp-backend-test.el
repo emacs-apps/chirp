@@ -1002,6 +1002,40 @@ NESTED-ENTRY-ID identifies the tweet's occurrence inside the module."
     (should (equal (mapcar (lambda (tweet) (plist-get tweet :liked-p)) tweets)
                    '(t t)))))
 
+(ert-deftest chirp-backend-history-forwards-page-size-and-cursor ()
+  "Bookmarks and likes must preserve both directions of the pagination contract."
+  (dolist (kind '(bookmarks likes))
+    (let (variables tweets next-cursor)
+      (cl-letf (((symbol-function 'chirp-backend-user)
+                 (lambda (_handle callback &optional _errback)
+                   (funcall callback '(:id "42") nil)))
+                ((symbol-function 'chirp-x-graphql-request)
+                 (lambda (_operation request-variables callback &rest _options)
+                   (setq variables request-variables)
+                   (funcall
+                    callback
+                    (chirp-backend-test--timeline-payload
+                     (if (eq kind 'bookmarks)
+                         '(data bookmark_timeline_v2 timeline)
+                       '(data user result timeline timeline))
+                     (list
+                      (chirp-backend-test--timeline-entry
+                       '((rest_id . "1") (legacy . ((full_text . "Older")))))
+                      (chirp-backend-test--bottom-cursor "next")))))))
+        (let ((success (lambda (items envelope)
+                         (setq tweets items
+                               next-cursor
+                               (chirp-backend-envelope-next-cursor envelope)))))
+          (if (eq kind 'bookmarks)
+              (chirp-backend-bookmarks success nil 7 "previous")
+            (chirp-backend-likes "alice" success nil 7 "previous"))))
+      (should (= (alist-get "count" variables nil nil #'equal) 7))
+      (should (equal (alist-get "cursor" variables nil nil #'equal) "previous"))
+      (should (equal next-cursor "next"))
+      (should (equal (mapcar (lambda (tweet) (plist-get tweet :id)) tweets) '("1")))
+      (when (eq kind 'likes)
+        (should (plist-get (car tweets) :liked-p))))))
+
 (ert-deftest chirp-backend-user-replies-shapes-direct-request ()
   "Replies should use X search with a handle filter and cursor."
   (let (operation variables)

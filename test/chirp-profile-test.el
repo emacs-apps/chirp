@@ -376,67 +376,69 @@
 
 (ert-deftest chirp-profile-load-more-uses-current-subview-fetcher ()
   "Loading more should use the active profile subview command."
-  (let ((chirp--app nil) (buffer (generate-new-buffer " *chirp-profile-load-more-replies*"))
-        user-callback
-        initial-callback
-        whoami-callback
-        older-callback)
-    (unwind-protect
-        (cl-letf (((symbol-function 'chirp-begin-background-request)
-                   (lambda (_buffer _title)
-                     'profile-token))
-                  ((symbol-function 'chirp-begin-request)
-                   (lambda (_buffer)
-                     'profile-token))
-                  ((symbol-function 'chirp-request-current-p)
-                   (lambda (_buffer token)
-                     (eq token 'profile-token)))
-                  ((symbol-function 'chirp-backend-user)
-                   (lambda (_handle callback &optional _errback)
-                     (setq user-callback callback)))
-                  ((symbol-function 'chirp-backend-whoami)
-                   (lambda (callback &optional _errback)
-                     (setq whoami-callback callback)))
-                  ((symbol-function 'chirp-backend-user-replies)
-                   (lambda (_handle callback &optional _errback _max-results cursor)
-                     (if cursor
-                         (setq older-callback callback)
-                       (setq initial-callback callback))))
-                  ((symbol-function 'chirp-display-buffer) #'ignore)
-                  ((symbol-function 'chirp-media-prefetch-user) #'ignore)
-                  ((symbol-function 'chirp-media-prefetch-tweets) #'ignore)
-                  ((symbol-function 'chirp-enrich-quoted-tweets) #'ignore))
-          (setq buffer (chirp-profile-open "alice" 'replies))
-          (funcall user-callback
-                   '(:kind user :handle "alice" :name "Alice" :bio ""
-                     :posts 12 :following 3 :followers 4)
-                   nil)
-          (funcall whoami-callback '(:kind user :handle "bob") nil)
-          (funcall initial-callback
-                   (list '(:kind tweet :id "1" :text "first reply"
-                           :author-handle "alice"))
-                   '((pagination . ((nextCursor . "cursor-prev")))))
-          (with-current-buffer buffer
-            (let ((loop (appkit-surface-loop (appkit-current-surface))))
-              (while (> (appkit-loop-pending-count loop) 0)
-                (appkit-loop-run-pass loop)))
-            (chirp-profile-load-more)
-            (funcall older-callback
-                     (list '(:kind tweet :id "2" :text "second reply"
-                             :author-handle "alice"))
-                     '((pagination . ((nextCursor . "cursor-next")))))
-            (let ((loop (appkit-surface-loop (appkit-current-surface))))
-              (while (> (appkit-loop-pending-count loop) 0)
-                (appkit-loop-run-pass loop)))
-            (should (string-match-p "first reply" (buffer-string)))
-            (let ((loop (appkit-surface-loop (appkit-current-surface))))
-              (while (> (appkit-loop-pending-count loop) 0)
-                (appkit-loop-run-pass loop)))
-            (should (string-match-p "second reply" (buffer-string)))
-            (should (equal chirp--timeline-next-cursor "cursor-next"))))
-      (chirp-stop)
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
+  (dolist (mode '(replies likes))
+    (let ((chirp--app nil) (buffer (generate-new-buffer " *chirp-profile-load-more-replies*"))
+          user-callback
+          initial-callback
+          whoami-callback
+          older-callback)
+      (unwind-protect
+          (cl-letf (((symbol-function 'chirp-begin-background-request)
+                     (lambda (_buffer _title)
+                       'profile-token))
+                    ((symbol-function 'chirp-begin-request)
+                     (lambda (_buffer)
+                       'profile-token))
+                    ((symbol-function 'chirp-request-current-p)
+                     (lambda (_buffer token)
+                       (eq token 'profile-token)))
+                    ((symbol-function 'chirp-backend-user)
+                     (lambda (_handle callback &optional _errback)
+                       (setq user-callback callback)))
+                    ((symbol-function 'chirp-backend-whoami)
+                     (lambda (callback &optional _errback)
+                       (setq whoami-callback callback)))
+                    ((symbol-function (if (eq mode 'likes) 'chirp-backend-likes
+					'chirp-backend-user-replies))
+                     (lambda (_handle callback &optional _errback _max-results cursor)
+                       (if cursor
+                           (setq older-callback callback)
+			 (setq initial-callback callback))))
+                    ((symbol-function 'chirp-display-buffer) #'ignore)
+                    ((symbol-function 'chirp-media-prefetch-user) #'ignore)
+                    ((symbol-function 'chirp-media-prefetch-tweets) #'ignore)
+                    ((symbol-function 'chirp-enrich-quoted-tweets) #'ignore))
+            (setq buffer (chirp-profile-open "alice" mode))
+            (funcall user-callback
+                     '(:kind user :handle "alice" :name "Alice" :bio ""
+			     :posts 12 :following 3 :followers 4)
+                     nil)
+            (funcall whoami-callback '(:kind user :handle "alice") nil)
+            (funcall initial-callback
+                     (list '(:kind tweet :id "1" :text "first reply"
+				   :author-handle "alice"))
+                     '((pagination . ((nextCursor . "cursor-prev")))))
+            (with-current-buffer buffer
+              (let ((loop (appkit-surface-loop (appkit-current-surface))))
+		(while (> (appkit-loop-pending-count loop) 0)
+                  (appkit-loop-run-pass loop)))
+              (chirp-profile-load-more)
+              (funcall older-callback
+                       (list '(:kind tweet :id "2" :text "second reply"
+				     :author-handle "alice"))
+                       '((pagination . ((nextCursor . "cursor-next")))))
+              (let ((loop (appkit-surface-loop (appkit-current-surface))))
+		(while (> (appkit-loop-pending-count loop) 0)
+                  (appkit-loop-run-pass loop)))
+              (should (string-match-p "first reply" (buffer-string)))
+              (let ((loop (appkit-surface-loop (appkit-current-surface))))
+		(while (> (appkit-loop-pending-count loop) 0)
+                  (appkit-loop-run-pass loop)))
+              (should (string-match-p "second reply" (buffer-string)))
+              (should (equal chirp--timeline-next-cursor "cursor-next"))))
+	(chirp-stop)
+	(when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest chirp-profile-open-adds-likes-mode-for-own-profile ()
   "Own profiles should expose a Likes mode in the profile strip."
