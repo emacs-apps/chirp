@@ -813,6 +813,8 @@ REFRESH reloads the collection."
         :items nil
         :title title
         :refresh refresh
+        :fetch-page nil
+        :page (list :next-cursor nil :exhausted-p nil)
         :status (list :phase 'initial :message nil)
         :expanded-tweet-ids (make-hash-table :test #'equal)
         :loaded-p nil))
@@ -830,43 +832,74 @@ REFRESH reloads the collection."
    :printer #'chirp-render-print-tweet-row
    :select t))
 
-(defun chirp-timeline--install-tweets (view tweets)
-  "Install TWEETS into collection VIEW and request a projection sync."
-  (let
-      ((state (appkit-surface-model view))
-       (buffer (appkit-surface-buffer view)))
-    (setf (plist-get state :items) tweets (plist-get state :loaded-p)
-          t (plist-get (plist-get state :status) :phase) 'idle
-          (plist-get (plist-get state :status) :message) nil)
-    (appkit-surface-post view
-                         (appkit-projection-change-create
-                          :position
-                          (plist-get
-                           (list
-                            :position
-                            'first)
-                           :position)))
-    (appkit-surface-post view
-                         (appkit-projection-change-create
-                          :full-p t
-                          :frame-p t
-                          :position 'preserve))
-    nil (chirp-clear-status buffer)
+(defun chirp-timeline--install-tweets (view tweets &optional envelope older)
+  "Install TWEETS and pagination ENVELOPE into collection VIEW.
+When OLDER is non-nil, append unique posts and preserve the reading position."
+  (let* ((state (appkit-surface-model view))
+         (buffer (appkit-surface-buffer view))
+         (page (plist-get state :page))
+         (cursor (plist-get page :next-cursor))
+         (next-cursor (chirp-backend-envelope-next-cursor envelope))
+         (current (and older (plist-get state :items)))
+         (merged (chirp-append-unique-tweets current tweets)))
+    (setf (plist-get state :items) merged
+          (plist-get state :loaded-p) t
+          (plist-get (plist-get state :status) :phase) 'idle
+          (plist-get (plist-get state :status) :message) nil
+          (plist-get page :next-cursor) next-cursor
+          (plist-get page :exhausted-p)
+          (or (not next-cursor) (and older (equal cursor next-cursor))))
+    (appkit-surface-post
+     view (appkit-projection-change-create
+           :full-p t :frame-p t :position (if older 'preserve 'first)))
+    (chirp-clear-status buffer)
     (chirp-media-prefetch-tweets tweets buffer)
-    (chirp-enrich-quoted-tweets tweets buffer)))
+    (chirp-enrich-quoted-tweets tweets buffer)
+    (when (and older (= (length merged) (length current)))
+      (message "%s" (if (plist-get page :exhausted-p)
+                       "No older posts."
+                     "No additional posts on this page; load more to continue.")))))
 
-(defun chirp-timeline--fetch-collection (view title refresh fetch-fn)
-  "Run FETCH-FN for collection VIEW titled TITLE.\nREFRESH retries the request after failure."
-  (let*
-      ((buffer (appkit-surface-buffer view))
-       (token (chirp-begin-background-request buffer title)))
-    (funcall fetch-fn
-             (lambda (tweets _envelope)
-               (when (chirp-request-current-p buffer token)
-                 (chirp-timeline--install-tweets view tweets)))
-             (lambda (message)
-               (when (chirp-request-current-p buffer token)
-                 (chirp-show-error buffer title refresh message))))
+(defun chirp-timeline--fetch-collection
+    (view title refresh fetch-fn &optional paginated older)
+  "Run FETCH-FN for collection VIEW titled TITLE.
+REFRESH retries the request after failure.  PAGINATED means FETCH-FN accepts
+optional count and cursor arguments; OLDER requests and appends the next page."
+  (let* ((state (appkit-surface-model view))
+         (buffer (appkit-surface-buffer view))
+         (token (chirp-begin-background-request buffer title))
+         (cursor (and older (plist-get (plist-get state :page) :next-cursor)))
+         (count (if older (max 1 chirp-timeline-load-more-step)
+                  chirp-default-max-results))
+         (success
+          (lambda (tweets envelope)
+            (when (chirp-request-current-p buffer token)
+              (chirp-timeline--install-tweets view tweets envelope older))))
+         (failure
+          (lambda (text)
+            (when (chirp-request-current-p buffer token)
+              (if (not older)
+                  (chirp-show-error buffer title refresh text)
+                (setf (plist-get (plist-get state :status) :phase) 'error
+                      (plist-get (plist-get state :status) :message) text)
+                (chirp-set-status buffer "Load more failed; press N to retry" 'error)
+                (appkit-surface-post
+                 view (appkit-projection-change-create
+                       :frame-p t :position 'preserve)))))))
+    (setf (plist-get state :fetch-page) (and paginated fetch-fn)
+          (plist-get (plist-get state :status) :phase) (if older 'older 'initial)
+          (plist-get (plist-get state :status) :message) nil)
+    (with-current-buffer buffer
+      (setq-local chirp--timeline-load-more-function
+                  (and paginated #'chirp-load-more)
+                  chirp--entry-wrap-navigation (not paginated)))
+    (appkit-surface-post
+     view (appkit-projection-change-create :frame-p t :position 'preserve))
+    (condition-case err
+        (if paginated
+            (funcall fetch-fn success failure count cursor)
+          (funcall fetch-fn success failure))
+      (error (funcall failure (error-message-string err))))
     buffer))
 
 ;;; Primary Commands
@@ -883,38 +916,56 @@ REFRESH reloads the collection."
   "Request an older page for VIEW, suppressing feedback when QUIET."
   (chirp-timeline--dispatch view 'request 'older quiet))
 
+(defun chirp-timeline--load-more-collection (view)
+  "Request the next page of the paginated collection VIEW."
+  (let* ((state (chirp-timeline--list-state view))
+         (page (plist-get state :page))
+         (phase (plist-get (plist-get state :status) :phase)))
+    (cond
+     ((memq phase '(initial older))
+      (message "Timeline request already in progress..."))
+     ((or (plist-get page :exhausted-p)
+          (not (plist-get page :next-cursor)))
+      (message "No older posts."))
+     (t
+      (chirp-timeline--fetch-collection
+       view (plist-get state :title) (plist-get state :refresh)
+       (plist-get state :fetch-page) t t)))))
+
 (defun chirp-load-more (&optional _anchor-id)
   "Load older posts, preserving the current semantic position."
   (interactive)
-  (cond
-   ((chirp-timeline--current-view)
-    (chirp-timeline--load-more-primary (chirp-timeline--current-view)))
-   ((and (appkit-current-surface)
-         (eq
-          (plist-get (appkit-surface-model (appkit-current-surface))
-                     :type)
-          'profile))
-    (chirp-profile-load-more))
-   (t (user-error "Current view does not support loading more posts"))))
+  (let* ((view (appkit-current-surface))
+         (state (and view (appkit-surface-model view))))
+    (cond
+     ((chirp-timeline--current-view)
+      (chirp-timeline--load-more-primary view))
+     ((and (eq (plist-get state :type) 'collection)
+           (plist-get state :fetch-page))
+      (chirp-timeline--load-more-collection view))
+     ((eq (plist-get state :type) 'profile)
+      (chirp-profile-load-more))
+     (t (user-error "Current view does not support loading more posts")))))
 
 ;;; Collection Commands
 
 (defun chirp-timeline-open-bookmarks ()
-  "Open bookmarks."
+  "Open bookmarks, with older pages available through `chirp-load-more'."
   (let ((refresh (lambda () (chirp-timeline-open-bookmarks))))
     (chirp-timeline--fetch-collection
      (chirp-timeline--ensure-collection 'bookmarks "Bookmarks" refresh)
-     "Bookmarks" refresh #'chirp-backend-bookmarks)))
+     "Bookmarks" refresh #'chirp-backend-bookmarks t)))
 
 (defun chirp-timeline--open-likes-for (handle)
-  "Open liked tweets for HANDLE."
+  "Open liked tweets for HANDLE, including access to older pages."
   (let* ((title (chirp-timeline--likes-title handle))
          (refresh (lambda () (chirp-timeline-open-likes handle)))
          (view (chirp-timeline--ensure-collection 'likes title refresh)))
     (chirp-timeline--fetch-collection
      view title refresh
-     (lambda (success errback)
-       (chirp-backend-likes handle success errback)))))
+     (lambda (success errback &optional max-results cursor)
+       (chirp-backend-likes handle success errback max-results cursor))
+     t)))
 
 (defun chirp-timeline-open-likes (&optional handle)
   "Open liked tweets for HANDLE.\n\nWhen HANDLE is nil, resolve the currently authenticated account first."

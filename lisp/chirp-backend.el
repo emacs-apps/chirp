@@ -2262,15 +2262,17 @@ ERRBACK handles failures and MAX-RESULTS limits the response."
 
 ;;; Search and Translation
 
-(defun chirp-backend-bookmarks (callback &optional errback)
-  "Fetch bookmarks and call CALLBACK, or ERRBACK on failure."
-  (let ((limit (chirp-backend--timeline-limit nil)))
+(defun chirp-backend-bookmarks (callback &optional errback max-results cursor)
+  "Fetch bookmarks and call CALLBACK, or ERRBACK on failure.
+MAX-RESULTS limits the response; CURSOR continues an earlier page."
+  (let ((limit (chirp-backend--timeline-limit max-results)))
     (chirp-backend--request-timeline
      'bookmarks
-     `(("count" . ,limit)
-       ("includePromotedContent" . :json-false)
-       ("latestControlAvailable" . t)
-       ("requestContext" . "launch"))
+     (append `(("count" . ,limit)
+               ("includePromotedContent" . :json-false)
+               ("latestControlAvailable" . t)
+               ("requestContext" . "launch"))
+             (when cursor `(("cursor" . ,cursor))))
      '((data bookmark_timeline timeline)
        (data bookmark_timeline_v2 timeline))
      limit callback
@@ -2377,22 +2379,25 @@ CALLBACK receives text with HTML entities decoded after joining chunks."
    callback
    errback))
 
-(defun chirp-backend-likes (handle callback &optional errback)
-  "Fetch liked tweets for HANDLE and call CALLBACK, or ERRBACK on failure."
+(defun chirp-backend-likes
+    (handle callback &optional errback max-results cursor)
+  "Fetch liked tweets for HANDLE and call CALLBACK, or ERRBACK on failure.
+MAX-RESULTS limits the response; CURSOR continues an earlier page."
   (let ((error-fn (or errback (lambda (message) (message "%s" message)))))
     (chirp-backend-user
      handle
      (lambda (user _envelope)
        (if-let* ((user-id (plist-get user :id)))
-           (let ((limit (chirp-backend--timeline-limit nil)))
+           (let ((limit (chirp-backend--timeline-limit max-results)))
              (chirp-backend--request-timeline
               'likes
-              `(("userId" . ,user-id)
-                ("count" . ,limit)
-                ("includePromotedContent" . :json-false)
-                ("withClientEventToken" . :json-false)
-                ("withBirdwatchNotes" . :json-false)
-                ("withVoice" . t))
+              (append `(("userId" . ,user-id)
+                        ("count" . ,limit)
+                        ("includePromotedContent" . :json-false)
+                        ("withClientEventToken" . :json-false)
+                        ("withBirdwatchNotes" . :json-false)
+                        ("withVoice" . t))
+                      (when cursor `(("cursor" . ,cursor))))
               chirp-backend--user-timeline-paths limit
               (lambda (tweets envelope)
                 (dolist (tweet tweets)

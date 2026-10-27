@@ -55,7 +55,7 @@
 
 (defun chirp-profile--paginated-mode-p (mode)
   "Return non-nil when profile MODE supports cursor-based pagination."
-  (memq mode '(posts replies highlights media)))
+  (memq mode '(posts replies highlights media likes)))
 
 (defun chirp-profile--title (handle mode)
   "Return a title for HANDLE profile subview MODE."
@@ -344,7 +344,7 @@ for paginated modes."
     ('media
      (chirp-backend-user-media handle callback errback max-results cursor))
     ('likes
-     (chirp-backend-likes handle callback errback))
+     (chirp-backend-likes handle callback errback max-results cursor))
     (_
      (funcall (or errback
                   (lambda (message)
