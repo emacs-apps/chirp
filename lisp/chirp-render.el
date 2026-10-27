@@ -771,42 +771,84 @@ remain hidden until the viewer has voted or voting has closed."
 (defvar chirp-render--quoted-tweet-depth 0
   "Dynamic nesting depth while rendering quoted tweets.")
 
+(defvar chirp-render--quoted-tweet-ancestors nil
+  "Tweet IDs already visited in the current quote chain.")
+
+(defun chirp-render--mark-subentry (start end tweet)
+  "Mark START..END as TWEET without replacing nested quote identities."
+  (while (< start end)
+    (let ((next (next-single-property-change
+                 start 'chirp-subentry-item nil end)))
+      (unless (get-text-property start 'chirp-subentry-item)
+        (add-text-properties
+         start next
+         (list 'chirp-subentry-item tweet
+               'chirp-subentry-url (plist-get tweet :url))))
+      (setq start next))))
+
+(defun chirp-render--insert-quote-link (quoted prefix)
+  "Insert a compact link to unexpanded QUOTED below PREFIX."
+  (appkit-ui-insert-card
+   (lambda (card-prefix)
+     (let ((start (point)))
+       (insert (propertize
+                (format "Quoted post · %s"
+                        (or (plist-get quoted :author-name)
+                            (plist-get quoted :id) "Open"))
+                'face 'chirp-link-face))
+       (appkit-ui-add-action start (point) #'chirp-open-entry-at-point
+                             :help-echo "Open quoted post")
+       (insert "\n")
+       (appkit-ui-apply-line-prefix start (point) card-prefix)))
+   :prefix prefix :border-face 'chirp-quoted-tweet-border-face
+   :properties (list 'chirp-subentry-item quoted
+                     'chirp-subentry-url (plist-get quoted :url))))
+
 (cl-defun chirp-render-insert-tweet-card
     (tweet &key prefix write-actions-p)
   "Insert normalized TWEET as a nested card with ordinary body text.
 
 PREFIX supplies outer indentation.  WRITE-ACTIONS-P controls mutation actions.
 Only local links and controls are mouse actions; the body remains scrollable."
-  (appkit-ui-insert-card (lambda (card-prefix)
-                           (let ((body-start (point)))
-                             (chirp-render--insert-tweet
-                              tweet
-                              :show-reply-context t
-                              :write-actions-p write-actions-p)
-                             (appkit-ui-apply-line-prefix body-start (point) card-prefix))) :prefix prefix :border-face 'chirp-quoted-tweet-border-face :properties
-                             `(chirp-subentry-item ,tweet
-                                                   chirp-subentry-url ,(plist-get tweet :url))))
+  (when-let* ((span
+               (appkit-ui-insert-card
+                (lambda (card-prefix)
+                  (let ((body-start (point)))
+                    (chirp-render--insert-tweet
+                     tweet
+                     :show-reply-context t
+                     :write-actions-p write-actions-p)
+                    (appkit-ui-apply-line-prefix body-start (point) card-prefix)))
+                :prefix prefix :border-face 'chirp-quoted-tweet-border-face)))
+    (chirp-render--mark-subentry (car span) (cdr span) tweet)
+    span))
 
 (defun chirp-render--insert-quoted-tweet
     (tweet &optional prefix prefix-face write-actions-p)
-  "Insert a normal tweet presentation inside TWEET's card.
+  "Insert TWEET's quoted post, preserving nested cards and local actions.
 
-PREFIX supplies the card's outer nesting indentation.  PREFIX-FACE is accepted
-for caller consistency; the card owns its border face.  WRITE-ACTIONS-P
-controls mutation actions.  Nested quoted tweets are omitted after one level."
+PREFIX supplies outer indentation.  PREFIX-FACE is accepted for caller
+consistency; the card owns its border face.  WRITE-ACTIONS-P controls mutation
+actions.  Unresolved, repeated, and depth-limited quotes retain an open link."
   (ignore prefix-face)
   (when-let* ((quoted (plist-get tweet :quoted-tweet))
-              ((not (plist-get quoted :deleted-p)))
-              ((< chirp-render--quoted-tweet-depth 1))
-              (span
-               (let ((chirp-render--quoted-tweet-depth
-                      (1+ chirp-render--quoted-tweet-depth)))
-                 (chirp-render-insert-tweet-card
-                  quoted
-                  :prefix prefix
-                  :write-actions-p write-actions-p))))
-    (put-text-property (car span) (1+ (car span))
-                       'chirp-entry-start nil)))
+              ((not (plist-get quoted :deleted-p))))
+    (let* ((chirp-render--quoted-tweet-ancestors
+            (cons (plist-get tweet :id) chirp-render--quoted-tweet-ancestors))
+           (span
+            (if (or (plist-get quoted :quote-placeholder-p)
+                    (>= chirp-render--quoted-tweet-depth
+                        chirp-quoted-tweet-max-depth)
+                    (member (plist-get quoted :id)
+                            chirp-render--quoted-tweet-ancestors))
+                (chirp-render--insert-quote-link quoted prefix)
+              (let ((chirp-render--quoted-tweet-depth
+                     (1+ chirp-render--quoted-tweet-depth)))
+                (chirp-render-insert-tweet-card
+                 quoted :prefix prefix :write-actions-p write-actions-p)))))
+      (when span
+        (put-text-property (car span) (1+ (car span))
+                           'chirp-entry-start nil)))))
 
 (defun chirp-render--insert-list-reply-context (tweet reply-parent &optional prefix prefix-face)
   "Insert a lightweight reply context line for TWEET above REPLY-PARENT.

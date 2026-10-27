@@ -2307,6 +2307,195 @@
       (should-error (chirp-previous-entry)
                     :type 'user-error))))
 
+(ert-deftest chirp-tweet-from-x-keeps-id-only-nested-quote ()
+  "Truncated GraphQL quotes retain a resolvable identity and no duplicate URL."
+  (let* ((middle-raw
+          '((rest_id . "2077714108661813324")
+            (legacy
+             . ((full_text . "Middle post https://t.co/quote")
+                (quoted_status_id_str . "2076607169047548354")
+                (entities
+                 . ((urls . (((url . "https://t.co/quote")
+                              (expanded_url . "https://x.com/example/status/2076607169047548354")
+                              (indices . (12 30)))))))))))
+         (tweet
+          (chirp--tweet-from-x
+           `((rest_id . "2077744499879739664")
+             (legacy . ((full_text . "Outer post")))
+             (quoted_status_result . ((result . ,middle-raw))))))
+         (middle (plist-get tweet :quoted-tweet))
+         (quoted (plist-get middle :quoted-tweet)))
+    (should (equal (plist-get quoted :id) "2076607169047548354"))
+    (should (plist-get quoted :quote-placeholder-p))
+    (should (equal (plist-get quoted :url)
+                   "https://x.com/i/status/2076607169047548354"))
+    (should (equal (plist-get middle :text) "Middle post"))
+    (should-not (plist-get middle :urls))))
+
+(ert-deftest chirp-render-nested-quotes-keep-geometry-media-and-actions ()
+  "Each nested quote owns its text, media, and actions in both main views."
+  (let* ((tweet (chirp-test--sample-quoted-tweet))
+         (middle (plist-get tweet :quoted-tweet))
+         (leaf (list :kind 'tweet :id "789" :url "https://x.com/c/status/789"
+                     :text "Deep quoted body" :author-name "Carol"
+                     :media '((:type "photo" :url "https://example.com/deep.jpg"))))
+         (chirp-show-avatars nil)
+         (chirp-quoted-tweet-max-depth 3)
+         opened liked)
+    (setf (plist-get middle :quoted-tweet) leaf)
+    (dolist (threadp '(nil t))
+      (with-temp-buffer
+        (chirp-view-mode)
+        (cl-letf (((symbol-function 'chirp-render-insert-media-strip)
+                   (lambda (media &rest _)
+                     (when media (insert "Deep media\n"))))
+                  ((symbol-function 'chirp-thread-open-tweet)
+                   (lambda (entry) (setq opened (plist-get entry :id))))
+                  ((symbol-function 'chirp-toggle-like-at-point)
+                   (lambda () (setq liked (plist-get (chirp-entry-at-point) :id)))))
+          (let ((inhibit-read-only t))
+            (if threadp
+                (chirp-render-insert-discussion-entry
+                 (chirp-test--discussion-row tweet nil '(tweet "parent") 2 'tree))
+              (chirp-render-insert-tweet tweet)))
+          (dolist (property '(line-prefix wrap-prefix))
+            (goto-char (point-min))
+            (search-forward "Quoted body text")
+            (let ((middle-prefix (get-text-property (match-beginning 0) property)))
+              (search-forward "Deep quoted body")
+              (should
+               (equal (get-text-property (match-beginning 0) property)
+                      (concat middle-prefix
+                              (appkit-ui-vbar-string 'chirp-quoted-tweet-border-face))))))
+          (goto-char (point-min))
+          (search-forward "Deep quoted body")
+          (goto-char (match-beginning 0))
+          (should (eq (chirp-entry-at-point) leaf))
+          (should (equal (chirp-entry-url-at-point) (plist-get leaf :url)))
+          (chirp-open-at-point)
+          (should (equal opened "789"))
+          (search-forward "Deep media")
+          (should (eq (chirp-entry-at-point) leaf))
+          (search-forward (chirp-render--metric-string 'like nil))
+          (goto-char (match-beginning 0))
+          (chirp-open-at-point)
+          (should (equal liked "789"))
+          (goto-char (point-min))
+          (search-forward "Quoted body text")
+          (should (eq (chirp-entry-at-point) middle)))))))
+
+(ert-deftest chirp-render-unexpanded-quotes-retain-open-links ()
+  "Missing content, depth limits, and repeated IDs always leave an open link."
+  (dolist (reason '(placeholder depth repeated))
+    (let* ((tweet (chirp-test--sample-quoted-tweet))
+           (quoted (plist-get tweet :quoted-tweet))
+           (chirp-quoted-tweet-max-depth (if (eq reason 'depth) 0 3))
+           (chirp-show-avatars nil)
+           opened)
+      (pcase reason
+        ('placeholder (setf (plist-get quoted :quote-placeholder-p) t))
+        ('repeated (setf (plist-get quoted :id) (plist-get tweet :id))))
+      (setf (plist-get tweet :quoted-tweet) quoted)
+      (with-temp-buffer
+        (chirp-view-mode)
+        (cl-letf (((symbol-function 'chirp-thread-open-tweet)
+                   (lambda (entry) (setq opened entry))))
+          (let ((inhibit-read-only t)) (chirp-render-insert-tweet tweet))
+          (goto-char (point-min))
+          (search-forward "Quoted post")
+          (goto-char (match-beginning 0))
+          (chirp-open-at-point)
+          (should (eq opened quoted))
+          (should-not (string-match-p "Quoted body text" (buffer-string))))))))
+
+(ert-deftest chirp-enrich-nested-quotes-updates-root-and-rejects-detached-parent ()
+  "Deep completions redraw the owning row and cannot modify a replaced chain."
+  (let* ((chirp--app nil)
+         (chirp-show-avatars nil)
+         (chirp-show-tweet-media nil)
+         (chirp-quoted-tweet-max-depth 3)
+         (tweet (chirp-test--sample-quoted-tweet))
+         (callbacks (make-hash-table :test #'equal))
+         buffer)
+    (unwind-protect
+        (cl-letf (((symbol-function 'chirp-backend-tweet)
+                   (lambda (id success &optional _error)
+                     (puthash id success callbacks))))
+          (let* ((state (list :type 'collection :query '(:kind bookmarks)
+                              :items (list tweet) :status '(:phase idle)))
+                 (view (chirp-open-projection-view
+                        :id 'nested-quote-test :title "Nested quotes" :state state
+                        :render-function #'chirp-timeline--sync
+                        :printer #'chirp-render-print-tweet-row))
+                 (full (list :kind 'tweet :id "456" :text "Middle detail"
+                             :quoted-tweet
+                             (list :kind 'tweet :id "789" :quote-placeholder-p t))))
+            (setq buffer (appkit-surface-buffer view))
+            (chirp-enrich-quoted-tweets (list tweet) buffer)
+            (funcall (gethash "456" callbacks) full nil)
+            ;; Child responses may arrive before the parent update is committed.
+            (funcall (gethash "789" callbacks)
+                     (list :kind 'tweet :id "789" :text "Deep complete body") nil)
+            (appkit-loop-run-pass (appkit-surface-loop view))
+            (with-current-buffer buffer
+              (should (string-match-p "Deep complete body" (buffer-string))))
+            ;; Enriching an occurrence must not mutate the cached parent.
+            (should (plist-get (plist-get full :quoted-tweet) :quote-placeholder-p))
+            ;; An already-enriched parent still needs its children enriched.
+            (let ((middle (plist-get tweet :quoted-tweet)))
+              (setf (plist-get middle :quoted-tweet)
+                    (list :kind 'tweet :id "987654321" :quote-placeholder-p t))
+              (chirp-enrich-quoted-tweets (list tweet) buffer)
+              (should (gethash "987654321" callbacks))
+              (setf (plist-get tweet :quoted-tweet)
+                    (list :kind 'tweet :id "456" :text "Replacement middle"))
+              (funcall (gethash "987654321" callbacks)
+                       (list :kind 'tweet :id "987654321" :text "Obsolete child") nil)
+              (appkit-loop-run-pass (appkit-surface-loop view))
+              (should (equal (plist-get (plist-get tweet :quoted-tweet) :text)
+                             "Replacement middle"))
+              (should (plist-get (plist-get middle :quoted-tweet)
+                                 :quote-placeholder-p))
+              (with-current-buffer buffer
+                (should-not (string-match-p "Obsolete child" (buffer-string)))))))
+      (chirp-stop)
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest chirp-enrich-nested-quotes-bounds-cached-chains ()
+  "Synchronous cache hits stop at the expansion limit and repeated IDs."
+  (dolist (reason '(depth repeated))
+    (let* ((chirp--app nil)
+           (chirp-show-avatars nil)
+           (chirp-show-tweet-media nil)
+           (chirp-quoted-tweet-max-depth 1)
+           (tweet (chirp-test--sample-quoted-tweet))
+           (child-id (if (eq reason 'repeated) (plist-get tweet :id) "789"))
+           (full (list :kind 'tweet :id "456" :text "Cached middle"
+                       :chirp-enriched-p t
+                       :quoted-tweet (list :kind 'tweet :id child-id
+                                           :quote-placeholder-p t)))
+           buffer requested)
+      (when (eq reason 'repeated) (setq chirp-quoted-tweet-max-depth 3))
+      (unwind-protect
+          (cl-letf (((symbol-function 'chirp-backend-tweet)
+                     (lambda (id &rest _) (push id requested))))
+            (let* ((state (list :type 'collection :query '(:kind bookmarks)
+                                :items (list tweet) :status '(:phase idle)))
+                   (view (chirp-open-projection-view
+                          :id 'cached-quote-test :title "Cached quotes" :state state
+                          :render-function #'chirp-timeline--sync
+                          :printer #'chirp-render-print-tweet-row)))
+              (setq buffer (appkit-surface-buffer view))
+              (puthash "456" full (chirp--session-quoted-tweet-cache (chirp--session)))
+              (chirp-enrich-quoted-tweets (list tweet) buffer)
+              (appkit-loop-run-pass (appkit-surface-loop view))
+              (should-not requested)
+              (with-current-buffer buffer
+                (should (string-match-p "Cached middle" (buffer-string)))
+                (should (string-match-p "Quoted post" (buffer-string))))))
+        (chirp-stop)
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 (ert-deftest chirp-enrich-quoted-tweets-updates-only-current-model ()
   "Quoted detail appears locally, but cannot replace a successor view's data."
   (let ((chirp--app nil)

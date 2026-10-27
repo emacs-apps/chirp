@@ -1679,15 +1679,26 @@ When MAX-COUNT is non-nil, return at most that many images."
   (make-symbol "chirp-quoted-tweet-fetch-failed")
   "Sentinel value used when quoted tweet enrichment fails.")
 
+(defcustom chirp-quoted-tweet-max-depth 3
+  "Maximum number of quoted posts to expand inside a tweet.
+Deeper quotes remain available as links.  Zero shows only quote links."
+  :type 'natnum
+  :group 'chirp)
+
 (defun chirp--quoted-tweet-from-x (value)
-  "Return a quoted tweet decoded from X VALUE, or nil."
-  (when-let* ((quoted
-               (and (chirp-object-p value)
-                    (or (when (chirp-object-p value)
-                      (cdr (or (assq 'quotedTweet value)
-                               (assq 'quoted_tweet value))))
-                        (map-nested-elt value '(quoted_status_result result))))))
-    (chirp--tweet-from-x quoted)))
+  "Return a quoted tweet decoded from X VALUE, or an ID-only placeholder."
+  (when (chirp-object-p value)
+    (or (when-let* ((quoted
+                    (or (cdr (or (assq 'quotedTweet value)
+                                 (assq 'quoted_tweet value)))
+                        (map-nested-elt value '(quoted_status_result result)))))
+          (chirp--tweet-from-x quoted))
+        (when-let* ((id (chirp-first-nonblank
+                        (map-nested-elt value '(legacy quoted_status_id_str))
+                        (map-nested-elt value '(quoted_status_id_str)))))
+          (list :kind 'tweet :id id
+                :url (format "https://x.com/i/status/%s" id)
+                :quote-placeholder-p t)))))
 
 (defun chirp-quoted-tweet-enriched-p (tweet)
   "Return non-nil when quoted TWEET already carries full fetched detail."
@@ -1736,9 +1747,19 @@ When MAX-COUNT is non-nil, return at most that many images."
          (chirp--dispatch-quoted-tweet-callbacks pending tweet-id nil)))))))
 
 (defun chirp--apply-quoted-tweet (model tweet preview full)
-  "Replace PREVIEW with FULL only while TWEET still belongs to MODEL."
-  (when (and (or (memq tweet (plist-get model :items))
-                 (memq tweet (plist-get model :pending-new-items)))
+  "Replace PREVIEW with FULL only while TWEET still belongs to MODEL.
+TWEET may be a quoted descendant of a top-level item."
+  (when (and (cl-some
+              (lambda (root)
+                (let (seen)
+                  (while (and root (not (eq root tweet))
+                              (not (memq root seen))
+                              (not (plist-get root :deleted-p)))
+                    (push root seen)
+                    (setq root (plist-get root :quoted-tweet)))
+                  (eq root tweet)))
+              (append (plist-get model :items)
+                      (plist-get model :pending-new-items)))
              (not (plist-get tweet :deleted-p))
              (or (eq (plist-get tweet :quoted-tweet) preview)
                  (eq (plist-get tweet :quoted-tweet) full)))
@@ -1746,21 +1767,40 @@ When MAX-COUNT is non-nil, return at most that many images."
     t))
 
 (defun chirp-enrich-quoted-tweets (tweets buffer)
-  "Enrich TWEETS through BUFFER's captured Surface and committed model."
+  "Enrich quote chains through BUFFER's captured Surface and committed model.
+Fetch at most `chirp-quoted-tweet-max-depth' levels, avoiding repeated IDs."
   (when-let* ((view (chirp--live-projection-view buffer))
               (model (appkit-surface-model view))
               (app (appkit-surface-app view)))
-    (dolist (tweet tweets)
-      (when-let* ((quoted (plist-get tweet :quoted-tweet))
-                  (quoted-id (plist-get quoted :id))
-                  ((not (chirp-quoted-tweet-enriched-p quoted))))
-        (chirp--request-quoted-tweet
-         quoted-id
-         (lambda (full)
-           (when (and full (appkit-surface-live-p view))
-             (let ((result (list 'chirp-quote-loaded model tweet quoted full)))
-               (appkit-app-send app result)
-               (appkit-surface-post view result)))))))))
+    (cl-labels
+        ((enrich
+           (tweet depth ancestors)
+           (when (and (< depth chirp-quoted-tweet-max-depth)
+                      (not (plist-get tweet :deleted-p)))
+             (let ((seen (cons (plist-get tweet :id) ancestors)))
+               (when-let* ((quoted (plist-get tweet :quoted-tweet))
+                           (quoted-id (plist-get quoted :id))
+                           ((not (plist-get quoted :deleted-p)))
+                           ((not (member quoted-id seen))))
+                 (if (chirp-quoted-tweet-enriched-p quoted)
+                     (enrich quoted (1+ depth) seen)
+                   (chirp--request-quoted-tweet
+                    quoted-id
+                    (lambda (full)
+                      (when (and full (appkit-surface-live-p view)
+                                 (eq model (appkit-surface-model view)))
+                        ;; Each occurrence owns its descendants; never splice
+                        ;; model-specific enrichment into the session cache.
+                        (let* ((full (copy-tree full))
+                               (result
+                                (list 'chirp-quote-loaded model tweet quoted full)))
+                          (appkit-app-send app result)
+                          (appkit-surface-post view result)
+                          ;; Parent updates are queued before child updates,
+                          ;; including synchronous cache hits.
+                          (enrich full (1+ depth) seen)))))))))))
+      (dolist (tweet tweets)
+        (enrich tweet 0 nil)))))
 
 ;;; Tweet State
 
@@ -3172,7 +3212,7 @@ over the card's `t.co` permalink."
           (appkit-next
            :model model
            :render (appkit-projection-change-create
-                    :resources (list (list 'tweet (plist-get tweet :id)))
+                    :resources (chirp--tweet-resources model (plist-get tweet :id))
                     :position 'preserve))
         (appkit-next-reject 'stale-quoted-tweet))))
    ((eq (car-safe message) 'chirp-posts-created)

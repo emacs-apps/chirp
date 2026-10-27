@@ -1510,7 +1510,9 @@
               (chirp-timeline-test--drain view)
               (should (eq (caar prefetched) app))
               (should (eq (cadar prefetched) buffer))
-              (should (eq (plist-get tweet :quoted-tweet) full))
+              ;; Each displayed occurrence owns its mutable quote descendants.
+              (should (equal (plist-get tweet :quoted-tweet) full))
+              (should-not (eq (plist-get tweet :quoted-tweet) full))
               (with-current-buffer buffer
                 (should (string-search "Full cached quote" (buffer-string)))
                 (chirp-refresh))
