@@ -111,7 +111,8 @@
   (chirp-render-projection
       surface change
     (chirp-render-project-tweet-rows (map-elt state :items))
-    (chirp-profile--header-text state)))
+    (chirp-profile--header-text state))
+  (chirp-timeline--check-scroll-observer surface))
 
 (defun chirp-profile--users-sync (surface _app state change)
   "Render committed user-list STATE using native projection CHANGE."
@@ -206,14 +207,15 @@ This runs inside the owning Surface's update, never in a transport callback."
          :user nil :items nil :mode mode
          :modes chirp-profile--base-modes
          :title title :refresh refresh
-         :page (list :next-cursor nil)
+         :page (list :next-cursor nil :auto-load-paused-p nil)
          :status
          (list :phase 'initial :message nil)
          :timeline-ready nil :loading-more nil :profile-request nil
          :expanded-tweet-ids (make-hash-table :test #'equal))
    :render-function #'chirp-profile--sync
    :printer #'chirp-render-print-tweet-row
-   :select t))
+   :select t
+   :ready #'chirp-timeline--install-scroll-observer))
 
 (defun chirp-profile--present (view)
   "Request a projection update for profile VIEW."
@@ -278,8 +280,9 @@ This runs inside the owning Surface's update, never in a transport callback."
 
 ;;; Pagination
 
-(defun chirp-profile-load-more (&optional _anchor-id)
-  "Load older items for the current profile view."
+(defun chirp-profile-load-more (&optional _anchor-id quiet)
+  "Load older items for the current profile view.
+QUIET suppresses notices during automatic visible-end pagination."
   (interactive)
   (pcase-let* ((view (chirp--live-projection-view))
                (state (and view (appkit-surface-model view)))
@@ -289,17 +292,18 @@ This runs inside the owning Surface's update, never in a transport callback."
       (user-error "Current view does not support loading more items"))
     (cond
      (loading-more
-      (message "Already loading older posts..."))
+      (unless quiet (message "Already loading older posts...")))
      ((not next-cursor)
-      (message "No older posts."))
+      (unless quiet (message "No older posts.")))
      (t
       (let* ((buffer (appkit-surface-buffer view))
              (saved-mode (map-elt state :mode))
              (mode-label (downcase (chirp-profile--mode-label saved-mode)))
+             (cursor next-cursor)
              (token (chirp-begin-request buffer)))
         (setf (plist-get state :loading-more) t)
         (chirp-set-status buffer (format "Loading older %s..." mode-label))
-        (message "Loading older %s..." mode-label)
+        (unless quiet (message "Loading older %s..." mode-label))
         (chirp-profile--fetch-content
          saved-mode handle
          (lambda (tweets envelope)
@@ -309,23 +313,25 @@ This runs inside the owning Surface's update, never in a transport callback."
                       (merged (chirp-append-unique-tweets current tweets))
                       (added-p (> (length merged) (length current))))
                  (setf (plist-get state :items) merged
-                       (plist-get page :next-cursor) next-cursor
+                       (plist-get page :next-cursor)
+                       (unless (equal cursor next-cursor) next-cursor)
+                       (plist-get page :auto-load-paused-p) nil
                        (plist-get state :timeline-ready) t
                        (plist-get state :loading-more) nil)
-                 (appkit-surface-post
-                  view (appkit-projection-change-create :position 'preserve))
                  (chirp-profile--present view)
                  (chirp-clear-status buffer)
                  (chirp-media-prefetch-tweets tweets buffer)
                  (chirp-enrich-quoted-tweets tweets buffer)
-                 (unless added-p
-                   (message "No older %s." mode-label))))))
-         (lambda (message)
+                 (unless (or added-p quiet)
+                   (message "No additional %s on this page." mode-label))))))
+         (lambda (text)
            (when (chirp-request-current-p buffer token)
-             (setf (plist-get state :loading-more) nil)
-             (chirp-set-status buffer "Load more failed" 'error)
-             (message "%s" (replace-regexp-in-string "[\r\n]+" "  " message))))
-         chirp-profile-post-limit next-cursor))))))
+             (setf (plist-get state :loading-more) nil
+                   (plist-get (plist-get state :page) :auto-load-paused-p) t)
+             (chirp-set-status buffer "Load more failed; refresh to retry" 'error)
+             (unless quiet
+               (message "%s" (replace-regexp-in-string "[\r\n]+" "  " text)))))
+         chirp-profile-post-limit cursor))))))
 
 ;;; Requests
 

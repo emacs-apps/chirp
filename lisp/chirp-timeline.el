@@ -28,7 +28,7 @@
 (require 'chirp-render)
 (require 'chirp-x)
 
-(declare-function chirp-profile-load-more "chirp-profile" (&optional anchor-id))
+(declare-function chirp-profile-load-more "chirp-profile" (&optional anchor-id quiet))
 
 ;;; Primary Timeline
 ;;;; Options
@@ -92,7 +92,7 @@ Set this to nil to disable automatic pagination.  Manual loading with
   "Mouse keymap for the pending-new-posts header-line button.")
 
 (defvar-local chirp-timeline--scroll-observer nil
-  "Lifecycle-owned visible-end observer for the primary timeline.")
+  "Lifecycle-owned visible-end observer for a Chirp timeline or profile.")
 
 (defun chirp-timeline--make-state (kind limit)
   "Return canonical state for primary timeline KIND and LIMIT."
@@ -214,21 +214,31 @@ positions, while the App reducer updates retained tweet and quote contents."
 
 (defun chirp-timeline--maybe-auto-load-older
     (view _window position end)
-  "Quietly load older posts for VIEW when POSITION approaches END."
-  (when
-      (and (appkit-surface-live-p view)
-           (numberp chirp-timeline-auto-load-threshold)
-           (appkit-scroll-near-end-p position end
-                                     chirp-timeline-auto-load-threshold))
-    (pcase-let*
-        ((state (chirp-timeline--view-state view))
-         ((map :page :status :loaded-p :generation) state)
-         ((map :phase) status)
-         ((map :next-cursor :auto-load-paused-p :exhausted-p) page))
-      (when
-          (and loaded-p (eq phase 'idle) (null generation)
-               next-cursor (not auto-load-paused-p) (not exhausted-p))
-        (chirp-timeline--load-more-primary view t)))))
+  "Quietly load older posts for VIEW when its visible POSITION approaches END."
+  (when (and (appkit-surface-live-p view)
+             (numberp chirp-timeline-auto-load-threshold)
+             (appkit-scroll-near-end-p position end
+                                      chirp-timeline-auto-load-threshold))
+    (let* ((state (appkit-surface-model view))
+           (type (plist-get state :type))
+           (page (plist-get state :page)))
+      (when (and (or (plist-get state :loaded-p)
+                     (plist-get state :timeline-ready))
+                 (eq (plist-get (plist-get state :status) :phase) 'idle)
+                 (not (plist-get state :generation))
+                 (not (plist-get state :profile-request))
+                 (not (plist-get state :loading-more))
+                 (plist-get page :next-cursor)
+                 (not (plist-get page :auto-load-paused-p))
+                 (not (plist-get page :exhausted-p)))
+        (pcase type
+          ('timeline (chirp-timeline--load-more-primary view t))
+          ('collection
+           (when (plist-get state :fetch-page)
+             (chirp-timeline--load-more-collection view t)))
+          ('profile
+           (with-current-buffer (appkit-surface-buffer view)
+             (chirp-profile-load-more nil t))))))))
 
 (defun chirp-timeline--install-scroll-observer (view)
   "Install VIEW's lifecycle-owned older-page observer."
@@ -239,6 +249,12 @@ positions, while the App reducer updates retained tweet and quote contents."
     :end-function
     (lambda (window position end)
       (chirp-timeline--maybe-auto-load-older view window position end)))))
+
+(defun chirp-timeline--check-scroll-observer (view)
+  "Recheck VIEW's visible end after projection, using Appkit's deferred check."
+  (with-current-buffer (appkit-surface-buffer view)
+    (when (appkit-scroll-observer-p chirp-timeline--scroll-observer)
+      (appkit-scroll-observer-check chirp-timeline--scroll-observer))))
 
 (defun chirp-timeline--setup-view (view)
   "Mount the primary timeline presentation cache."
@@ -262,6 +278,8 @@ positions, while the App reducer updates retained tweet and quote contents."
       surface change
     (chirp-render-project-tweet-rows (plist-get state :items))
     (chirp-timeline--frame-text state))
+  (when (eq (plist-get state :type) 'collection)
+    (chirp-timeline--check-scroll-observer surface))
   nil)
 
 ;;;; Requests
@@ -814,7 +832,7 @@ REFRESH reloads the collection."
         :title title
         :refresh refresh
         :fetch-page nil
-        :page (list :next-cursor nil :exhausted-p nil)
+        :page (list :next-cursor nil :exhausted-p nil :auto-load-paused-p nil)
         :status (list :phase 'initial :message nil)
         :expanded-tweet-ids (make-hash-table :test #'equal)
         :loaded-p nil))
@@ -830,11 +848,13 @@ REFRESH reloads the collection."
                                      refresh)
    :render-function #'chirp-timeline--sync
    :printer #'chirp-render-print-tweet-row
-   :select t))
+   :select t
+   :ready #'chirp-timeline--install-scroll-observer))
 
-(defun chirp-timeline--install-tweets (view tweets &optional envelope older)
+(defun chirp-timeline--install-tweets (view tweets &optional envelope older quiet)
   "Install TWEETS and pagination ENVELOPE into collection VIEW.
-When OLDER is non-nil, append unique posts and preserve the reading position."
+When OLDER is non-nil, append unique posts and preserve the reading position.
+QUIET suppresses automatic pagination notices."
   (let* ((state (appkit-surface-model view))
          (buffer (appkit-surface-buffer view))
          (page (plist-get state :page))
@@ -847,6 +867,7 @@ When OLDER is non-nil, append unique posts and preserve the reading position."
           (plist-get (plist-get state :status) :phase) 'idle
           (plist-get (plist-get state :status) :message) nil
           (plist-get page :next-cursor) next-cursor
+          (plist-get page :auto-load-paused-p) nil
           (plist-get page :exhausted-p)
           (or (not next-cursor) (and older (equal cursor next-cursor))))
     (appkit-surface-post
@@ -855,16 +876,17 @@ When OLDER is non-nil, append unique posts and preserve the reading position."
     (chirp-clear-status buffer)
     (chirp-media-prefetch-tweets tweets buffer)
     (chirp-enrich-quoted-tweets tweets buffer)
-    (when (and older (= (length merged) (length current)))
+    (when (and older (not quiet) (= (length merged) (length current)))
       (message "%s" (if (plist-get page :exhausted-p)
                        "No older posts."
                      "No additional posts on this page; load more to continue.")))))
 
 (defun chirp-timeline--fetch-collection
-    (view title refresh fetch-fn &optional paginated older)
+    (view title refresh fetch-fn &optional paginated older quiet)
   "Run FETCH-FN for collection VIEW titled TITLE.
 REFRESH retries the request after failure.  PAGINATED means FETCH-FN accepts
-optional count and cursor arguments; OLDER requests and appends the next page."
+optional count and cursor arguments; OLDER requests and appends the next page.
+QUIET keeps automatic reads and failures from interrupting the current view."
   (let* ((state (appkit-surface-model view))
          (buffer (appkit-surface-buffer view))
          (token (chirp-begin-background-request buffer title))
@@ -874,15 +896,16 @@ optional count and cursor arguments; OLDER requests and appends the next page."
          (success
           (lambda (tweets envelope)
             (when (chirp-request-current-p buffer token)
-              (chirp-timeline--install-tweets view tweets envelope older))))
+              (chirp-timeline--install-tweets view tweets envelope older quiet))))
          (failure
           (lambda (text)
             (when (chirp-request-current-p buffer token)
               (if (not older)
                   (chirp-show-error buffer title refresh text)
-                (setf (plist-get (plist-get state :status) :phase) 'error
-                      (plist-get (plist-get state :status) :message) text)
-                (chirp-set-status buffer "Load more failed; press N to retry" 'error)
+                (setf (plist-get (plist-get state :page) :auto-load-paused-p) t
+                      (plist-get (plist-get state :status) :phase) (if quiet 'idle 'error)
+                      (plist-get (plist-get state :status) :message) (unless quiet text))
+                (chirp-set-status buffer "Load more failed; refresh to retry" 'error)
                 (appkit-surface-post
                  view (appkit-projection-change-create
                        :frame-p t :position 'preserve)))))))
@@ -916,21 +939,21 @@ optional count and cursor arguments; OLDER requests and appends the next page."
   "Request an older page for VIEW, suppressing feedback when QUIET."
   (chirp-timeline--dispatch view 'request 'older quiet))
 
-(defun chirp-timeline--load-more-collection (view)
-  "Request the next page of the paginated collection VIEW."
+(defun chirp-timeline--load-more-collection (view &optional quiet)
+  "Request the next page of collection VIEW, suppressing feedback when QUIET."
   (let* ((state (chirp-timeline--list-state view))
          (page (plist-get state :page))
          (phase (plist-get (plist-get state :status) :phase)))
     (cond
      ((memq phase '(initial older))
-      (message "Timeline request already in progress..."))
+      (unless quiet (message "Timeline request already in progress...")))
      ((or (plist-get page :exhausted-p)
           (not (plist-get page :next-cursor)))
-      (message "No older posts."))
+      (unless quiet (message "No older posts.")))
      (t
       (chirp-timeline--fetch-collection
        view (plist-get state :title) (plist-get state :refresh)
-       (plist-get state :fetch-page) t t)))))
+       (plist-get state :fetch-page) t t quiet)))))
 
 (defun chirp-load-more (&optional _anchor-id)
   "Load older posts, preserving the current semantic position."
