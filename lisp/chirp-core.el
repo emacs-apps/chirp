@@ -10,8 +10,6 @@
 
 ;;; Code:
 
-
-
 (declare-function chirp-search "chirp" (query))
 (declare-function chirp-compose-post "chirp-actions" ())
 (declare-function chirp-reply-at-point "chirp-actions" ())
@@ -20,7 +18,6 @@
 (declare-function chirp-toggle-like-at-point "chirp-actions" ())
 (declare-function chirp-copy-fixupx-url-at-point "chirp-actions" ())
 (declare-function chirp-delete-at-point "chirp-actions" ())
-(declare-function chirp-dm-refresh-inbox "chirp-dm-inbox" ())
 (declare-function chirp-dm-load-more-inbox "chirp-dm-inbox" ())
 
 (require 'cl-lib)
@@ -55,7 +52,6 @@
 (declare-function chirp-thread-add-spam-rule "chirp-thread" (&optional authorp))
 (declare-function chirp-dispatch "chirp-transient" nil)
 (declare-function chirp-transient-tweet-operate "chirp-transient" nil)
-(declare-function chirp-toggle-follow-user-at-point "chirp-actions" ())
 (declare-function chirp-load-more "chirp-timeline" (&optional anchor-id))
 (declare-function chirp-toggle-home-following "chirp-timeline" ())
 (declare-function chirp-timeline--update "chirp-timeline" (context state message))
@@ -65,7 +61,6 @@
 (declare-function chirp-media-open-dedicated-at-point "chirp-media-view" ())
 (declare-function chirp-media-open-external-at-point "chirp-media-view" ())
 (declare-function chirp-media-download-at-point "chirp-media" ())
-(declare-function chirp-media-prefetch-tweet "chirp-media" (tweet buffer))
 (declare-function chirp-media-view--update "chirp-media-view"
                   (context model message))
 (declare-function chirp-dm-state-subscriptions "chirp-dm-state" (model))
@@ -3239,8 +3234,6 @@ over the card's `t.co` permalink."
   (appkit-surface-post surface
                        (appkit-projection-change-create
                         :geometry-p t)))
-
-
 
 (provide 'chirp-core)
 

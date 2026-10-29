@@ -11,7 +11,6 @@
 
 (declare-function nerd-icons-faicon "nerd-icons" (icon-name &rest args))
 (declare-function nerd-icons-mdicon "nerd-icons" (icon-name &rest args))
-(declare-function chirp-profile-open "chirp-profile" (handle &optional mode))
 (declare-function chirp-profile-open-followers "chirp-profile" (handle))
 (declare-function chirp-profile-open-following-users "chirp-profile" (handle))
 (declare-function chirp-timeline-open-search "chirp-timeline" (query))
@@ -24,8 +23,6 @@
 (declare-function chirp-poll-vote "chirp-actions" (tweet choice-id))
 (declare-function chirp-poll-pending-p "chirp-actions" (tweet-id))
 (declare-function chirp-edit-history-open-tweet "chirp-edit-history" (tweet))
-(declare-function chirp-media-open-dedicated "chirp-media-view"
-                  (selection &optional title buffer external-fallback))
 
 (require 'cl-lib)
 (require 'subr-x)

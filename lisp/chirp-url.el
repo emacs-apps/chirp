@@ -14,6 +14,8 @@
 (require 'url-parse)
 (require 'url-util)
 
+(declare-function appkit-url-register "appkit-url" (name matcher handler))
+
 ;;; URL Grammar
 
 (defconst chirp-url--trusted-hosts
@@ -110,8 +112,6 @@ HTTPS URLs on X, legacy Twitter, or an embed-mirror host are accepted."
    ((listp value)
     (or (plist-get value :id)
         (chirp-url-tweet-id (plist-get value :url))))))
-
-(declare-function appkit-url-register "appkit-url" (name matcher handler))
 
 ;;;###autoload
 (with-eval-after-load 'appkit-url
