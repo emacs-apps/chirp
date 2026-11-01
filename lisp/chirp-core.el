@@ -576,8 +576,8 @@ revisited later."
   (when-let* ((view (chirp--live-projection-view buffer)))
     (appkit-surface-model view)))
 
-(cl-defun chirp--setup-projection-view
-    (surface title printer anchor-property &optional (no-separator-p t))
+(defun chirp--setup-projection-view
+    (surface title printer anchor-property)
   "Mount the keyed presentation cache in SURFACE."
   (let ((state (appkit-surface-model surface)))
     (setq-local chirp--view-title title
@@ -590,7 +590,7 @@ revisited later."
     (chirp--apply-buffer-name (current-buffer) title)
     (setq-local chirp--projection
                 (appkit-projection-create printer anchor-property
-                                          :no-separator-p no-separator-p))))
+                                          :no-separator-p t))))
 
 (cl-defun chirp-open-projection-view
     (&key id title state render-function printer (mode 'chirp-view-mode)

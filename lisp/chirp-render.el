@@ -43,21 +43,6 @@
 (require 'chirp-media-layout)
 (require 'nerd-icons nil t)
 
-;;; Options
-
-(defcustom chirp-tweet-separator "- - - - - - - - - - - -"
-  "Separator text inserted between tweets in list views.
-
-Set this to nil or an empty string to disable tweet separators."
-  :type '(choice (const :tag "No separator" nil)
-                 (string :tag "Separator text"))
-  :group 'chirp)
-
-(defcustom chirp-tweet-separator-indent 6
-  "Number of leading spaces before tweet list separators."
-  :type 'integer
-  :group 'chirp)
-
 ;;; Constants
 
 (defconst chirp-render-list-reply-prefix "  "
@@ -147,16 +132,6 @@ Set this to nil or an empty string to disable tweet separators."
 (defface chirp-social-context-face
   '((t :inherit shadow))
   "Face used for home/following social context lines."
-  :group 'chirp)
-
-(defface chirp-thread-divider-face
-  '((t :inherit shadow))
-  "Face used for separators inside thread views."
-  :group 'chirp)
-
-(defface chirp-tweet-separator-face
-  '((t :inherit chirp-thread-divider-face))
-  "Face used for separators between tweet list entries."
   :group 'chirp)
 
 (defface chirp-profile-view-active-face
@@ -1389,27 +1364,10 @@ tweet content and actions."
     (put-text-property
      start (point) 'chirp-entry-id (appkit-projection-row-key row))))
 
-(defun chirp-render--tweet-separator-line ()
-  "Return the tweet separator line, or nil when disabled."
-  (when (and (stringp chirp-tweet-separator)
-             (not (string-empty-p chirp-tweet-separator)))
-    (concat (make-string (max 0 chirp-tweet-separator-indent) ?\s)
-            chirp-tweet-separator)))
-
-(defun chirp-render-insert-tweet-separator ()
-  "Insert the configured separator between tweet list entries."
-  (when-let* ((line (chirp-render--tweet-separator-line)))
-    (insert (propertize line 'face 'chirp-tweet-separator-face))
-    (insert "\n\n")))
-
 (defun chirp-render-insert-tweet-row (tweet previous)
   "Insert TWEET as a list row following PREVIOUS.
 
-The row owns its preceding separator and direct-reply context, so keyed
-projections can replace it as one unit.  Return the post's start, excluding
-the separator so position anchors survive its insertion or removal."
-  (when previous
-    (chirp-render-insert-tweet-separator))
+PREVIOUS supplies direct-reply context.  Return the post's start."
   (let ((start (point)))
     (if-let* ((reply-parent (chirp-render--list-reply-parent tweet previous)))
         (chirp-render--insert-tweet

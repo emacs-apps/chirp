@@ -200,9 +200,7 @@ To propose shared rules upstream, use the
 * Appearance
 
 #+begin_src emacs-lisp
-(setq chirp-tweet-separator "- - - - - - - - - - - -"
-      chirp-tweet-separator-indent 6
-      chirp-show-avatars nil
+(setq chirp-show-avatars nil
       chirp-show-tweet-media nil)
 #+end_src
 

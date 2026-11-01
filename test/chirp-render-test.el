@@ -1287,65 +1287,22 @@
       (should (equal (get-text-property (match-beginning 0) 'chirp-reply-parent-id)
                      "200")))))
 
-(ert-deftest chirp-render-tweet-rows-insert-customizable-separator ()
-  "List rendering should place a non-entry separator between tweets."
-  (let ((tweets (list
-                 '(:kind tweet :id "100" :text "First" :author-name "Alice" :author-handle "alice"
-                   :reply-count 0 :retweet-count 0 :like-count 0 :quote-count 0 :bookmark-count 0 :view-count 0)
-                 '(:kind tweet :id "101" :text "Second" :author-name "Bob" :author-handle "bob"
-                   :reply-count 0 :retweet-count 0 :like-count 0 :quote-count 0 :bookmark-count 0 :view-count 0))))
+(ert-deftest chirp-render-tweet-rows-use-blank-line-between-entries ()
+  "Adjacent list entries have one blank line and keep their own anchors."
+  (let ((first '(:kind tweet :id "100" :text "First" :author-name "Alice" :author-handle "alice"))
+        (second '(:kind tweet :id "101" :text "Second" :author-name "Bob" :author-handle "bob")))
     (with-temp-buffer
       (chirp-view-mode)
       (cl-letf (((symbol-function 'chirp-media-avatar-image) (lambda (&rest _args) nil)))
-        (let ((inhibit-read-only t))
-          (chirp-test--insert-tweet-list tweets)))
-      (goto-char (point-min))
-      (should (search-forward chirp-tweet-separator nil t))
-      (let ((pos (match-beginning 0)))
-        (should (chirp-test--face-member-p
-                 'chirp-tweet-separator-face
-                 (get-text-property pos 'face)))
-        (should-not (get-text-property pos 'chirp-entry-item))))))
-
-(ert-deftest chirp-render-tweet-rows-indent-separator-from-left ()
-  "List separators should use a stable left indent."
-  (let ((chirp-tweet-separator "|")
-        (chirp-tweet-separator-indent 6)
-        (tweets (list
-                 '(:kind tweet :id "100" :text "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-                   :author-name "Alice" :author-handle "alice"
-                   :reply-count 0 :retweet-count 0 :like-count 0 :quote-count 0
-                   :bookmark-count 0 :view-count 0)
-                 '(:kind tweet :id "101" :text "Second" :author-name "Bob" :author-handle "bob"
-                   :reply-count 0 :retweet-count 0 :like-count 0 :quote-count 0
-                   :bookmark-count 0 :view-count 0))))
-    (with-temp-buffer
-      (chirp-view-mode)
-      (cl-letf (((symbol-function 'chirp-media-avatar-image) (lambda (&rest _args) nil))
-                ((symbol-function 'chirp-render--metric-string) (lambda (&rest _args) "")))
-        (let ((inhibit-read-only t))
-          (chirp-test--insert-tweet-list tweets)))
-      (goto-char (point-min))
-      (should (search-forward "|" nil t))
-      (should (= (save-excursion
-                   (goto-char (match-beginning 0))
-                   (current-column))
-                 6)))))
-
-(ert-deftest chirp-render-tweet-rows-can-disable-separator ()
-  "Setting `chirp-tweet-separator' to nil should disable list separators."
-  (let ((chirp-tweet-separator nil)
-        (tweets (list
-                 '(:kind tweet :id "100" :text "First" :author-name "Alice" :author-handle "alice"
-                   :reply-count 0 :retweet-count 0 :like-count 0 :quote-count 0 :bookmark-count 0 :view-count 0)
-                 '(:kind tweet :id "101" :text "Second" :author-name "Bob" :author-handle "bob"
-                   :reply-count 0 :retweet-count 0 :like-count 0 :quote-count 0 :bookmark-count 0 :view-count 0))))
-    (with-temp-buffer
-      (chirp-view-mode)
-      (cl-letf (((symbol-function 'chirp-media-avatar-image) (lambda (&rest _args) nil)))
-        (let ((inhibit-read-only t))
-          (chirp-test--insert-tweet-list tweets)))
-      (should-not (string-match-p "- - - -" (buffer-string))))))
+        (let* ((inhibit-read-only t)
+               (first-start (chirp-render-insert-tweet-row first nil))
+               (first-end (point))
+               (second-start (chirp-render-insert-tweet-row second first)))
+          (should (= first-end second-start))
+          (should (equal (buffer-substring-no-properties (- second-start 2) second-start)
+                         "\n\n"))
+          (should (eq (get-text-property first-start 'chirp-entry-item) first))
+          (should (eq (get-text-property second-start 'chirp-entry-item) second)))))))
 
 (ert-deftest chirp-render-insert-discussion-entry-renders-full-article-body ()
   "Thread focus rendering should include the full article text."
