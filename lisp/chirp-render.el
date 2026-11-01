@@ -11,10 +11,10 @@
 
 (declare-function nerd-icons-faicon "nerd-icons" (icon-name &rest args))
 (declare-function nerd-icons-mdicon "nerd-icons" (icon-name &rest args))
-(declare-function chirp-profile-open-followers "chirp-profile" (handle))
-(declare-function chirp-profile-open-following-users "chirp-profile" (handle))
-(declare-function chirp-timeline-open-search "chirp-timeline" (query))
-(declare-function chirp-toggle-follow-user-at-point "chirp-actions" ())
+(autoload 'chirp-profile-open-followers "chirp-profile")
+(autoload 'chirp-profile-open-following-users "chirp-profile")
+(autoload 'chirp-timeline-open-search "chirp-timeline")
+(autoload 'chirp-toggle-follow-user-at-point "chirp-actions" nil t)
 (declare-function chirp-reply-at-point "chirp-actions" ())
 (declare-function chirp-toggle-retweet-at-point "chirp-actions" ())
 (declare-function chirp-toggle-like-at-point "chirp-actions" ())
@@ -251,8 +251,7 @@ When ACTIVE is non-nil, prefer the action-specific face for LABEL."
   (when (and (stringp url)
              (not (string-empty-p url)))
     (appkit-ui-add-action start end
-                          (lambda ()
-                            (browse-url url))
+                          (list #'browse-url url)
                           :help-echo (format "Open %s" url)
                           :properties `(chirp-subentry-url ,url))))
 
@@ -263,29 +262,12 @@ HELP-ECHO defaults to a short Open-profile description."
   (when handle
     (let ((clean (string-remove-prefix "@" handle)))
       (appkit-ui-add-action start end
-                            (lambda ()
-                              (chirp-open-profile-handle clean))
+                            (list #'chirp-open-profile-handle clean)
                             :help-echo (or help-echo (format "Open @%s" clean))
                             :properties
                             `(chirp-author-handle ,clean
                                                   chirp-author-profile-url
                                                   ,(format "https://x.com/%s" clean))))))
-
-(defun chirp-render--mark-profile-list-region (start end kind handle)
-  "Mark the region from START to END as profile list KIND for HANDLE."
-  (when handle
-    (appkit-ui-add-action start end
-                          (lambda ()
-                            (pcase kind
-                              ('followers (chirp-profile-open-followers handle))
-                              ('following (chirp-profile-open-following-users handle))
-                              (_ (user-error "Unknown profile list at point"))))
-                          :help-echo (pcase kind
-                                       ('followers "Open followers")
-                                       ('following "Open following")
-                                       (_ "Open profile list"))
-                          :properties `(chirp-profile-list-kind ,kind
-                                                                chirp-profile-list-handle ,handle))))
 
 (defun chirp-render--mark-profile-view-region (start end mode)
   "Mark the region from START to END as profile subview MODE."
@@ -296,18 +278,6 @@ HELP-ECHO defaults to a short Open-profile description."
                           (funcall chirp--profile-switch-mode-function mode))
                         :help-echo "Switch profile view"
                         :properties `(chirp-profile-view-mode ,mode)))
-
-(defun chirp-render--mark-profile-action-region (start end action handle)
-  "Mark the region from START to END as profile ACTION for HANDLE."
-  (when handle
-    (appkit-ui-add-action start end
-                          (lambda ()
-                            (pcase action
-                              ('toggle-follow (chirp-toggle-follow-user-at-point))
-                              (_ (user-error "Unknown profile action at point"))))
-                          :help-echo "Toggle follow"
-                          :properties `(chirp-profile-action ,action
-                                                             chirp-profile-action-handle ,handle))))
 
 (defun chirp-render--profile-follow-action-label (user)
   "Return the primary follow button label for USER, or nil."
@@ -449,14 +419,12 @@ ENTITY uses character offsets produced by `chirp--emit-visible-text'."
               from to handle))
             ('hashtag
              (appkit-ui-add-action from to
-                                   (lambda ()
-                                     (chirp-timeline-open-search (concat "#" tag)))
+                                   (list #'chirp-timeline-open-search (concat "#" tag))
                                    :help-echo (format "Search #%s" tag)
                                    :face 'chirp-hashtag-face))
             ('cashtag
              (appkit-ui-add-action from to
-                                   (lambda ()
-                                     (chirp-timeline-open-search (concat "$" tag)))
+                                   (list #'chirp-timeline-open-search (concat "$" tag))
                                    :help-echo (format "Search $%s" tag)
                                    :face 'chirp-hashtag-face))
             ((or 'url 'timestamp)
@@ -1402,8 +1370,8 @@ PREVIOUS supplies direct-reply context.  Return the post's start."
                 (handle handle))
       (let ((action-start (point)))
         (insert (propertize action-label 'face 'chirp-profile-action-face))
-        (chirp-render--mark-profile-action-region
-         action-start (point) 'toggle-follow handle))
+        (appkit-ui-add-action action-start (point) #'chirp-toggle-follow-user-at-point
+                              :help-echo "Toggle follow"))
       (when (and viewer-following-p viewer-followed-by-p)
         (insert (propertize "  Mutuals" 'face 'chirp-profile-action-secondary-face)))
       (insert "\n"))
@@ -1414,15 +1382,19 @@ PREVIOUS supplies direct-reply context.  Return the post's start."
       (insert (propertize
                (format "Following %s" (chirp-format-count following))
                'face 'chirp-meta-face))
-      (chirp-render--mark-profile-list-region
-       following-start (point) 'following handle))
+      (when handle
+        (appkit-ui-add-action following-start (point)
+                              (list #'chirp-profile-open-following-users handle)
+                              :help-echo "Open following")))
     (insert (propertize "   " 'face 'chirp-meta-face))
     (let ((followers-start (point)))
       (insert (propertize
                (format "Followers %s" (chirp-format-count followers))
                'face 'chirp-meta-face))
-      (chirp-render--mark-profile-list-region
-       followers-start (point) 'followers handle))
+      (when handle
+        (appkit-ui-add-action followers-start (point)
+                              (list #'chirp-profile-open-followers handle)
+                              :help-echo "Open followers")))
     (insert "\n")
     (when joined
       (insert (propertize (format "Joined %s" joined) 'face 'chirp-meta-face))

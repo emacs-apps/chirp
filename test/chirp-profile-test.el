@@ -96,7 +96,7 @@
                      (goto-char
                       (or (text-property-any
                            (point-min) (point-max)
-                           'chirp-profile-action 'toggle-follow)
+                           appkit-ui-action-property #'chirp-toggle-follow-user-at-point)
                           (error "Profile has no follow action")))
                      (chirp-entry-at-point)))
                 (should-not (plist-get (show-action) :viewer-following-p))
@@ -198,7 +198,7 @@
               (drain)
               (goto-char
                (text-property-any (point-min) (point-max)
-                                  'chirp-profile-action 'toggle-follow))
+                                  appkit-ui-action-property #'chirp-toggle-follow-user-at-point))
               (chirp-open-at-point)
               (search-forward "@bob")
               (let ((position (point-marker))
@@ -221,7 +221,7 @@
                 (set-marker position nil))
               (goto-char
                (text-property-any (point-min) (point-max)
-                                  'chirp-profile-action 'toggle-follow))
+                                  appkit-ui-action-property #'chirp-toggle-follow-user-at-point))
               (should (plist-get (chirp-entry-at-point) :viewer-following-p)))))
       (chirp-stop)
       (when (buffer-live-p buffer)

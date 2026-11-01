@@ -941,7 +941,7 @@
       (should (chirp-test--face-member-p
                'chirp-social-context-face
                (get-text-property (match-beginning 0) 'face)))
-      (should (functionp (appkit-ui-action-at (match-beginning 0)))))))
+      (should (appkit-ui-action-p (appkit-ui-action-at (match-beginning 0)))))))
 
 (ert-deftest chirp-open-at-point-opens-retweeter-profile-from-social-context ()
   "RET on the retweeted-by line should open the retweeter, not the tweet."
@@ -1756,7 +1756,7 @@
         (should (chirp-test--face-member-p
                  'chirp-social-context-face
                  (get-text-property context-position 'face)))
-        (should (functionp (appkit-ui-action-at context-position)))
+        (should (appkit-ui-action-p (appkit-ui-action-at context-position)))
         (search-forward "Alice @alice")
         (should (< context-position (match-beginning 0)))))))
 
@@ -2080,16 +2080,10 @@
           (chirp-render-insert-user-summary user)))
       (goto-char (point-min))
       (search-forward "Following 12")
-      (should (eq (get-text-property (match-beginning 0) 'chirp-profile-list-kind)
-                  'following))
-      (should (equal (get-text-property (match-beginning 0) 'chirp-profile-list-handle)
-                     "alice"))
+      (should (appkit-ui-action-p (appkit-ui-action-at (match-beginning 0))))
       (goto-char (point-min))
       (search-forward "Followers 34")
-      (should (eq (get-text-property (match-beginning 0) 'chirp-profile-list-kind)
-                  'followers))
-      (should (equal (get-text-property (match-beginning 0) 'chirp-profile-list-handle)
-                     "alice")))))
+      (should (appkit-ui-action-p (appkit-ui-action-at (match-beginning 0)))))))
 
 (ert-deftest chirp-render-insert-user-summary-adds-follow-action-region ()
   "Profile summaries should expose a clickable follow-state action."
@@ -2107,8 +2101,8 @@
           (chirp-render-insert-user-summary user)))
       (goto-char (point-min))
       (search-forward "Follow back")
-      (should (eq (get-text-property (match-beginning 0) 'chirp-profile-action)
-                  'toggle-follow)))))
+      (should (eq (appkit-ui-action-at (match-beginning 0))
+                  #'chirp-toggle-follow-user-at-point)))))
 
 (ert-deftest chirp-open-at-point-opens-followers-list-from-profile-summary ()
   "RET on profile follower/following counts should open the matching list."
