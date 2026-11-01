@@ -15,6 +15,8 @@
 (require 'chirp-edit-history)
 
 ;;;###autoload(autoload 'chirp-transient-tweet-operate "chirp" nil t)
+(autoload 'wime-lab-collect "wime-lab-sources" nil t)
+
 (transient-define-prefix chirp-transient-tweet-operate ()
   "Operate on the tweet at point."
   [["Tweet"
@@ -30,6 +32,7 @@
     ("d" "Delete" chirp-delete-at-point)
     ("t" "Translate" chirp-translate-at-point)
     ("y" "Copy fixupx" chirp-copy-fixupx-url-at-point)
+    ("w" "Collect for Wime" wime-lab-collect)
     ("o" "Browser" chirp-browse-at-point)]])
 
 ;;;###autoload(autoload 'chirp-dispatch "chirp" nil t)
