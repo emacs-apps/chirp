@@ -619,8 +619,7 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
               (appkit-chat-timeline-keys)
             (appkit-projection-change-keys change))
           :changed-resources resources))
-       (appkit-chat-timeline-set-frame
-        ""
+       (appkit-chat-timeline-set-footer
         (concat (chirp-dm-render-footer state)
                 (chirp-dm-conversation--reply-context-text state)
                 (when-let* ((text (plist-get state :media-error)))
@@ -678,7 +677,6 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
   (appkit-chat-timeline-ensure
    :printer #'chirp-dm-render-print-event-row
    :anchor-property 'chirp-dm-message-id
-   :header ""
    :footer ""))
 
 (defun chirp-dm-conversation--setup (view)
