@@ -1092,6 +1092,41 @@ block ends in a newline."
                  (eq (char-before) ?\n))
         (delete-char -1)))))
 
+(defun chirp-render--insert-metrics (tweet write-actions-p)
+  "Insert TWEET's metrics row.  WRITE-ACTIONS-P enables its mutation actions."
+  (let ((start (point)))
+    (pcase-let (((map :reply-count :reply-limited-p :retweet-count :retweeted-p
+                      :like-count :liked-p :quote-count :bookmark-count
+                      :bookmarked-p :view-count) tweet))
+      (chirp-render--insert-metric
+       'reply reply-count
+       :action (and write-actions-p (not reply-limited-p) #'chirp-reply-at-point)
+       :help-echo "Reply")
+      (insert "   ")
+      (chirp-render--insert-metric
+       'retweet retweet-count :active retweeted-p
+       :action (and write-actions-p #'chirp-toggle-retweet-at-point)
+       :help-echo "Repost")
+      (insert "   ")
+      (chirp-render--insert-metric
+       'like like-count :active liked-p
+       :action (and write-actions-p #'chirp-toggle-like-at-point)
+       :help-echo "Like")
+      (insert "   ")
+      (chirp-render--insert-metric
+       'quote quote-count
+       :action (and write-actions-p #'chirp-quote-at-point)
+       :help-echo "Quote")
+      (insert "   ")
+      (chirp-render--insert-metric
+       'bookmark bookmark-count :active bookmarked-p
+       :action (and write-actions-p #'chirp-toggle-bookmark-at-point)
+       :help-echo "Bookmark")
+      (insert "   ")
+      (chirp-render--insert-metric 'view view-count))
+    (insert "\n")
+    (put-text-property start (point) 'rear-nonsticky t)))
+
 (cl-defun chirp-render--insert-tweet-body
     (tweet &key prefix prefix-face reply-context-prefix show-reply-context
            article-mode media-presentation (write-actions-p t)
@@ -1103,13 +1138,13 @@ PREFIX for the reply context.  SHOW-REPLY-CONTEXT controls the inline reply
 target.  ARTICLE-MODE selects full article rendering when it is `full'.
 MEDIA-PRESENTATION selects `track' or the default cover grid.  WRITE-ACTIONS-P
 controls mutation actions.  TRAILING-NEWLINES controls the additional
-newlines after the metrics row."
+newlines after the metrics row of a top-level post; a quoted post ends at its
+nested quote instead."
   (let* ((article-mode
           (if (or (eq article-mode 'full)
                   (chirp--tweet-expanded-p tweet))
               'full
-            article-mode))
-         (meta-start nil))
+            article-mode)))
     (when-let* ((handle (and show-reply-context
                             (map-elt tweet :reply-to-handle)))
                 (start (point)))
@@ -1143,43 +1178,20 @@ newlines after the metrics row."
     (chirp-render-insert-media-strip
      (plist-get tweet :media) prefix prefix-face media-presentation)
     (chirp-render--insert-poll tweet prefix write-actions-p)
-    (chirp-render--insert-quoted-tweet
-     tweet prefix prefix-face write-actions-p)
-    (chirp-render--insert-reply-control tweet prefix prefix-face)
-    (setq meta-start (point))
-    (pcase-let (((map :reply-count :reply-limited-p :retweet-count :retweeted-p
-                      :like-count :liked-p :quote-count :bookmark-count
-                      :bookmarked-p :view-count) tweet))
-      (chirp-render--insert-metric
-       'reply reply-count
-       :action (and write-actions-p (not reply-limited-p) #'chirp-reply-at-point)
-       :help-echo "Reply")
-      (insert "   ")
-      (chirp-render--insert-metric
-       'retweet retweet-count :active retweeted-p
-       :action (and write-actions-p #'chirp-toggle-retweet-at-point)
-       :help-echo "Repost")
-      (insert "   ")
-      (chirp-render--insert-metric
-       'like like-count :active liked-p
-       :action (and write-actions-p #'chirp-toggle-like-at-point)
-       :help-echo "Like")
-      (insert "   ")
-      (chirp-render--insert-metric
-       'quote quote-count
-       :action (and write-actions-p #'chirp-quote-at-point)
-       :help-echo "Quote")
-      (insert "   ")
-      (chirp-render--insert-metric
-       'bookmark bookmark-count :active bookmarked-p
-       :action (and write-actions-p #'chirp-toggle-bookmark-at-point)
-       :help-echo "Bookmark")
-      (insert "   ")
-      (chirp-render--insert-metric 'view view-count))
-    (insert "\n")
-    (dotimes (_ trailing-newlines)
-      (insert "\n"))
-    (put-text-property meta-start (point) 'rear-nonsticky t)))
+    (if (> chirp-render--quoted-tweet-depth 0)
+        ;; A quoted post's footer precedes the post it quotes, so a quote
+        ;; chain never piles every footer below its innermost card.
+        (progn
+          (chirp-render--insert-reply-control tweet prefix prefix-face)
+          (chirp-render--insert-metrics tweet write-actions-p)
+          (chirp-render--insert-quoted-tweet
+           tweet prefix prefix-face write-actions-p))
+      (chirp-render--insert-quoted-tweet
+       tweet prefix prefix-face write-actions-p)
+      (chirp-render--insert-reply-control tweet prefix prefix-face)
+      (chirp-render--insert-metrics tweet write-actions-p)
+      (insert (propertize (make-string trailing-newlines ?\n)
+                          'rear-nonsticky t)))))
 
 (cl-defun chirp-render--insert-tweet
     (tweet &key prefix prefix-face show-reply-context article-mode reply-parent
