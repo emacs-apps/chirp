@@ -10,6 +10,13 @@
 (require 'appkit-ui)
 (require 'chirp)
 
+(defun chirp-test--attachment (file)
+  "Return an attachment for FILE, which need not exist."
+  (appkit-attachment--create
+   :file file :name (file-name-nondirectory file)
+   :media-type (if (string-suffix-p ".mp4" file) "video/mp4" "image/png")
+   :size 3))
+
 (defun chirp-test--make-compose-buffer (body)
   "Return a cons of compose and source buffers seeded with BODY."
   (let ((compose (generate-new-buffer " *chirp-compose-test*"))
@@ -19,7 +26,6 @@
       (setq-local chirp-compose-kind 'post)
       (setq-local chirp-compose-source-buffer source)
       (setq-local chirp-compose-app (chirp-app))
-      (setq-local chirp-compose-temp-attachments nil)
       (setq-local chirp-compose-draft-id nil)
       (setq-local chirp-compose-scheduled-id nil)
       (setq-local chirp-compose-execute-at nil)
@@ -110,7 +116,7 @@ Return a list of (compose source foreign)."
     (unwind-protect
         (with-current-buffer compose
           (chirp-compose--set-current-item
-           '(:attachments ("/tmp/photo.png")))
+           (list :attachments (list (chirp-test--attachment "/tmp/photo.png"))))
           (should (string-match-p "Audience: Everyone"
                                   (appkit-chat-compose-display-string)))
           (should (string-match-p "Length: 5/280"
@@ -322,14 +328,14 @@ Return a list of (compose source foreign)."
       (unwind-protect
           (with-current-buffer compose
             (chirp-compose--set-current-item
-             (list :attachments (list (list :path path))))
+             (list :attachments (list (chirp-test--attachment path))))
             (cl-letf (((symbol-function 'read-string)
                        (lambda (_prompt &optional _initial)
                          "a black cat")))
               (chirp-compose-describe-image path))
             (should (string-match-p "Alt: a black cat"
                                     (appkit-chat-compose-display-string)))
-            (should (equal (chirp-compose--attachment-description
+            (should (equal (appkit-attachment-description
                             (car (chirp-compose--item-attachments)))
                            "a black cat")))
         (when (buffer-live-p compose)
@@ -345,14 +351,16 @@ Return a list of (compose source foreign)."
         (with-current-buffer compose
           (chirp-compose--set-current-item
            (list :attachments
-                 (list (list :media-id "2087"
-                             :preview-url
-                             "https://pbs.twimg.com/media/x.jpg"))))
+                 (list (chirp-compose--unsent-attachment
+                        (list :media-id "2087"
+                              :preview-url
+                              "https://pbs.twimg.com/media/x.jpg")))))
           (cl-letf (((symbol-function 'read-string)
                      (lambda (_prompt &optional _initial)
                        "restored cat")))
             (chirp-compose-describe-image "2087"))
-          (let ((attachment (car (chirp-compose--item-attachments))))
+          (let ((attachment (chirp-compose--wire-attachment
+                             (car (chirp-compose--item-attachments)))))
             (should (equal (plist-get attachment :media-id) "2087"))
             (should (equal (plist-get attachment :preview-url)
                            "https://pbs.twimg.com/media/x.jpg"))
@@ -499,39 +507,8 @@ Return a list of (compose source foreign)."
         (when (buffer-live-p source)
           (kill-buffer source))))))
 
-(ert-deftest chirp-compose-send-cleans-temp-files-after-success ()
-  "Temporary attachments should stay alive until the async send finishes."
-  (pcase-let ((`(,compose . ,source)
-               (chirp-test--make-compose-buffer "photo post")))
-    (let* ((temp-file (make-temp-file "chirp-compose-test-" nil ".png"))
-           success-callback)
-      (with-temp-file temp-file
-        (insert "png"))
-      (unwind-protect
-          (progn
-            (with-current-buffer compose
-              (chirp-compose--set-current-item
-               (list :attachments (list temp-file)))
-              (setq-local chirp-compose-temp-attachments (list temp-file)))
-            (cl-letf (((symbol-function 'chirp-backend-compose)
-                       (lambda (&rest draft)
-                         (setq success-callback
-                               (plist-get draft :callback)))))
-              (with-current-buffer compose
-                (chirp-compose-send)))
-            (should (functionp success-callback))
-            (should (file-exists-p temp-file))
-            (funcall success-callback nil nil)
-            (should-not (file-exists-p temp-file)))
-        (when (buffer-live-p compose)
-          (kill-buffer compose))
-        (when (buffer-live-p source)
-          (kill-buffer source))
-        (when (file-exists-p temp-file)
-          (delete-file temp-file))))))
-
 (ert-deftest chirp-compose-send-keeps-draft-after-failure ()
-  "A known send failure should keep the draft and its temporary attachments."
+  "A known send failure should keep the draft and its attachments."
   (pcase-let ((`(,compose . ,source)
                (chirp-test--make-compose-buffer "failed photo post")))
     (let* ((temp-file (make-temp-file "chirp-compose-test-" nil ".png"))
@@ -541,8 +518,7 @@ Return a list of (compose source foreign)."
           (progn
             (with-current-buffer compose
               (chirp-compose--set-current-item
-               (list :attachments (list temp-file)))
-              (setq-local chirp-compose-temp-attachments (list temp-file)))
+               (list :attachments (list (appkit-attachment-from-file temp-file)))))
             (cl-letf (((symbol-function 'chirp-backend-compose)
                        (lambda (&rest draft)
                          (setq error-callback (plist-get draft :errback))))
@@ -557,8 +533,7 @@ Return a list of (compose source foreign)."
                 (should-not (appkit-compose-operation-active-p))
                 (should (eq 'rejected (appkit-compose-outcome)))
                 (should-not buffer-read-only)
-                (should (member temp-file chirp-compose-temp-attachments))
-                (should (file-exists-p temp-file))
+                (should (equal (list temp-file) (chirp-compose--attachment-paths)))
                 (should (equal reported "upload failed")))))
         (when (buffer-live-p compose)
           (kill-buffer compose))
@@ -579,8 +554,7 @@ Return a list of (compose source foreign)."
             (write-region "png" nil temp-file nil 'silent)
             (with-current-buffer compose
               (chirp-compose--set-current-item
-               (list :attachments (list temp-file)))
-              (setq-local chirp-compose-temp-attachments (list temp-file)))
+               (list :attachments (list (appkit-attachment-from-file temp-file)))))
             (cl-letf (((symbol-function 'chirp-x--request)
                        (lambda (_url _method callback &rest _options)
                          (funcall
@@ -601,7 +575,7 @@ Return a list of (compose source foreign)."
               (with-current-buffer compose
                 (should-not (appkit-compose-operation-active-p))
                 (should (eq 'unknown (appkit-compose-outcome)))
-                (should (member temp-file chirp-compose-temp-attachments)))
+                (should (equal (list temp-file) (chirp-compose--attachment-paths))))
               (should (file-exists-p temp-file))
               (should (string-prefix-p "X write outcome is unknown" reported))))
         (chirp-stop)
@@ -744,13 +718,11 @@ Return a list of (compose source foreign)."
         (when (buffer-live-p source)
           (kill-buffer source))))))
 
-(ert-deftest chirp-compose-clipboard-bytes-have-draft-owned-lifetime ()
-  "Clipboard bytes stage privately and are deleted only after removal."
+(ert-deftest chirp-compose-clipboard-bytes-live-as-long-as-the-draft ()
+  "Clipboard bytes stage privately and are deleted with the compose buffer."
   (pcase-let ((`(,compose . ,source)
                (chirp-test--make-compose-buffer "")))
-    (let* ((temp-root (make-temp-file "chirp-compose-dir-" t))
-           (chirp-compose-temporary-directory temp-root)
-           (bytes (unibyte-string 137 80 78 71 13 10 26 10))
+    (let* ((bytes (unibyte-string 137 80 78 71 13 10 26 10))
            pasted-path)
       (unwind-protect
           (cl-letf (((symbol-function 'appkit-media-clipboard-source)
@@ -762,9 +734,6 @@ Return a list of (compose source foreign)."
             (with-current-buffer compose
               (chirp-compose-attach-clipboard)
               (setq pasted-path (car (chirp-compose--attachment-paths)))
-              (should (string-prefix-p (file-name-as-directory temp-root)
-                                       pasted-path))
-              (should (member pasted-path chirp-compose-temp-attachments))
               (should (file-exists-p pasted-path))
               (should-not (appkit-compose-operation-active-p))
               (with-temp-buffer
@@ -772,11 +741,11 @@ Return a list of (compose source foreign)."
                 (insert-file-contents-literally pasted-path)
                 (should (equal (buffer-string) bytes)))
               (chirp-compose-remove-image)
-              (should-not (file-exists-p pasted-path))
-              (should-not chirp-compose-temp-attachments)))
+              (should (file-exists-p pasted-path)))
+            (kill-buffer compose)
+            (should-not (file-exists-p pasted-path)))
         (when (buffer-live-p compose) (kill-buffer compose))
-        (when (buffer-live-p source) (kill-buffer source))
-        (delete-directory temp-root t)))))
+        (when (buffer-live-p source) (kill-buffer source))))))
 
 (ert-deftest chirp-compose-clipboard-files-validate-before-mutating ()
   "Unsupported batches and document prefixes preserve drafts and user files."
@@ -801,7 +770,6 @@ Return a list of (compose source foreign)."
                        (lambda () (list :files (list photo)))))
               (chirp-compose-attach-clipboard)
               (should (equal (chirp-compose--attachment-paths) (list photo)))
-              (should-not chirp-compose-temp-attachments)
               (chirp-compose-remove-image))
             (should (file-exists-p photo))
             (should (file-exists-p document)))
@@ -817,7 +785,6 @@ Return a list of (compose source foreign)."
         (with-current-buffer buffer
           (chirp-compose-mode)
           (setq-local chirp-compose-kind 'post)
-          (setq-local chirp-compose-temp-attachments nil)
           (appkit-chat-compose-setup
            :context-function #'chirp-compose--header-string
            :status-fields-function #'chirp-compose--status-fields
@@ -948,7 +915,6 @@ Return a list of (compose source foreign)."
               (chirp-compose-mode)
               (setq-local chirp-compose-kind 'post)
               (setq-local chirp-compose-source-buffer source)
-              (setq-local chirp-compose-temp-attachments nil)
               (setq-local chirp-compose-reply-audience 'everyone)
               (appkit-chat-compose-setup
                :context-function #'chirp-compose--header-string
@@ -1001,9 +967,10 @@ Return a list of (compose source foreign)."
                          (funcall callback nil))))
               (with-current-buffer compose
                 (appkit-chat-compose-set-items
-                 '((:text "first" :attachments
-                          ((:media-id "77" :description "cat" :type "photo")))
-                   (:text "second" :attachments nil)))
+                 (list (list :text "first" :attachments
+                             (list (chirp-compose--unsent-attachment
+                                    '(:media-id "77" :description "cat" :type "photo"))))
+                       '(:text "second" :attachments nil)))
                 (chirp-compose-save)
                 ;; Simulate another in-memory edit while the request is pending.
                 (let ((inhibit-read-only t))

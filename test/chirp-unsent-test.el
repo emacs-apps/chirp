@@ -226,9 +226,8 @@ When MEDIA-ID is set, include that media ID and optional PREVIEW-URL."
                                (list (list :media-id "2087634413287100416"
                                            :preview-url
                                            "https://pbs.twimg.com/media/x.jpg"))))))
-            (should (equal (plist-get
-                            (car (chirp-compose--item-attachments))
-                            :media-id)
+            (should (equal (appkit-attachment-remote
+                            (car (chirp-compose--item-attachments)))
                            "2087634413287100416"))
             (let ((draft (chirp-compose--draft)))
               (should (equal (plist-get

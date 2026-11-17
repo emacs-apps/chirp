@@ -12,6 +12,7 @@
 (require 'cl-lib)
 (require 'map)
 (require 'subr-x)
+(require 'appkit-attachment)
 (require 'appkit-core)
 (require 'appkit-compose)
 (require 'appkit-chat-compose)
@@ -25,15 +26,6 @@
 (require 'chirp-translate)
 
 ;;; Options
-
-(defcustom chirp-compose-temporary-directory
-  (expand-file-name "compose/" (locate-user-emacs-file "chirp/"))
-  "Directory used for temporary clipboard image attachments.
-
-Files created here are owned by the compose buffer and removed when the draft is
-cancelled, the attachment is removed, or the send completes."
-  :type 'directory
-  :group 'chirp)
 
 (defcustom chirp-compose-attach-commands
   '(("media" . chirp-compose-attach-file)
@@ -68,12 +60,6 @@ Public posts support images and MP4 videos, not generic documents."
 
 (defvar-local chirp-compose-source-buffer nil
   "Source Chirp view buffer that opened the current compose buffer.")
-
-(defvar-local chirp-compose-temp-attachments nil
-  "Temporary attachment paths owned by the current compose buffer.")
-
-(defvar-local chirp-compose--submit-temps nil
-  "Temporary attachment paths held by the current submission.")
 
 (defvar-local chirp-compose-draft-id nil
   "X server draft ID for the current compose buffer, or nil.")
@@ -293,13 +279,6 @@ Public posts support images and MP4 videos, not generic documents."
               (query (buffer-substring-no-properties start end))
               (cached (assoc-string query chirp-compose--mention-cache t)))
     (list start end (cdr cached) :exclusive 'no)))
-
-(defun chirp-compose--temp-directory ()
-  "Return the directory used for temporary compose attachments."
-  (let ((dir (file-name-as-directory
-              (expand-file-name chirp-compose-temporary-directory))))
-    (make-directory dir t)
-    dir))
 
 ;;; Actions
 
@@ -679,50 +658,35 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
        :identity (list 'compose (current-buffer))
        :buffer (current-buffer))))
 
-(defun chirp-compose--release-temps ()
-  "Give the temporary files held by a submission back to the draft."
-  (setq-local chirp-compose-temp-attachments
-              (append chirp-compose--submit-temps
-                      chirp-compose-temp-attachments)
-              chirp-compose--submit-temps nil))
-
 (defun chirp-compose--resume-editing (owner &optional outcome)
   "Retire OWNER and return its draft to editing, recording OUTCOME when given.
-The temporary files the submission held go back to the draft.  Return non-nil
-when OWNER was current."
+Return non-nil when OWNER was current."
   (when (if outcome
             (appkit-compose-operation-settle
              owner outcome (and (eq outcome 'unknown) "Outcome unknown"))
           (appkit-compose-operation-finish owner))
-    (chirp-compose--release-temps)
     (appkit-chat-compose-refresh)
     t))
 
 (defun chirp-compose--abort (buffer owner)
   "Stop the requests of OWNER's submission in BUFFER.
-A submission that is still current returns to editing with an unknown outcome;
-one already retired by teardown loses the temporary files it held."
+A submission that is still current returns to editing with an unknown outcome."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (when-let* ((view (appkit-current-surface))
                   ((appkit-surface-live-p view)))
         (ignore-errors (appkit-cancel-handles view)))
-      (unless (chirp-compose--resume-editing owner 'unknown)
-        (chirp-compose--cleanup-files chirp-compose--submit-temps)
-        (setq-local chirp-compose--submit-temps nil)))))
+      (chirp-compose--resume-editing owner 'unknown))))
 
 (defun chirp-compose--begin-submission (label repeat-prompt)
   "Begin a submission showing LABEL and return its owner.
-REPEAT-PROMPT is asked when the previous write has an unknown outcome.  The
-submission holds the draft's temporary files until it is retired."
+REPEAT-PROMPT is asked when the previous write has an unknown outcome."
   (chirp-compose--owner)
   (let* ((buffer (current-buffer))
          (owner (appkit-compose-submission-begin
                  :label label :repeat-prompt repeat-prompt)))
     (appkit-compose-operation-update
      owner :cancel-function (lambda () (chirp-compose--abort buffer owner)))
-    (setq-local chirp-compose--submit-temps chirp-compose-temp-attachments
-                chirp-compose-temp-attachments nil)
     (appkit-chat-compose-refresh)
     owner))
 
@@ -826,22 +790,10 @@ When called interactively, prompt for AUDIENCE."
   "Return attachments for ITEM or the current compose item."
   (plist-get (or item (chirp-compose--current-item)) :attachments))
 
-(defun chirp-compose--attachment-path (attachment)
-  "Return the local file path stored in ATTACHMENT, or nil."
-  (if (stringp attachment)
-      attachment
-    (plist-get attachment :path)))
-
-(defun chirp-compose--attachment-media-id (attachment)
-  "Return the stored X media ID in ATTACHMENT, or nil."
-  (and (listp attachment)
-       (plist-get attachment :media-id)))
-
 (defun chirp-compose--attachment-choice (attachment)
-  "Return the `completing-read' identity for ATTACHMENT."
-  (or (chirp-compose--attachment-path attachment)
-      (chirp-compose--attachment-media-id attachment)
-      (and (stringp attachment) attachment)))
+  "Return the `completing-read' identity of ATTACHMENT: its file or media ID."
+  (or (appkit-attachment-file attachment)
+      (appkit-attachment-remote attachment)))
 
 (defun chirp-compose--media-label ()
   "Return the status-field value for the current item's attachments."
@@ -852,20 +804,11 @@ When called interactively, prompt for AUDIENCE."
 
 (defun chirp-compose--attachment-label (attachment)
   "Return the attachment-row label for ATTACHMENT."
-  (if-let* ((path (chirp-compose--attachment-path attachment)))
-      (abbreviate-file-name path)
-    (if-let* ((media-id (chirp-compose--attachment-media-id attachment)))
-        (format "%s %s"
-                (if (chirp-compose--video-attachment-p attachment)
-                    "Video"
-                  "Image")
-                media-id)
-      "[media]")))
-
-(defun chirp-compose--attachment-description (attachment)
-  "Return the alt text stored in ATTACHMENT, or nil."
-  (and (listp attachment)
-       (plist-get attachment :description)))
+  (if-let* ((file (appkit-attachment-file attachment)))
+      (abbreviate-file-name file)
+    (format "%s %s"
+            (if (chirp-compose--video-attachment-p attachment) "Video" "Image")
+            (appkit-attachment-remote attachment))))
 
 (defun chirp-compose--attachment-paths (&optional item)
   "Return attachment identities for ITEM or the current compose item."
@@ -894,8 +837,8 @@ When called interactively, prompt for AUDIENCE."
 
 (defun chirp-compose--attachment-preview (attachment)
   "Return an image descriptor for ATTACHMENT, prefetching if needed."
-  (or (when-let* ((url (and (listp attachment)
-                            (plist-get attachment :preview-url))))
+  (or (when-let* ((url (plist-get (appkit-attachment-options attachment)
+                                  :preview-url)))
         (or (chirp-compose--preview-image url)
             (progn
               (chirp-compose--prefetch-preview (current-buffer) url)
@@ -944,8 +887,7 @@ When called interactively, prompt for AUDIENCE."
            (lambda (attachment)
              (list :label (chirp-compose--attachment-label attachment)
                    :preview (chirp-compose--attachment-preview attachment)
-                   :description
-                   (chirp-compose--attachment-description attachment)
+                   :description (appkit-attachment-description attachment)
                    :description-label "Alt"
                    :object (chirp-compose--attachment-choice attachment)
                    :action #'chirp-compose-describe-image
@@ -966,91 +908,44 @@ When called interactively, prompt for AUDIENCE."
 
 ;;;; Attachment Input
 
-(defun chirp-compose--video-path-p (path)
-  "Return non-nil when PATH is an MP4 file."
-  (and (stringp path)
-       (equal (downcase (or (file-name-extension path) "")) "mp4")))
-
 (defun chirp-compose--video-attachment-p (attachment)
   "Return non-nil when ATTACHMENT is a video."
-  (or (equal (and (listp attachment) (plist-get attachment :type)) "video")
-      (chirp-compose--video-path-p
-       (chirp-compose--attachment-path attachment))))
+  (or (equal (plist-get (appkit-attachment-options attachment) :type) "video")
+      (equal (appkit-attachment-media-type attachment) "video/mp4")))
 
-(defun chirp-compose--ensure-can-attach (path)
-  "Signal a user error when PATH cannot be added to the current item."
-  (let* ((attachments (chirp-compose--item-attachments))
-         (video-p (chirp-compose--video-path-p path))
-         (has-video (cl-some #'chirp-compose--video-attachment-p attachments)))
-    (cond
-     ((or video-p has-video)
-      (when attachments
-        (user-error "A video cannot be mixed with other attachments")))
-     ((>= (length attachments) 4)
-      (user-error "Up to 4 attached images are supported")))))
+(defun chirp-compose--ensure-can-attach (attachments)
+  "Signal a user error when ATTACHMENTS cannot be added to the current item."
+  (let ((all (append (chirp-compose--item-attachments) attachments)))
+    (unless (= (length all)
+               (length (seq-uniq (mapcar #'chirp-compose--attachment-choice all))))
+      (user-error "Media already attached"))
+    (if (cl-some #'chirp-compose--video-attachment-p all)
+        (when (> (length all) 1)
+          (user-error "A video cannot be mixed with other attachments"))
+      (when (> (length all) 4)
+        (user-error "Up to 4 attached images are supported")))))
 
+(defun chirp-compose--check-media (attachment)
+  "Return local ATTACHMENT once X accepts its format and size."
+  (condition-case err
+      (let* ((type (chirp-x--upload-media-type (appkit-attachment-name attachment)))
+             (limit (chirp-x--upload-size-limit type)))
+        (unless (<= 1 (appkit-attachment-size attachment) limit)
+          (user-error "%s attachments must contain between 1 byte and %s"
+                      type (file-size-human-readable limit))))
+    (error (user-error "%s" (error-message-string err))))
+  attachment)
 
-(defun chirp-compose--drop-temp-attachment (file)
-  "Delete FILE when it is a temporary compose attachment."
-  (when (member file chirp-compose-temp-attachments)
-    (setq-local chirp-compose-temp-attachments
-                (delete file chirp-compose-temp-attachments))
-    (ignore-errors
-      (when (file-exists-p file)
-        (delete-file file)))))
-
-(defun chirp-compose--cleanup-temp-attachments ()
-  "Delete all temporary attachments owned by the current compose buffer."
-  (dolist (file chirp-compose-temp-attachments)
-    (ignore-errors
-      (when (file-exists-p file)
-        (delete-file file))))
-  (setq chirp-compose-temp-attachments nil))
-
-(defun chirp-compose--cleanup-files (files)
-  "Delete every path in FILES, ignoring missing files."
-  (dolist (file files)
-    (ignore-errors
-      (when (file-exists-p file)
-        (delete-file file)))))
-
-(defun chirp-compose--validate-media-file (path)
-  "Return local PATH after validating the public upload's supported format."
-  (let ((file (expand-file-name path)))
-    (unless (and (not (file-remote-p file))
-                 (file-regular-p file) (file-readable-p file))
-      (user-error "Attachment must be a readable local regular file"))
-    (condition-case err
-        (let* ((type (chirp-x--upload-media-type file))
-               (size (file-attribute-size (file-attributes file)))
-               (limit (chirp-x--upload-size-limit type)))
-          (unless (<= 1 size limit)
-            (user-error "%s attachments must contain between 1 byte and %s"
-                        type (file-size-human-readable limit))))
-      (error (user-error "%s" (error-message-string err))))
-    file))
-
-(defun chirp-compose--add-attachment (path &optional temporary)
-  "Attach PATH to the current draft.
-
-When TEMPORARY is non-nil, PATH is owned by the current compose buffer."
-  (let ((file (chirp-compose--validate-media-file path)))
-    (chirp-compose--ensure-can-attach file)
-    (let ((item (or (chirp-compose--current-item)
-                    (user-error "No compose item at point")))
-          (attachments (chirp-compose--item-attachments)))
-      (when (member file (chirp-compose--attachment-paths item))
-        (user-error "Media already attached"))
-      (chirp-compose--set-current-item
-       (plist-put (copy-sequence item) :attachments
-                  (append attachments
-                          (list (append (list :path file)
-                                        (when (chirp-compose--video-path-p file)
-                                          (list :type "video")))))))
-      (when temporary
-        (setq-local chirp-compose-temp-attachments
-                    (append chirp-compose-temp-attachments (list file))))
-      file)))
+(defun chirp-compose--add-attachments (attachments)
+  "Append local ATTACHMENTS to the current draft item, all or none."
+  (mapc #'chirp-compose--check-media attachments)
+  (chirp-compose--ensure-can-attach attachments)
+  (let ((item (or (chirp-compose--current-item)
+                  (user-error "No compose item at point"))))
+    (chirp-compose--set-current-item
+     (plist-put (copy-sequence item) :attachments
+                (append (chirp-compose--item-attachments item) attachments)))
+    attachments))
 
 (defun chirp-compose--reject-document-prefix (prefix)
   "Reject PREFIX because public posts have no document attachment kind."
@@ -1068,8 +963,9 @@ When TEMPORARY is non-nil, PATH is owned by the current compose buffer."
   (chirp-compose--ensure-idle)
   (chirp-compose--reject-document-prefix prefix)
   (message "Attached %s"
-           (file-name-nondirectory
-            (chirp-compose--add-attachment path))))
+           (appkit-attachment-name
+            (car (chirp-compose--add-attachments
+                  (list (appkit-attachment-from-file path)))))))
 
 (defun chirp-compose-attach (action)
   "Choose extensible attachment ACTION without submitting the draft."
@@ -1086,54 +982,13 @@ When TEMPORARY is non-nil, PATH is owned by the current compose buffer."
       (user-error "Invalid attachment action: %s" action))
     (call-interactively command)))
 
-(defun chirp-compose--validate-clipboard-files (files)
-  "Validate all FILES against the current draft before staging any of them."
-  (let* ((existing (chirp-compose--attachment-paths))
-         (paths (mapcar #'chirp-compose--validate-media-file files))
-         (all (append existing paths)))
-    (unless (= (length all) (length (delete-dups (copy-sequence all))))
-      (user-error "Media already attached"))
-    (if (cl-some #'chirp-compose--video-path-p all)
-        (when (> (length all) 1)
-          (user-error "A video cannot be mixed with other attachments"))
-      (when (> (length all) 4)
-        (user-error "Up to 4 attached images are supported")))
-    paths))
-
 (defun chirp-compose-attach-clipboard (&optional prefix)
   "Stage clipboard local files or image bytes without sending.
 PREFIX cannot force a document because public posts do not support documents."
   (interactive "P")
   (chirp-compose--ensure-idle)
   (chirp-compose--reject-document-prefix prefix)
-  (let ((source (appkit-media-clipboard-source)))
-    (if-let* ((files (plist-get source :files)))
-        (let ((paths (chirp-compose--validate-clipboard-files files)))
-          (dolist (path paths)
-            (chirp-compose--add-attachment path)))
-      (let* ((suffix (plist-get source :suffix))
-             (data (plist-get source :data))
-             (file nil)
-             (attached nil))
-        (unless (and data suffix)
-          (user-error "Clipboard contains no supported local files or image"))
-        (chirp-compose--validate-clipboard-files nil)
-        (chirp-compose--ensure-can-attach (concat "clipboard" suffix))
-        (condition-case err
-            (chirp-x--upload-media-type (concat "clipboard" suffix))
-          (error (user-error "%s" (error-message-string err))))
-        (unwind-protect
-            (progn
-              (setq file (make-temp-file
-                          (expand-file-name "chirp-compose-"
-                                            (chirp-compose--temp-directory))
-                          nil suffix))
-              (let ((coding-system-for-write 'binary))
-                (write-region data nil file nil 'silent))
-              (chirp-compose--add-attachment file t)
-              (setq attached t))
-          (unless attached
-            (when file (ignore-errors (delete-file file)))))))))
+  (chirp-compose--add-attachments (appkit-attachment-clipboard)))
 
 (defun chirp-compose-remove-image ()
   "Remove one image attachment from the current draft."
@@ -1160,7 +1015,6 @@ PREFIX cannot force a document because public posts do not support documents."
                      (equal (chirp-compose--attachment-choice attachment)
                             choice))
                    attachments)))
-      (chirp-compose--drop-temp-attachment choice)
       (message "Removed %s"
                (if (and (stringp choice)
                         (file-name-absolute-p choice))
@@ -1193,8 +1047,7 @@ When PATH is nil, prompt for one attached image."
                      attachments))
            (text (string-trim
                   (read-string "Alt text: "
-                               (or (chirp-compose--attachment-description
-                                    current)
+                               (or (appkit-attachment-description current)
                                    "")))))
       (when (> (length text) chirp-x-media-alt-text-limit)
         (user-error "Alt text cannot exceed %d characters"
@@ -1203,16 +1056,11 @@ When PATH is nil, prompt for one attached image."
        (plist-put (copy-sequence item) :attachments
                   (mapcar
                    (lambda (attachment)
-                     (if (equal (chirp-compose--attachment-choice attachment)
-                                path)
-                         (let ((updated
-                                (copy-sequence
-                                 (if (listp attachment)
-                                     attachment
-                                   (list :path attachment)))))
-                           (plist-put
-                            updated :description
-                            (and (not (string-empty-p text)) text)))
+                     (if (eq attachment current)
+                         (let ((updated (copy-sequence attachment)))
+                           (setf (appkit-attachment-description updated)
+                                 (and (not (string-empty-p text)) text))
+                           updated)
                        attachment))
                    attachments)))
       (message (if (string-empty-p text)
@@ -1234,8 +1082,39 @@ When PATH is nil, prompt for one attached image."
          (user-error "Text cannot be empty"))
        (list :text text
              :attachments
-             (copy-sequence (plist-get item :attachments)))))
+             (mapcar #'chirp-compose--wire-attachment
+                     (plist-get item :attachments)))))
    (appkit-chat-compose-items)))
+
+(defun chirp-compose--wire-attachment (attachment)
+  "Return the backend descriptor of ATTACHMENT.
+A media ID the server already stores is reused instead of uploading the file."
+  (let ((options (appkit-attachment-options attachment)))
+    (append
+     (if-let* ((media-id (appkit-attachment-remote attachment)))
+         (list :media-id media-id)
+       (list :path (appkit-attachment-file attachment)))
+     (list :description (appkit-attachment-description attachment))
+     (when-let* ((type (plist-get options :type))) (list :type type))
+     (when-let* ((url (plist-get options :preview-url))) (list :preview-url url))
+     (when-let* ((width (appkit-attachment-width attachment)))
+       (list :width width :height (appkit-attachment-height attachment))))))
+
+(defun chirp-compose--unsent-attachment (spec)
+  "Return the attachment for media SPEC of a stored unsent post."
+  (pcase-let (((map :media-id :type :preview-url :width :height :description) spec))
+    (let ((attachment
+           (appkit-attachment-from-remote
+            media-id
+            :media-type (pcase type
+                          ("video" "video/mp4")
+                          ("animated_gif" "image/gif")
+                          (_ "image/jpeg"))
+            :width width :height height)))
+      (setf (appkit-attachment-description attachment) description
+            (appkit-attachment-options attachment)
+            (list :type type :preview-url preview-url))
+      attachment)))
 
 (defun chirp-compose--draft ()
   "Return the current compose buffer as a structured backend draft."
@@ -1312,7 +1191,6 @@ When PATH is nil, prompt for one attached image."
   "Settle OWNER as accepted, delete the stored object it consumed, then close.
 SCHEDULED-P retains an edited schedule; only publication consumes schedules."
   (when (appkit-compose-operation-settle owner 'accepted success-message)
-    (chirp-compose--release-temps)
     (let ((buffer (current-buffer))
           (draft-id chirp-compose-draft-id)
           (scheduled-id (and (not scheduled-p) chirp-compose-scheduled-id)))
@@ -1485,8 +1363,7 @@ for a local date and time."
                         (not (eq buffer restore-buffer))
                         restore-buffer)))
       (with-current-buffer buffer
-        (set-buffer-modified-p nil)
-        (chirp-compose--cleanup-temp-attachments))
+        (set-buffer-modified-p nil))
       (when (window-live-p window)
         (let ((other-restore-window
                (and restore
@@ -1559,15 +1436,12 @@ target."
                   chirp-compose-source-model source-model
                   chirp-compose-unsent-source unsent-source
                   chirp-compose-app app)
-      (setq-local chirp-compose-temp-attachments nil)
-      (setq-local chirp-compose--submit-temps nil)
       (setq-local chirp-compose-draft-id nil)
       (setq-local chirp-compose-scheduled-id nil)
       (setq-local chirp-compose-execute-at nil)
       (setq-local chirp-compose-reply-audience
                   (and (memq kind '(post quote)) 'everyone))
       (rename-buffer (chirp-compose--buffer-name) t)
-      (add-hook 'kill-buffer-hook #'chirp-compose--cleanup-temp-attachments nil t)
       (appkit-chat-compose-setup
        :app app
        :context-function #'chirp-compose--header-string
@@ -1595,7 +1469,8 @@ target."
      (mapcar (lambda (item)
                (list :text (or (plist-get item :text) "")
                      :attachments
-                     (copy-sequence (plist-get item :attachments))))
+                     (mapcar #'chirp-compose--unsent-attachment
+                             (plist-get item :attachments))))
              items))
     (goto-char (appkit-chat-compose-body-start-position))))
 
@@ -1627,11 +1502,7 @@ target."
     (user-error "Only a new post draft can drop an extra post"))
   (unless (> (length (appkit-chat-compose-items)) 1)
     (user-error "The draft already has only one post"))
-  (let* ((index (chirp-compose--current-index))
-         (item (nth index (appkit-chat-compose-items))))
-    (dolist (attachment (plist-get item :attachments))
-      (chirp-compose--drop-temp-attachment
-       (chirp-compose--attachment-path attachment)))
+  (let ((index (chirp-compose--current-index)))
     (appkit-chat-compose-drop-item index)
     (message "Removed post %d." (1+ index))))
 
