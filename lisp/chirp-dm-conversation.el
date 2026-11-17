@@ -1308,8 +1308,6 @@ An active send capture retains its files through failure or acknowledgment."
         (setq owner
               (appkit-compose-operation-begin
                (if reply-p 'dm-reply 'dm-send)
-               :generation
-               (appkit-markup-compose-capture-generation capture)
                :label
                (cond
                 ((and reply-p attachments)

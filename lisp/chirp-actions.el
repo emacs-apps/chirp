@@ -731,9 +731,7 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
   "Begin a compose operation of KIND with LABEL at source GENERATION."
   (chirp-compose--owner)
   (let* ((buffer (current-buffer))
-         (owner (appkit-compose-operation-begin kind
-                                                :label label
-                                                :generation generation)))
+         (owner (appkit-compose-operation-begin kind :label label)))
     (appkit-compose-operation-update
      owner
      :cancel-function (lambda () (chirp-compose--abort-operation buffer owner)))
