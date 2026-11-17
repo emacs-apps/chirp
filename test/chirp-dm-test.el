@@ -887,7 +887,7 @@
                     ((draft (appkit-chatbuf-input-string))
                      (object
                       (get-text-property 0
-                                         appkit-chatbuf-input-object-property
+                                         appkit-input-object-property
                                          draft)))
                   (should (string-match-p "\\[audio\\]" draft))
                   (should
@@ -900,7 +900,7 @@
                  (eq
                   (plist-get
                    (get-text-property 0
-                                      appkit-chatbuf-input-object-property
+                                      appkit-input-object-property
                                       (appkit-chatbuf-input-string))
                    :attachment-kind)
                   'audio))

@@ -1184,12 +1184,12 @@ An active send capture retains its files through failure or acknowledgment."
           retained)
       (while (< position (length input))
         (let ((object (get-text-property
-                       position appkit-chatbuf-input-object-property input)))
+                       position appkit-input-object-property input)))
           (when (chirp-dm-conversation--attachment-object-p object)
             (push (plist-get object :path) retained)))
         (setq position
               (next-single-property-change
-               position appkit-chatbuf-input-object-property
+               position appkit-input-object-property
                input (length input))))
       (setq chirp-dm-conversation--temporary-attachments
             (cl-delete-if
