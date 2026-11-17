@@ -13,6 +13,7 @@
 (require 'map)
 (require 'seq)
 (require 'subr-x)
+(require 'appkit-attachment)
 (require 'appkit-core)
 (require 'appkit-compose)
 (require 'appkit-chatbuf)
@@ -71,9 +72,6 @@ Set this to nil to disable automatic pagination.  Manual loading with
 
 (defvar chirp-dm-conversation--next-instance 0
   "Monotonic identity source for fresh direct-message views.")
-
-(defvar-local chirp-dm-conversation--temporary-attachments nil
-  "Private clipboard paths owned by this draft and its active send capture.")
 
 ;;; Constants
 
@@ -791,7 +789,6 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
                  (unless (string-empty-p (string-trim detail))
                    (appkit-chatbuf-input-history-push detail))
                  (appkit-chatbuf-input-set-text "")
-                 (chirp-dm-conversation--prune-temporary-attachments)
                  (when (nth 6 message) (appkit-chatbuf-aux-reset)))))
             ('reaction-start
              (puthash (plist-get value :key) value
@@ -1018,72 +1015,31 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
 
 ;;;; Commands
 
-(defconst chirp-dm-conversation--attachment-object-kind 'dm-attachment
-  "Structured composer object kind for one local XChat attachment.")
-
 (defconst chirp-dm-conversation--attachment-kinds
   '(photo video audio file gif)
   "Supported typed XChat composer attachment kinds.")
 
-(defun chirp-dm-conversation--attachment-object-p (value)
-  "Return non-nil when VALUE is a typed local XChat attachment object."
-  (and (listp value)
-       (map-let (:kind :attachment-kind :path) value
-         (and (eq kind chirp-dm-conversation--attachment-object-kind)
-              (memq attachment-kind chirp-dm-conversation--attachment-kinds)
-              (stringp path)))))
+(defun chirp-dm-conversation--attachment-kind (attachment)
+  "Return the XChat kind ATTACHMENT is sent as."
+  (plist-get (appkit-attachment-options attachment) :attachment-kind))
 
 (defun chirp-dm-conversation--classify-compose-object (value _text)
   "Classify structured compose VALUE for XChat output."
-  (if (chirp-dm-conversation--attachment-object-p value)
+  (if (appkit-attachment-p value)
       '(side-channel . attachments)
     '(reject . unsupported-xchat-compose-object)))
 
 (defun chirp-dm-conversation--capture-attachments (capture)
-  "Return ordered typed attachment objects frozen in CAPTURE."
-  (let* ((parse-result
-          (appkit-markup-compose-capture-parse-result capture))
-         (occurrences
-          (alist-get
-           'attachments
-           (appkit-markup-parse-result-side-channels parse-result))))
-    (mapcar
-     (lambda (occurrence)
-       (let ((value
-              (copy-tree
-               (appkit-markup-object-occurrence-value occurrence))))
-         (unless (chirp-dm-conversation--attachment-object-p value)
-           (error "XChat composer captured an invalid attachment"))
-         value))
-     occurrences)))
-
-(defun chirp-dm-conversation--attachment-display-text (attachment)
-  "Return typed composer preview text for ATTACHMENT."
-  (pcase-let* (((map (:attachment-kind kind) :path :filename) attachment)
-               (filename (or filename (file-name-nondirectory path)))
-         (image-p (memq kind '(photo gif)))
-         (image
-          (and image-p
-               (appkit-media-file-present-p path)
-               (appkit-media-one-line-preview-image-from-file path)))
-         (preview
-          (and image
-               (appkit-media-one-line-image-display-string image "[image]")))
-         (size
-          (and (appkit-media-file-present-p path)
-               (file-size-human-readable
-                (file-attribute-size (file-attributes path)))))
-         (label
-          (pcase kind
-            ('photo "[photo]")
-            ('gif "[GIF]")
-            ('video "[video]")
-            ('audio "[audio]")
-            (_ "[file]"))))
-    (concat label " "
-            (if preview (concat preview " ") "")
-            (propertize filename 'help-echo path)
-            (if size (format " (%s)" size) ""))))
+  "Return the backend descriptors of the attachments frozen in CAPTURE."
+  (mapcar
+   (lambda (occurrence)
+     (let ((attachment (appkit-markup-object-occurrence-value occurrence)))
+       (list :path (appkit-attachment-file attachment)
+             :filename (appkit-attachment-name attachment)
+             :attachment-kind (chirp-dm-conversation--attachment-kind attachment))))
+   (alist-get 'attachments
+              (appkit-markup-parse-result-side-channels
+               (appkit-markup-compose-capture-parse-result capture)))))
 
 (defun chirp-dm-conversation--ensure-attachment-editable ()
   "Reject attachment mutation outside an editable conversation composer."
@@ -1093,22 +1049,20 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
     (user-error "A direct message is already being sent"))
   (barf-if-buffer-read-only))
 
-(defun chirp-dm-conversation--prepare-attachment (file attachment-kind)
-  "Validate local FILE and return an unstaged typed ATTACHMENT-KIND object."
+(defun chirp-dm-conversation--typed-attachment (attachment attachment-kind)
+  "Return ATTACHMENT sent as ATTACHMENT-KIND, once XChat accepts its size."
   (unless (memq attachment-kind chirp-dm-conversation--attachment-kinds)
     (user-error "Unsupported XChat attachment kind: %s" attachment-kind))
-  (let* ((path (expand-file-name file))
-         (attributes (and (not (file-remote-p path))
-                          (file-regular-p path) (file-attributes path)))
-         (size (and attributes (file-attribute-size attributes))))
-    (unless (and attributes (file-readable-p path)
-                 (integerp size) (> size 0)
-                 (<= size (* 50 1024 1024)))
-      (user-error
-       "XChat attachment must be a readable local file between 1 byte and 50 MiB"))
-    (list :kind chirp-dm-conversation--attachment-object-kind
-          :attachment-kind attachment-kind
-          :path path :filename (file-name-nondirectory path))))
+  (unless (<= 1 (appkit-attachment-size attachment) (* 50 1024 1024))
+    (user-error "XChat attachments must be between 1 byte and 50 MiB"))
+  (setf (appkit-attachment-options attachment)
+        (list :attachment-kind attachment-kind))
+  attachment)
+
+(defun chirp-dm-conversation--prepare-attachment (file attachment-kind)
+  "Return local FILE as an unstaged ATTACHMENT-KIND attachment."
+  (chirp-dm-conversation--typed-attachment
+   (appkit-attachment-from-file file) attachment-kind))
 
 (defun chirp-dm-conversation--queue-attachments (objects)
   "Stage all validated OBJECTS, or reject their combined capabilities first."
@@ -1116,7 +1070,10 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
   (let ((all (append
               (chirp-dm-conversation--capture-attachments
                (appkit-markup-compose-capture))
-              objects)))
+              (mapcar (lambda (object)
+                        (list :attachment-kind
+                              (chirp-dm-conversation--attachment-kind object)))
+                      objects))))
     (when (> (length all) 10)
       (user-error "XChat messages support at most 10 attachments"))
     (when (and (> (length all) 1)
@@ -1127,8 +1084,11 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
       (user-error
        "Files and audio must be the only attachment in an XChat message")))
   ;; Prepare every preview before changing the source.
-  (let ((previews (mapcar #'chirp-dm-conversation--attachment-display-text
-                          objects)))
+  (let ((previews
+         (mapcar (lambda (object)
+                   (appkit-attachment-string
+                    object (chirp-dm-conversation--attachment-kind object)))
+                 objects)))
     (goto-char
      (or (appkit-chatbuf-input-logical-end-position) (point-max)))
     (atomic-change-group
@@ -1143,14 +1103,19 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
   (car (chirp-dm-conversation--queue-attachments
         (list (chirp-dm-conversation--prepare-attachment file attachment-kind)))))
 
+(defun chirp-dm-conversation--detected (attachment &optional document)
+  "Type ATTACHMENT by native byte inference, or as a file for DOCUMENT."
+  ;; Validate size before asking the native detector.
+  (chirp-dm-conversation--typed-attachment attachment 'file)
+  (if document
+      attachment
+    (chirp-dm-conversation--typed-attachment
+     attachment
+     (chirp-xchat-native-file-attachment-kind (appkit-attachment-file attachment)))))
+
 (defun chirp-dm-conversation--detected-attachment (file &optional document)
   "Prepare FILE with native byte inference, or force DOCUMENT."
-  ;; Validate local ownership and size before asking the native detector.
-  (let ((object (chirp-dm-conversation--prepare-attachment file 'file)))
-    (unless document
-      (setf (plist-get object :attachment-kind)
-            (chirp-xchat-native-file-attachment-kind (plist-get object :path))))
-    object))
+  (chirp-dm-conversation--detected (appkit-attachment-from-file file) document))
 
 (defun chirp-dm-attach-file (file &optional document)
   "Stage local FILE with native media detection; DOCUMENT forces a file."
@@ -1168,64 +1133,14 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
   (interactive (list (read-file-name "Attach document: " nil nil t)))
   (chirp-dm-conversation--queue-attachment file 'file))
 
-(defun chirp-dm-conversation--cleanup-temporary-attachments ()
-  "Delete this buffer's private paths after Appkit retires the send capture."
-  (dolist (file chirp-dm-conversation--temporary-attachments)
-    (ignore-errors (delete-file file)))
-  (setq chirp-dm-conversation--temporary-attachments nil))
-
-(defun chirp-dm-conversation--prune-temporary-attachments ()
-  "Delete private files no longer referenced by an editable draft.
-An active send capture retains its files through failure or acknowledgment."
-  (when (and chirp-dm-conversation--temporary-attachments
-             (not (appkit-compose-operation-active-p)))
-    (let ((input (or (appkit-chatbuf-input-string) ""))
-          (position 0)
-          retained)
-      (while (< position (length input))
-        (let ((object (get-text-property
-                       position appkit-input-object-property input)))
-          (when (chirp-dm-conversation--attachment-object-p object)
-            (push (plist-get object :path) retained)))
-        (setq position
-              (next-single-property-change
-               position appkit-input-object-property
-               input (length input))))
-      (setq chirp-dm-conversation--temporary-attachments
-            (cl-delete-if
-             (lambda (file)
-               (unless (member file retained)
-                 (ignore-errors (delete-file file))
-                 t))
-             chirp-dm-conversation--temporary-attachments)))))
-
 (defun chirp-dm-attach-clipboard (&optional document)
   "Stage clipboard local files or image bytes; DOCUMENT forces a document."
   (interactive "P")
   (chirp-dm-conversation--ensure-attachment-editable)
-  (let ((source (appkit-media-clipboard-source)))
-    (if-let* ((files (plist-get source :files)))
-        (chirp-dm-conversation--queue-attachments
-         (mapcar (lambda (file)
-                   (chirp-dm-conversation--detected-attachment file document))
-                 files))
-      (let ((data (plist-get source :data))
-            (suffix (plist-get source :suffix))
-            file staged)
-        (unless (and data suffix)
-          (user-error "Clipboard contains no supported local files or image"))
-        (unwind-protect
-            (progn
-              (setq file (make-temp-file "chirp-dm-clipboard-" nil suffix))
-              (set-file-modes file #o600)
-              (let ((coding-system-for-write 'binary))
-                (write-region data nil file nil 'silent))
-              (chirp-dm-conversation--queue-attachments
-               (list (chirp-dm-conversation--detected-attachment file document)))
-              (push file chirp-dm-conversation--temporary-attachments)
-              (setq staged t))
-          (unless staged
-            (when file (ignore-errors (delete-file file)))))))))
+  (chirp-dm-conversation--queue-attachments
+   (mapcar (lambda (attachment)
+             (chirp-dm-conversation--detected attachment document))
+           (appkit-attachment-clipboard))))
 
 (defun chirp-dm-attach-photo (file &optional document)
   "Stage local image FILE as a photo; DOCUMENT forces a file."
@@ -1681,11 +1596,6 @@ With ARG in the composer, insert a newline instead."
   (appkit-markup-compose-setup
    :codecs '(plain)
    :object-classifier #'chirp-dm-conversation--classify-compose-object)
-  (add-hook 'post-command-hook
-            #'chirp-dm-conversation--prune-temporary-attachments nil t)
-  ;; Appkit's existing shutdown hook cancels transport before releasing bytes.
-  (add-hook 'kill-buffer-hook
-            #'chirp-dm-conversation--cleanup-temporary-attachments t t)
   (add-hook 'chirp-dm-conversation--timeline-mode-hook
             #'appkit-evil-normalize-keymaps nil t)
   (appkit-chatbuf-use-timeline-mode #'chirp-dm-conversation--timeline-mode))
