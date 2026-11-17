@@ -73,7 +73,7 @@ Public posts support images and MP4 videos, not generic documents."
   "Temporary attachment paths owned by the current compose buffer.")
 
 (defvar-local chirp-compose--submit-temps nil
-  "Temporary attachment paths held for the current in-flight submit.")
+  "Temporary attachment paths held by the current submission.")
 
 (defvar-local chirp-compose-draft-id nil
   "X server draft ID for the current compose buffer, or nil.")
@@ -88,11 +88,6 @@ Public posts support images and MP4 videos, not generic documents."
   "Reply audience for the current post or quote draft.
 
 `everyone' omits a conversation-control rule.  Replies leave this nil.")
-
-(defvar-local chirp-compose-write-outcome nil
-  "Last uncertain Chirp write outcome, or nil.
-
-Only `unknown' persists because it changes whether repeating a write is safe.")
 
 (defvar-local chirp-compose--mention-cache nil
   "User completion results keyed by query in the current draft.")
@@ -617,8 +612,6 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
   "Exact originating unsent collection reference.")
 (defvar-local chirp-compose-app nil
   "App owning this composer at creation.")
-(defvar-local chirp-compose--accepted-owner nil
-  "Operation whose write was accepted and is now settling cleanup.")
 
 (defun chirp-compose--buffer-name ()
   "Return a compose buffer name for the current draft."
@@ -657,17 +650,6 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
   (when (appkit-compose-operation-active-p)
     (user-error "A draft operation is already in progress")))
 
-(defun chirp-compose--unknown-outcome-p ()
-  "Return non-nil when the current draft has an uncertain write outcome."
-  (eq chirp-compose-write-outcome 'unknown))
-
-(defun chirp-compose--confirm-repeat-after-unknown (prompt)
-  "Confirm PROMPT and resume editing after an unknown write outcome."
-  (when (chirp-compose--unknown-outcome-p)
-    (unless (yes-or-no-p prompt)
-      (user-error "Operation canceled"))
-    (setq-local chirp-compose-write-outcome nil)))
-
 (defun chirp-compose--owner ()
   "Return the generated Surface owning this exact compose buffer."
   (or (appkit-current-surface)
@@ -697,93 +679,97 @@ Adjust COUNT-KEY and display SUCCESS-ON or SUCCESS-OFF for the resulting state."
        :identity (list 'compose (current-buffer))
        :buffer (current-buffer))))
 
-(defun chirp-compose--operation-current-p (buffer owner)
-  "Return non-nil when OWNER still owns compose BUFFER."
-  (and (buffer-live-p buffer)
-       (with-current-buffer buffer
-         (and (derived-mode-p 'chirp-compose-mode)
-              (appkit-compose-operation-current-p owner)))))
+(defun chirp-compose--release-temps ()
+  "Give the temporary files held by a submission back to the draft."
+  (setq-local chirp-compose-temp-attachments
+              (append chirp-compose--submit-temps
+                      chirp-compose-temp-attachments)
+              chirp-compose--submit-temps nil))
 
-(defun chirp-compose--settle-editable (buffer owner temp-attachments outcome)
-  "Settle OWNER in BUFFER and restore TEMP-ATTACHMENTS for OUTCOME."
-  (cond
-   ((not (buffer-live-p buffer))
-    (chirp-compose--cleanup-files temp-attachments)
-    nil)
-   ((with-current-buffer buffer
-      (when (and (chirp-compose--operation-current-p buffer owner)
-                 (not (eq chirp-compose--accepted-owner owner)))
-        (appkit-compose-operation-finish owner)
-        (setq-local chirp-compose-write-outcome
-                    (and (eq outcome 'unknown) 'unknown))
-        (setq-local chirp-compose--submit-temps nil)
-        (setq-local chirp-compose-temp-attachments
-                    (append (copy-sequence temp-attachments)
-                            chirp-compose-temp-attachments))
-        (setq-local buffer-read-only nil)
-        (appkit-chat-compose-refresh)
-        t)))
-   (t nil)))
+(defun chirp-compose--resume-editing (owner &optional outcome)
+  "Retire OWNER and return its draft to editing, recording OUTCOME when given.
+The temporary files the submission held go back to the draft.  Return non-nil
+when OWNER was current."
+  (when (if outcome
+            (appkit-compose-operation-settle
+             owner outcome (and (eq outcome 'unknown) "Outcome unknown"))
+          (appkit-compose-operation-finish owner))
+    (chirp-compose--release-temps)
+    (appkit-chat-compose-refresh)
+    t))
 
-(defun chirp-compose--abort-operation (buffer owner) "Cancel asynchronous work and resources formerly owned by OWNER in BUFFER." (when (buffer-live-p buffer) (with-current-buffer buffer (let ((temp-attachments chirp-compose--submit-temps)) (when-let* ((view (appkit-current-surface)) ((appkit-surface-live-p view))) (ignore-errors (appkit-cancel-handles view))) (cond ((appkit-compose-operation-current-p owner) (chirp-compose--settle-editable buffer owner temp-attachments 'unknown)) ((equal temp-attachments chirp-compose--submit-temps) (setq-local chirp-compose--submit-temps nil) (chirp-compose--cleanup-files temp-attachments)))))))
+(defun chirp-compose--abort (buffer owner)
+  "Stop the requests of OWNER's submission in BUFFER.
+A submission that is still current returns to editing with an unknown outcome;
+one already retired by teardown loses the temporary files it held."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when-let* ((view (appkit-current-surface))
+                  ((appkit-surface-live-p view)))
+        (ignore-errors (appkit-cancel-handles view)))
+      (unless (chirp-compose--resume-editing owner 'unknown)
+        (chirp-compose--cleanup-files chirp-compose--submit-temps)
+        (setq-local chirp-compose--submit-temps nil)))))
 
-(defun chirp-compose--begin-operation (kind label &optional generation)
-  "Begin a compose operation of KIND with LABEL at source GENERATION."
+(defun chirp-compose--begin-submission (label repeat-prompt)
+  "Begin a submission showing LABEL and return its owner.
+REPEAT-PROMPT is asked when the previous write has an unknown outcome.  The
+submission holds the draft's temporary files until it is retired."
   (chirp-compose--owner)
   (let* ((buffer (current-buffer))
-         (owner (appkit-compose-operation-begin kind :label label)))
+         (owner (appkit-compose-submission-begin
+                 :label label :repeat-prompt repeat-prompt)))
     (appkit-compose-operation-update
-     owner
-     :cancel-function (lambda () (chirp-compose--abort-operation buffer owner)))
-    (setq-local buffer-read-only t)
+     owner :cancel-function (lambda () (chirp-compose--abort buffer owner)))
+    (setq-local chirp-compose--submit-temps chirp-compose-temp-attachments
+                chirp-compose-temp-attachments nil)
     (appkit-chat-compose-refresh)
     owner))
 
-(defun chirp-compose--operation-stopped-p (buffer owner)
-  "Return non-nil when OWNER no longer has authority in BUFFER."
-  (or (not (chirp-compose--operation-current-p buffer owner))
-      (with-current-buffer buffer
-        (appkit-compose-operation-cancel-requested-p))))
+(defmacro chirp-compose--submitting (owner label repeat-prompt &rest body)
+  "Run BODY with OWNER bound to a new submission showing LABEL.
+REPEAT-PROMPT is asked when the previous write has an unknown outcome.  When
+BODY signals, the draft returns to editing before the signal propagates."
+  (declare (indent 3) (debug (symbolp form form body)))
+  (let ((condition (make-symbol "condition")))
+    `(let ((,owner (chirp-compose--begin-submission ,label ,repeat-prompt)))
+       (condition-case ,condition
+           (progn ,@body)
+         ((error quit)
+          (chirp-compose--resume-editing ,owner)
+          (signal (car ,condition) (cdr ,condition)))))))
 
 (defun chirp-compose--publish-label ()
   "Return the status label used after media upload finishes."
   (or (appkit-compose-label) "Sending post..."))
 
-(defun chirp-compose--upload-progress (buffer owner event)
-  "Update compose BUFFER operation OWNER from upload EVENT."
-  (when (chirp-compose--operation-current-p buffer owner)
-    (with-current-buffer buffer
-      (pcase-let* (((map :media-type :phase :index :count :progress) event)
-                   (kind (pcase media-type
-                     ("video/mp4" "video")
-                     ("image/gif" "GIF")
-                     (_ "media")))
-             (label
-              (pcase phase
-                ('init (format "Starting %s upload..." kind))
-                ('append
-                 (format "Uploading %s %d/%d" kind
-                         index count))
-                ('finalize (format "Finalizing %s upload..." kind))
-                ('status (format "Processing %s..." kind))
-                ('publish (chirp-compose--publish-label))
-                (_ "Uploading..."))))
-        (appkit-compose-operation-update
-         owner
-         :label label
-         :progress progress)
-        (when-let* ((text (appkit-compose-status-text)))
-          (message "%s" text))
-        (appkit-chat-compose-refresh)))))
+(defun chirp-compose--upload-progress (owner event)
+  "Show upload EVENT as the progress of submission OWNER."
+  (pcase-let* (((map :media-type :phase :index :count :progress) event)
+               (kind (pcase media-type
+                       ("video/mp4" "video")
+                       ("image/gif" "GIF")
+                       (_ "media"))))
+    (appkit-compose-operation-update
+     owner
+     :label (pcase phase
+              ('init (format "Starting %s upload..." kind))
+              ('append (format "Uploading %s %d/%d" kind index count))
+              ('finalize (format "Finalizing %s upload..." kind))
+              ('status (format "Processing %s..." kind))
+              ('publish (chirp-compose--publish-label))
+              (_ "Uploading..."))
+     :progress progress)
+    (when-let* ((text (appkit-compose-status-text)))
+      (message "%s" text))
+    (appkit-chat-compose-refresh)))
 
-(defun chirp-compose--submit-options (buffer owner)
-  "Return backend progress and Appkit owner options for BUFFER and OWNER."
+(defun chirp-compose--submit-options (owner)
+  "Return the backend progress and Appkit owner options of submission OWNER."
   (list :progress
-        (lambda (event)
-          (chirp-compose--upload-progress buffer owner event))
-        :owner
-        (with-current-buffer buffer
-          (chirp-compose--owner))))
+        (appkit-compose-operation-callback
+         owner (lambda (event) (chirp-compose--upload-progress owner event)))
+        :owner (chirp-compose--owner)))
 
 ;;;; Reply Audience
 
@@ -933,11 +919,8 @@ When called interactively, prompt for AUDIENCE."
                      :value (chirp-compose--length-label))
                (list :label "Media"
                      :value (chirp-compose--media-label)))))
-    (cond
-     ((appkit-compose-status-text)
-      (push (list :label "State" :value (appkit-compose-status-text)) fields))
-     ((eq chirp-compose-write-outcome 'unknown)
-      (push (list :label "State" :value "Outcome unknown") fields)))
+    (when-let* ((status (appkit-compose-status-text)))
+      (push (list :label "State" :value status) fields))
     (when (and (eq chirp-compose-kind 'post)
                (> (length (appkit-chat-compose-items)) 1))
       (push (list :label "Posts"
@@ -1023,11 +1006,6 @@ When called interactively, prompt for AUDIENCE."
       (when (file-exists-p file)
         (delete-file file))))
   (setq chirp-compose-temp-attachments nil))
-
-(defun chirp-compose--take-temp-attachments ()
-  "Return temporary attachments and detach them from the current buffer."
-  (prog1 (copy-sequence chirp-compose-temp-attachments)
-    (setq-local chirp-compose-temp-attachments nil)))
 
 (defun chirp-compose--cleanup-files (files)
   "Delete every path in FILES, ignoring missing files."
@@ -1300,36 +1278,28 @@ When PATH is nil, prompt for one attached image."
             (chirp-backend-read-created-tweet
              id deliver #'ignore surface)))))))
 
-(defun chirp-compose--close-after-send
-    (compose-buffer owner source-buffer temp-attachments success-message)
-  "Close only OWNER's COMPOSE-BUFFER after an accepted write."
-  (when (chirp-compose--operation-current-p compose-buffer owner)
-    (with-current-buffer compose-buffer
-      (setq-local chirp-compose--submit-temps nil
-                  chirp-compose-write-outcome nil)
-      (appkit-compose-operation-finish owner))
-    (chirp-compose--cleanup-files temp-attachments)
-    (chirp-compose--close compose-buffer source-buffer)
+(defun chirp-compose--close-after-send (buffer source-buffer success-message)
+  "Close accepted compose BUFFER, restore SOURCE-BUFFER, show SUCCESS-MESSAGE."
+  (when (buffer-live-p buffer)
+    (chirp-compose--close buffer source-buffer)
     (message "%s" success-message)))
 
 (defun chirp-compose--delete-unsent-after-send
-    (kind id compose-buffer owner source-buffer temp-attachments success-message)
-  "Delete consumed KIND ID, retaining OWNER until cleanup settles."
-  (let ((surface (with-current-buffer compose-buffer (appkit-current-surface)))
-        (unsent-source
-         (with-current-buffer compose-buffer chirp-compose-unsent-source)))
+    (kind id buffer source-buffer success-message)
+  "Delete the consumed KIND ID, then close accepted compose BUFFER."
+  (let ((surface (with-current-buffer buffer (appkit-current-surface)))
+        (unsent-source (buffer-local-value 'chirp-compose-unsent-source buffer)))
     (chirp-backend-delete-unsent
      kind id
      (lambda (_payload _envelope)
        (chirp-unsent-apply-result unsent-source kind id)
        (when (appkit-surface-live-p surface)
          (chirp-compose--close-after-send
-          compose-buffer owner source-buffer temp-attachments success-message)))
+          buffer source-buffer success-message)))
      (lambda (error-message)
-       (when (and (appkit-surface-live-p surface)
-                  (chirp-compose--operation-current-p compose-buffer owner))
+       (when (and (appkit-surface-live-p surface) (buffer-live-p buffer))
          (chirp-compose--close-after-send
-          compose-buffer owner source-buffer temp-attachments success-message)
+          buffer source-buffer success-message)
          (chirp-actions-show-error
           (format "%s The X %s was not deleted: %s"
                   success-message
@@ -1338,130 +1308,78 @@ When PATH is nil, prompt for one attached image."
      surface)))
 
 (defun chirp-compose--finish-send
-    (compose-buffer owner source-buffer temp-attachments success-message
-                    &optional scheduled-p)
-  "Settle accepted OWNER, consuming only the appropriate stored object.
+    (owner source-buffer success-message &optional scheduled-p)
+  "Settle OWNER as accepted, delete the stored object it consumed, then close.
 SCHEDULED-P retains an edited schedule; only publication consumes schedules."
-  (when (chirp-compose--operation-current-p compose-buffer owner)
-    (with-current-buffer compose-buffer
-      (let ((draft-id chirp-compose-draft-id)
-            (scheduled-id (and (not scheduled-p) chirp-compose-scheduled-id)))
-        (setq-local chirp-compose--accepted-owner owner
-                    chirp-compose-write-outcome nil)
-        (appkit-compose-operation-update
-         owner :label success-message
-         :cancel-function
-         (lambda ()
-           (if (chirp-compose--operation-current-p compose-buffer owner)
-               (chirp-compose--close-after-send
-                compose-buffer owner source-buffer temp-attachments success-message)
-             (chirp-compose--cleanup-files temp-attachments))))
-        (cond
-         ((or draft-id scheduled-id)
+  (when (appkit-compose-operation-settle owner 'accepted success-message)
+    (chirp-compose--release-temps)
+    (let ((buffer (current-buffer))
+          (draft-id chirp-compose-draft-id)
+          (scheduled-id (and (not scheduled-p) chirp-compose-scheduled-id)))
+      (if (or draft-id scheduled-id)
           (chirp-compose--delete-unsent-after-send
            (if draft-id 'draft 'scheduled) (or draft-id scheduled-id)
-           compose-buffer owner source-buffer temp-attachments success-message))
-         (t
-          (chirp-compose--close-after-send
-           compose-buffer owner source-buffer temp-attachments success-message)))))))
+           buffer source-buffer success-message)
+        (chirp-compose--close-after-send
+         buffer source-buffer success-message)))))
 
-(defun chirp-compose--fail-send
-    (compose-buffer owner temp-attachments message)
-  "Settle OWNER in COMPOSE-BUFFER after write failure MESSAGE."
-  (let ((outcome
-         (if (chirp-actions--unknown-write-outcome-p message)
-             'unknown
-           'rejected)))
-    (when (chirp-compose--settle-editable
-           compose-buffer owner temp-attachments outcome)
-      (chirp-actions-show-error message))))
+(defun chirp-compose--fail-send (owner message)
+  "Return OWNER's draft to editing after write failure MESSAGE."
+  (when (chirp-compose--resume-editing
+         owner
+         (if (chirp-actions--unknown-write-outcome-p message) 'unknown 'rejected))
+    (chirp-actions-show-error message)))
 
 (defun chirp-compose--send-next
-    (compose-buffer owner source-buffer draft items index previous-id
-                    temp-attachments success-message)
-  "Send DRAFT ITEMS from INDEX while OWNER remains current.
+    (owner source-buffer draft items index previous-id success-message)
+  "Send DRAFT ITEMS from INDEX as submission OWNER.
 
-After the first item, reply to PREVIOUS-ID.  COMPOSE-BUFFER owns the chain,
-SOURCE-BUFFER is restored after success, and TEMP-ATTACHMENTS stay reserved
-until the final settlement."
-  (cond
-   ((chirp-compose--operation-stopped-p compose-buffer owner) nil)
-   ((>= index (length items))
-    (chirp-compose--finish-send
-     compose-buffer owner source-buffer temp-attachments success-message))
-   (t
-    (let* ((item (nth index items))
-           (root-p (zerop index))
-           (kind (if root-p (plist-get draft :kind) 'reply))
-           (target-id (if root-p (plist-get draft :target-id) previous-id)))
-      (apply
-       #'chirp-backend-compose
-       :kind kind
-       :text (plist-get item :text)
-       :target-id target-id
-       :attachments (plist-get item :attachments)
-       :reply-audience (and root-p (plist-get draft :reply-audience))
-       :callback
-       (lambda (created-tweet-id envelope)
-         (when (chirp-compose--operation-current-p compose-buffer owner)
-           (with-current-buffer compose-buffer
-             (chirp-compose--publish-result created-tweet-id envelope))
-           (chirp-compose--send-next
-            compose-buffer owner source-buffer draft items (1+ index)
-            created-tweet-id temp-attachments success-message)))
-       :errback
-       (lambda (message)
-         (chirp-compose--fail-send
-          compose-buffer owner temp-attachments message))
-       (chirp-compose--submit-options compose-buffer owner))))))
+After the first item, reply to PREVIOUS-ID.  SOURCE-BUFFER is restored after
+the last one."
+  (if-let* ((item (nth index items)))
+      (let ((root-p (zerop index)))
+        (apply
+         #'chirp-backend-compose
+         :kind (if root-p (plist-get draft :kind) 'reply)
+         :text (plist-get item :text)
+         :target-id (if root-p (plist-get draft :target-id) previous-id)
+         :attachments (plist-get item :attachments)
+         :reply-audience (and root-p (plist-get draft :reply-audience))
+         :callback
+         (appkit-compose-operation-callback
+          owner
+          (lambda (created-tweet-id envelope)
+            (chirp-compose--publish-result created-tweet-id envelope)
+            (chirp-compose--send-next
+             owner source-buffer draft items (1+ index)
+             created-tweet-id success-message)))
+         :errback
+         (appkit-compose-operation-callback
+          owner (lambda (message) (chirp-compose--fail-send owner message)))
+         (chirp-compose--submit-options owner)))
+    (chirp-compose--finish-send owner source-buffer success-message)))
 
 (defun chirp-compose-send ()
   "Send the current draft and retain it until the write settles."
   (interactive)
   (chirp-compose--ensure-idle)
-  (chirp-compose--confirm-repeat-after-unknown
-   (concat "Previous send outcome is unknown; "
-           "the post may already exist. Send again? "))
-  (let* ((compose-buffer (current-buffer))
-         (source-buffer chirp-compose-source-buffer)
-         (capture (appkit-compose-capture))
-         (generation (plist-get capture :generation))
-         (draft (plist-get capture :value))
-         (items (plist-get draft :items))
-         (temp-attachments (chirp-compose--take-temp-attachments))
-         (thread-p (> (length items) 1))
-         (success-message
-          (cond
-           (thread-p "Posts sent.")
-           ((eq chirp-compose-kind 'reply) "Reply sent.")
-           ((eq chirp-compose-kind 'quote) "Quote tweet sent.")
-           (t "Post sent.")))
-         (sending-message
-          (cond
-           (thread-p "Sending posts...")
-           ((eq chirp-compose-kind 'reply) "Sending reply...")
-           ((eq chirp-compose-kind 'quote) "Sending quote tweet...")
-           (t "Sending post...")))
-         owner)
-    (setq-local chirp-compose--submit-temps temp-attachments)
-    (condition-case error-data
-        (progn
-          (setq owner
-                (chirp-compose--begin-operation
-                 'submitting sending-message generation))
-          (chirp-compose--send-next
-           compose-buffer owner source-buffer draft items 0 nil
-           temp-attachments success-message)
-          (when (chirp-compose--operation-current-p compose-buffer owner)
-            (message "%s" sending-message)))
-      ((error quit)
-       (if owner
-           (chirp-compose--settle-editable
-            compose-buffer owner temp-attachments 'rejected)
-         (setq-local chirp-compose-temp-attachments
-                     (append temp-attachments
-                             chirp-compose-temp-attachments)))
-       (signal (car error-data) (cdr error-data))))))
+  (pcase-let* ((source-buffer chirp-compose-source-buffer)
+               (draft (plist-get (appkit-compose-capture) :value))
+               (items (plist-get draft :items))
+               (`(,sending . ,sent)
+                (cond
+                 ((cdr items) '("Sending posts..." . "Posts sent."))
+                 ((eq chirp-compose-kind 'reply)
+                  '("Sending reply..." . "Reply sent."))
+                 ((eq chirp-compose-kind 'quote)
+                  '("Sending quote tweet..." . "Quote tweet sent."))
+                 (t '("Sending post..." . "Post sent.")))))
+    (chirp-compose--submitting owner sending
+        (concat "Previous send outcome is unknown; "
+                "the post may already exist. Send again? ")
+      (chirp-compose--send-next owner source-buffer draft items 0 nil sent)
+      (when (appkit-compose-operation-current-p owner)
+        (message "%s" sending)))))
 
 (defun chirp-compose--read-schedule-time ()
   "Read a future local time and return it as Unix seconds."
@@ -1485,48 +1403,31 @@ until the final settlement."
   "Save the current draft on X and keep the compose buffer open."
   (interactive)
   (chirp-compose--ensure-idle)
-  (chirp-compose--confirm-repeat-after-unknown
-   (concat "Previous save outcome is unknown; "
-           "the draft may already exist. Save again? "))
-  (let* ((compose-buffer (current-buffer))
-         (capture (appkit-compose-capture))
-         (generation (plist-get capture :generation))
-         (draft (plist-get capture :value))
-         owner)
-    (condition-case error-data
-        (progn
-          (setq owner
-                (chirp-compose--begin-operation
-                 'saving "Saving draft..." generation))
-          (apply
-           #'chirp-backend-save-draft
-           :kind (plist-get draft :kind)
-           :target-id (plist-get draft :target-id)
-           :items (plist-get draft :items)
-           :draft-id (plist-get draft :draft-id)
-           :callback
-           (lambda (draft-id entry)
-             (when (chirp-compose--operation-current-p compose-buffer owner)
-               (with-current-buffer compose-buffer
-                 (when entry
-                   (chirp-unsent-apply-result
-                    chirp-compose-unsent-source 'draft draft-id entry))
-                 (setq-local chirp-compose-draft-id draft-id
-                             chirp-compose-write-outcome nil
-                             buffer-read-only nil)
-                 (set-buffer-modified-p nil)
-                 (appkit-compose-operation-finish owner)
-                 (appkit-chat-compose-refresh))
-               (message "Draft saved.")))
-           :errback
-           (lambda (message)
-             (chirp-compose--fail-send compose-buffer owner nil message))
-           (chirp-compose--submit-options compose-buffer owner)))
-      ((error quit)
-       (when owner
-         (chirp-compose--settle-editable
-          compose-buffer owner nil 'rejected))
-       (signal (car error-data) (cdr error-data))))))
+  (let ((draft (plist-get (appkit-compose-capture) :value)))
+    (chirp-compose--submitting owner "Saving draft..."
+        (concat "Previous save outcome is unknown; "
+                "the draft may already exist. Save again? ")
+      (apply
+       #'chirp-backend-save-draft
+       :kind (plist-get draft :kind)
+       :target-id (plist-get draft :target-id)
+       :items (plist-get draft :items)
+       :draft-id (plist-get draft :draft-id)
+       :callback
+       (appkit-compose-operation-callback
+        owner
+        (lambda (draft-id entry)
+          (when entry
+            (chirp-unsent-apply-result
+             chirp-compose-unsent-source 'draft draft-id entry))
+          (setq-local chirp-compose-draft-id draft-id)
+          (chirp-compose--resume-editing owner)
+          (set-buffer-modified-p nil)
+          (message "Draft saved.")))
+       :errback
+       (appkit-compose-operation-callback
+        owner (lambda (message) (chirp-compose--fail-send owner message)))
+       (chirp-compose--submit-options owner)))))
 
 (defun chirp-compose-schedule (execute-at)
   "Schedule the current draft for publication at EXECUTE-AT.
@@ -1537,54 +1438,33 @@ for a local date and time."
   (chirp-compose--ensure-idle)
   (unless (and (integerp execute-at) (> execute-at 0))
     (user-error "Schedule time is invalid"))
-  (chirp-compose--confirm-repeat-after-unknown
-   (concat "Previous schedule outcome is unknown; "
-           "the post may already exist. Schedule again? "))
-  (let* ((compose-buffer (current-buffer))
-         (source-buffer chirp-compose-source-buffer)
-         (capture (appkit-compose-capture))
-         (generation (plist-get capture :generation))
-         (draft (plist-get capture :value))
-         (temp-attachments (chirp-compose--take-temp-attachments))
-         owner)
-    (setq-local chirp-compose--submit-temps temp-attachments)
-    (condition-case error-data
-        (progn
-          (setq owner
-                (chirp-compose--begin-operation
-                 'scheduling "Scheduling post..." generation))
-          (apply
-           #'chirp-backend-schedule
-           :kind (plist-get draft :kind)
-           :target-id (plist-get draft :target-id)
-           :items (plist-get draft :items)
-           :scheduled-id chirp-compose-scheduled-id
-           :execute-at execute-at
-           :callback
-           (lambda (scheduled-id entry)
-             (when (chirp-compose--operation-current-p compose-buffer owner)
-               (with-current-buffer compose-buffer
-                 (when entry
-                   (chirp-unsent-apply-result
-                    chirp-compose-unsent-source 'scheduled scheduled-id entry)))
-               (chirp-compose--finish-send
-                compose-buffer owner source-buffer temp-attachments
-                "Post scheduled." t)))
-           :errback
-           (lambda (message)
-             (chirp-compose--fail-send
-              compose-buffer owner temp-attachments message))
-           (chirp-compose--submit-options compose-buffer owner))
-          (when (chirp-compose--operation-current-p compose-buffer owner)
-            (message "Scheduling post...")))
-      ((error quit)
-       (if owner
-           (chirp-compose--settle-editable
-            compose-buffer owner temp-attachments 'rejected)
-         (setq-local chirp-compose-temp-attachments
-                     (append temp-attachments
-                             chirp-compose-temp-attachments)))
-       (signal (car error-data) (cdr error-data))))))
+  (let ((source-buffer chirp-compose-source-buffer)
+        (draft (plist-get (appkit-compose-capture) :value)))
+    (chirp-compose--submitting owner "Scheduling post..."
+        (concat "Previous schedule outcome is unknown; "
+                "the post may already exist. Schedule again? ")
+      (apply
+       #'chirp-backend-schedule
+       :kind (plist-get draft :kind)
+       :target-id (plist-get draft :target-id)
+       :items (plist-get draft :items)
+       :scheduled-id chirp-compose-scheduled-id
+       :execute-at execute-at
+       :callback
+       (appkit-compose-operation-callback
+        owner
+        (lambda (scheduled-id entry)
+          (when entry
+            (chirp-unsent-apply-result
+             chirp-compose-unsent-source 'scheduled scheduled-id entry))
+          (chirp-compose--finish-send
+           owner source-buffer "Post scheduled." t)))
+       :errback
+       (appkit-compose-operation-callback
+        owner (lambda (message) (chirp-compose--fail-send owner message)))
+       (chirp-compose--submit-options owner))
+      (when (appkit-compose-operation-current-p owner)
+        (message "Scheduling post...")))))
 
 ;;; Compose Buffer Lifecycle
 

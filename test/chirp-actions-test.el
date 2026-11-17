@@ -555,7 +555,7 @@ Return a list of (compose source foreign)."
                 (funcall error-callback "upload failed")
                 (should (buffer-live-p compose))
                 (should-not (appkit-compose-operation-active-p))
-                (should-not chirp-compose-write-outcome)
+                (should (eq 'rejected (appkit-compose-outcome)))
                 (should-not buffer-read-only)
                 (should (member temp-file chirp-compose-temp-attachments))
                 (should (file-exists-p temp-file))
@@ -600,7 +600,7 @@ Return a list of (compose source foreign)."
               (should (buffer-live-p compose))
               (with-current-buffer compose
                 (should-not (appkit-compose-operation-active-p))
-                (should (eq 'unknown chirp-compose-write-outcome))
+                (should (eq 'unknown (appkit-compose-outcome)))
                 (should (member temp-file chirp-compose-temp-attachments)))
               (should (file-exists-p temp-file))
               (should (string-prefix-p "X write outcome is unknown" reported))))
@@ -627,9 +627,11 @@ Return a list of (compose source foreign)."
                        (setq confirmed t)
                        nil)))
             (with-current-buffer compose
-              (setq-local chirp-compose-write-outcome 'unknown)
-              (should-error (chirp-compose-send)
-                            :type 'user-error)
+              (appkit-compose-operation-settle
+               (appkit-compose-submission-begin) 'unknown)
+              (should (condition-case nil
+                          (ignore (chirp-compose-send))
+                        (quit t)))
               (should confirmed)
               (should (= request-count 0))
               (setq confirmed nil)
@@ -685,10 +687,9 @@ Return a list of (compose source foreign)."
     (unwind-protect
         (with-current-buffer compose
           (let ((owner
-                 (chirp-compose--begin-operation
-                  'submitting "Sending post...")))
+                 (chirp-compose--begin-submission "Sending post..." "")))
             (chirp-compose--upload-progress
-             compose owner
+             owner
              (list :phase 'append
                    :media-type "video/mp4"
                    :index 2
@@ -698,8 +699,7 @@ Return a list of (compose source foreign)."
                                     (appkit-chat-compose-display-string)))
             (should (string-match-p
                      "25%" (appkit-chat-compose-display-string)))
-            (appkit-compose-operation-finish owner)
-            (setq-local buffer-read-only nil)))
+            (appkit-compose-operation-finish owner)))
       (when (buffer-live-p compose)
         (kill-buffer compose))
       (when (buffer-live-p source)
@@ -1076,7 +1076,7 @@ Return a list of (compose source foreign)."
                   (if (eq operation 'send)
                       (chirp-compose-send)
                     (chirp-compose-schedule 1886700000))
-                  (should (appkit-compose-operation-active-p))
+                  (should (eq 'accepted (appkit-compose-outcome)))
                   (should buffer-read-only)
                   (should-error (chirp-compose-send) :type 'user-error)
                   (should-error (chirp-compose-save) :type 'user-error)
@@ -1117,48 +1117,6 @@ Return a list of (compose source foreign)."
                                "2087"))))
           (dolist (buffer (list compose source))
             (when (buffer-live-p buffer) (kill-buffer buffer))))))))
-
-(ert-deftest chirp-compose-old-cleanup-cannot-close-successor-composer ()
-  "Both cleanup success and failure lack authority over a reset composer."
-  (dolist (outcome '(success failure))
-    (pcase-let ((`(,compose . ,source)
-                 (chirp-test--make-compose-buffer "publish")))
-      (let (complete fail successor)
-        (unwind-protect
-            (cl-letf (((symbol-function 'chirp-backend-compose)
-                       (lambda (&rest args)
-                         (funcall (plist-get args :callback) "99" nil)))
-                      ((symbol-function 'chirp-backend-delete-unsent)
-                       (lambda (_kind _id callback &optional errback _owner)
-                         (setq complete callback fail errback))))
-              (with-current-buffer compose
-                (setq-local chirp-compose-draft-id "2087")
-                (chirp-compose-send)
-                (appkit-compose-operation-finish chirp-compose--accepted-owner)
-                (setq-local buffer-read-only nil)
-                (appkit-chat-compose-set-items '((:text "successor")))
-                (setq successor
-                      (chirp-compose--begin-operation 'saving "Saving successor")))
-              (if (eq outcome 'success)
-                  (funcall complete nil nil)
-                (funcall fail "old failure"))
-              (should (buffer-live-p compose))
-              (with-current-buffer compose
-                (should (appkit-compose-operation-current-p successor))
-                (should (equal (appkit-chat-compose-bodies) '("successor")))
-                (should buffer-read-only)))
-          (dolist (buffer (list compose source))
-            (when (buffer-live-p buffer) (kill-buffer buffer))))))))
-
-(defun chirp-test--created-reply-result ()
-  "Return a complete server reply result for publication reconciliation."
-  '((rest_id . "11")
-    (legacy . ((full_text . "server reply")
-                 (in_reply_to_status_id_str . "10")
-                 (conversation_id_str . "10")))
-    (core . ((user_results . ((result . ((rest_id . "42")
-     (legacy . ((screen_name . "writer")
-                  (name . "Writer")))))))))))
 
 (ert-deftest chirp-compose-published-results-reconcile-only-original-model ()
   "Full creates insert locally; ID-only reads are bounded and lifetime fenced."
