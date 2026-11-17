@@ -994,9 +994,7 @@ Unless KEY-HISTORY-LOADED-P, first fetch missing conversation-key history."
 (defun chirp-dm-conversation--send-current-p (view state owner)
   "Return non-nil when OWNER owns the exact VIEW STATE composer."
   (and (chirp-dm-conversation--current-p view state)
-       (with-current-buffer (appkit-surface-buffer view)
-         (and (bound-and-true-p appkit-compose-session-mode)
-              (appkit-compose-operation-current-p owner)))))
+       (appkit-compose-operation-current-p owner)))
 
 (defun chirp-dm-conversation--settle-send-error (view state owner text)
   "Settle only the owned composer capture with error TEXT."
